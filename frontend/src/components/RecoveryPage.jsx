@@ -6,10 +6,13 @@ import "./RecoveryPage.css";
 export default function RecoveryPage({
   outputDir,
   progress,
+  returnPageLabel,
+  scanActive,
   selectedDrive,
   onBack,
   onNewScan,
   onOpenFolder,
+  onReturnToPrevious,
   onStopRecovery,
 }) {
   const current = progress?.current || 0;
@@ -110,6 +113,15 @@ export default function RecoveryPage({
               >
                 新建扫描
               </button>
+              {scanActive && (
+                <button
+                  className="btn btn-secondary"
+                  onClick={onReturnToPrevious}
+                  type="button"
+                >
+                  {returnPageLabel || "返回当前结果"}
+                </button>
+              )}
               <button className="btn btn-ghost" onClick={onBack} type="button">
                 返回首页
               </button>

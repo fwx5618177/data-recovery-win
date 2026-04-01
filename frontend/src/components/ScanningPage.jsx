@@ -40,14 +40,34 @@ function getConfidenceLabel(score, isValid, validationMsg) {
 
 export default function ScanningPage({
   foundFiles,
+  outputDir,
   progress,
   selectedDrive,
+  onSelectOutputDir,
+  onStartRecovery,
   onStopScan,
+  onViewResults,
 }) {
   const files = Array.isArray(foundFiles) ? foundFiles : [];
   const recentFiles = files.slice(-12).reverse();
   const percent = clampPercent(progress?.percent);
-  const validFiles = files.filter((file) => file.isValid === true).length;
+
+  async function handleQuickRecover(fileID) {
+    if (!fileID) {
+      return;
+    }
+
+    let nextOutputDir = outputDir;
+    if (!nextOutputDir) {
+      nextOutputDir = await onSelectOutputDir?.();
+    }
+
+    if (!nextOutputDir) {
+      return;
+    }
+
+    onStartRecovery?.([fileID], "scanning", nextOutputDir);
+  }
 
   return (
     <div className="scanning-page">
@@ -62,9 +82,18 @@ export default function ScanningPage({
           </p>
         </div>
 
-        <button className="btn btn-danger" onClick={onStopScan} type="button">
-          先看当前结果
-        </button>
+        <div className="scan-hero__actions">
+          <button
+            className="btn btn-secondary"
+            onClick={onViewResults}
+            type="button"
+          >
+            查看当前结果
+          </button>
+          <button className="btn btn-danger" onClick={onStopScan} type="button">
+            停止扫描
+          </button>
+        </div>
       </section>
 
       <div className="scan-layout">
@@ -113,8 +142,8 @@ export default function ScanningPage({
               </strong>
             </div>
             <div className="scan-stat">
-              <span className="scan-stat__label">较可靠文件</span>
-              <strong>{validFiles}</strong>
+              <span className="scan-stat__label">当前预览</span>
+              <strong>{recentFiles.length}</strong>
             </div>
             <div className="scan-stat">
               <span className="scan-stat__label">扫描速度</span>
@@ -131,7 +160,7 @@ export default function ScanningPage({
             <ul>
               <li>不要把任何新文件写回源盘。</li>
               <li>如果是外接盘或移动硬盘，保持连接稳定。</li>
-              <li>如果已经看到重要文件，可以提前停止并先恢复。</li>
+              <li>已经找到的重要文件，现在就可以单独恢复，不必等扫描结束。</li>
             </ul>
           </div>
         </aside>
@@ -141,7 +170,7 @@ export default function ScanningPage({
         <div className="scan-files__header">
           <div>
             <h3>扫描过程中已经找到的文件</h3>
-            <p>这里只是预览，扫描完成后会进入下一步再做恢复选择。</p>
+            <p>这里会持续更新。要恢复某一个文件，可以直接点右侧按钮。</p>
           </div>
           <span className="scan-files__count">{files.length} 个候选文件</span>
         </div>
@@ -192,6 +221,13 @@ export default function ScanningPage({
                         file.validationMsg,
                       )}
                     </span>
+                    <button
+                      className="btn btn-secondary scan-file-row__recover"
+                      onClick={() => handleQuickRecover(file.id)}
+                      type="button"
+                    >
+                      恢复这个文件
+                    </button>
                   </div>
                 </div>
               );

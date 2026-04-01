@@ -1,4 +1,5 @@
 import React, {
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -14,7 +15,6 @@ import {
   buildFallbackScanResult,
   getDriveLabel,
   isCancellationError,
-  mergeRecoveredFile,
   normalizeRecoveryCompletion,
 } from "./recovery-helpers";
 import "./App.css";
@@ -47,6 +47,7 @@ const FLOW_STEPS = [
   { key: "results", label: "筛选文件" },
   { key: "recovery", label: "恢复导出" },
 ];
+const SCAN_FILE_FLUSH_DELAY = 200;
 
 function getFlowState(currentPage, stepKey) {
   const currentIndex = FLOW_STEPS.findIndex((step) => step.key === currentPage);
@@ -116,13 +117,18 @@ function App() {
   const [scanProgress, setScanProgress] = useState(INITIAL_SCAN_PROGRESS);
   const [foundFiles, setFoundFiles] = useState([]);
   const [scanResult, setScanResult] = useState(null);
+  const [scanActive, setScanActive] = useState(false);
 
   const [recoveryProgress, setRecoveryProgress] = useState(
     INITIAL_RECOVERY_PROGRESS,
   );
   const [outputDir, setOutputDir] = useState("");
+  const [recoveryReturnPage, setRecoveryReturnPage] = useState("results");
 
   const foundFilesRef = useRef(foundFiles);
+  const foundFileIndexRef = useRef(new Map());
+  const pendingFoundFilesRef = useRef([]);
+  const pendingFoundFlushRef = useRef(null);
   const scanProgressRef = useRef(scanProgress);
   const stopScanRequestedRef = useRef(false);
 
@@ -133,6 +139,101 @@ function App() {
   useEffect(() => {
     scanProgressRef.current = scanProgress;
   }, [scanProgress]);
+
+  const replaceFoundFiles = useCallback((nextFiles) => {
+    const normalizedFiles = Array.isArray(nextFiles) ? nextFiles : [];
+    const nextIndex = new Map();
+
+    normalizedFiles.forEach((file, index) => {
+      if (file?.id) {
+        nextIndex.set(file.id, index);
+      }
+    });
+
+    foundFilesRef.current = normalizedFiles;
+    foundFileIndexRef.current = nextIndex;
+    pendingFoundFilesRef.current = [];
+
+    if (pendingFoundFlushRef.current) {
+      clearTimeout(pendingFoundFlushRef.current);
+      pendingFoundFlushRef.current = null;
+    }
+
+    startTransition(() => {
+      setFoundFiles(normalizedFiles);
+    });
+  }, []);
+
+  const flushPendingFoundFiles = useCallback(() => {
+    const pendingFiles = pendingFoundFilesRef.current;
+    if (pendingFiles.length === 0) {
+      return;
+    }
+
+    pendingFoundFilesRef.current = [];
+
+    if (pendingFoundFlushRef.current) {
+      clearTimeout(pendingFoundFlushRef.current);
+      pendingFoundFlushRef.current = null;
+    }
+
+    const nextFiles = foundFilesRef.current.slice();
+    const nextIndex = new Map(foundFileIndexRef.current);
+
+    pendingFiles.forEach((file) => {
+      if (!file?.id) {
+        return;
+      }
+
+      const existingIndex = nextIndex.get(file.id);
+      if (existingIndex == null) {
+        nextIndex.set(file.id, nextFiles.length);
+        nextFiles.push(file);
+        return;
+      }
+
+      nextFiles[existingIndex] = {
+        ...nextFiles[existingIndex],
+        ...file,
+      };
+    });
+
+    foundFilesRef.current = nextFiles;
+    foundFileIndexRef.current = nextIndex;
+
+    startTransition(() => {
+      setFoundFiles(nextFiles);
+    });
+  }, []);
+
+  const queueFoundFile = useCallback(
+    (file) => {
+      if (!file?.id) {
+        return;
+      }
+
+      pendingFoundFilesRef.current.push(file);
+      if (pendingFoundFlushRef.current) {
+        return;
+      }
+
+      pendingFoundFlushRef.current = setTimeout(() => {
+        pendingFoundFlushRef.current = null;
+        flushPendingFoundFiles();
+      }, SCAN_FILE_FLUSH_DELAY);
+    },
+    [flushPendingFoundFiles],
+  );
+
+  useEffect(
+    () => () => {
+      if (pendingFoundFlushRef.current) {
+        clearTimeout(pendingFoundFlushRef.current);
+        pendingFoundFlushRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -217,14 +318,24 @@ function App() {
   }, [drives, selectedDrive]);
 
   const showPartialScanResults = useCallback(() => {
+    flushPendingFoundFiles();
     const fallbackResult = buildFallbackScanResult(
       foundFilesRef.current,
       scanProgressRef.current,
     );
 
+    setScanActive(false);
     setScanResult(fallbackResult.files.length > 0 ? fallbackResult : null);
     setCurrentPage(fallbackResult.files.length > 0 ? "results" : "welcome");
-  }, []);
+  }, [flushPendingFoundFiles]);
+
+  const viewCurrentResults = useCallback(() => {
+    flushPendingFoundFiles();
+    setScanResult(
+      buildFallbackScanResult(foundFilesRef.current, scanProgressRef.current),
+    );
+    setCurrentPage("results");
+  }, [flushPendingFoundFiles]);
 
   useEffect(() => {
     if (bridgeState !== "ready" || !wailsRuntime?.EventsOn) {
@@ -241,7 +352,7 @@ function App() {
     const offScanFileFound = wailsRuntime.EventsOn(
       "scan:fileFound",
       (payload) => {
-        setFoundFiles((prev) => mergeRecoveredFile(prev, payload));
+        queueFoundFile(payload);
       },
     );
 
@@ -249,11 +360,13 @@ function App() {
       "scan:completed",
       (payload) => {
         stopScanRequestedRef.current = false;
+        setScanActive(false);
+        flushPendingFoundFiles();
         if (Array.isArray(payload?.files)) {
-          setFoundFiles(payload.files);
+          replaceFoundFiles(payload.files);
         }
         setScanResult(payload);
-        setCurrentPage("results");
+        setCurrentPage((page) => (page === "recovery" ? page : "results"));
       },
     );
 
@@ -264,14 +377,17 @@ function App() {
 
         if (stopScanRequestedRef.current || isCancellationError(message)) {
           stopScanRequestedRef.current = false;
+          setScanActive(false);
 
           if (wailsApp?.GetScanResults) {
             try {
               const latest = await wailsApp.GetScanResults();
               if (Array.isArray(latest?.files) && latest.files.length > 0) {
-                setFoundFiles(latest.files);
+                replaceFoundFiles(latest.files);
                 setScanResult(latest);
-                setCurrentPage("results");
+                setCurrentPage((page) =>
+                  page === "recovery" ? page : "results",
+                );
                 return;
               }
             } catch (error) {
@@ -283,15 +399,18 @@ function App() {
           return;
         }
 
+        setScanActive(false);
         alert(getFriendlyActionError("扫描", message));
-        setCurrentPage("welcome");
+        setCurrentPage((page) => (page === "recovery" ? page : "welcome"));
       },
     );
 
     const offRecoveryProgress = wailsRuntime.EventsOn(
       "recovery:progress",
       (payload) => {
-        setRecoveryProgress((prev) => ({ ...prev, ...payload }));
+        setRecoveryProgress((prev) =>
+          normalizeRecoveryCompletion(payload, prev.total, prev.bytesWritten),
+        );
       },
     );
 
@@ -325,7 +444,15 @@ function App() {
         .filter((handler) => typeof handler === "function")
         .forEach((handler) => handler());
     };
-  }, [bridgeState, showPartialScanResults, wailsApp, wailsRuntime]);
+  }, [
+    bridgeState,
+    flushPendingFoundFiles,
+    queueFoundFile,
+    replaceFoundFiles,
+    showPartialScanResults,
+    wailsApp,
+    wailsRuntime,
+  ]);
 
   const startScan = useCallback(() => {
     if (!selectedDrive) {
@@ -337,19 +464,22 @@ function App() {
     }
 
     stopScanRequestedRef.current = false;
+    setScanActive(true);
     setScanProgress(INITIAL_SCAN_PROGRESS);
-    setFoundFiles([]);
+    replaceFoundFiles([]);
     setScanResult(null);
     setCurrentPage("scanning");
 
     wailsApp.StartScan(selectedDrive.path, DEFAULT_SCAN_MODE).catch((error) => {
+      setScanActive(false);
       alert(getFriendlyActionError("启动扫描", error));
       setCurrentPage("welcome");
     });
-  }, [bridgeState, selectedDrive, wailsApp]);
+  }, [bridgeState, replaceFoundFiles, selectedDrive, wailsApp]);
 
   const stopScan = useCallback(() => {
     stopScanRequestedRef.current = true;
+    setScanActive(false);
     if (bridgeState !== "ready" || !wailsApp?.StopScan) {
       showPartialScanResults();
       return;
@@ -364,7 +494,7 @@ function App() {
   const selectOutputDir = useCallback(async () => {
     if (bridgeState !== "ready" || !wailsApp?.SelectOutputDir) {
       alert("当前没有连接到本地恢复引擎，请从桌面版程序启动。");
-      return;
+      return "";
     }
 
     try {
@@ -372,14 +502,22 @@ function App() {
       if (dir) {
         setOutputDir(dir);
       }
+      return dir || "";
     } catch (error) {
       alert(getFriendlyActionError("选择恢复目录", error));
+      return "";
     }
   }, [bridgeState, wailsApp]);
 
   const startRecovery = useCallback(
-    (fileIDs) => {
-      if (!outputDir || !Array.isArray(fileIDs) || fileIDs.length === 0) {
+    (fileIDs, sourcePage = currentPage, outputDirOverride = outputDir) => {
+      const recoveryOutputDir = outputDirOverride || outputDir;
+
+      if (
+        !recoveryOutputDir ||
+        !Array.isArray(fileIDs) ||
+        fileIDs.length === 0
+      ) {
         return;
       }
       if (bridgeState !== "ready" || !wailsApp?.StartRecovery) {
@@ -387,31 +525,32 @@ function App() {
         return;
       }
 
+      setRecoveryReturnPage(sourcePage === "scanning" ? "scanning" : "results");
       setRecoveryProgress({
         ...INITIAL_RECOVERY_PROGRESS,
         total: fileIDs.length,
       });
       setCurrentPage("recovery");
 
-      wailsApp.StartRecovery(fileIDs, outputDir).catch((error) => {
+      wailsApp.StartRecovery(fileIDs, recoveryOutputDir).catch((error) => {
         alert(getFriendlyActionError("启动恢复", error));
-        setCurrentPage("results");
+        setCurrentPage(sourcePage === "scanning" ? "scanning" : "results");
       });
     },
-    [bridgeState, outputDir, wailsApp],
+    [bridgeState, currentPage, outputDir, wailsApp],
   );
 
   const stopRecovery = useCallback(() => {
     if (bridgeState !== "ready" || !wailsApp?.StopRecovery) {
-      setCurrentPage("results");
+      setCurrentPage(recoveryReturnPage);
       return;
     }
 
     wailsApp.StopRecovery().catch(() => {
-      setCurrentPage("results");
+      setCurrentPage(recoveryReturnPage);
     });
-    setCurrentPage("results");
-  }, [bridgeState, wailsApp]);
+    setCurrentPage(recoveryReturnPage);
+  }, [bridgeState, recoveryReturnPage, wailsApp]);
 
   const openFolder = useCallback(
     (path) => {
@@ -441,7 +580,9 @@ function App() {
       case "scanning":
         return `正在扫描 ${getDriveLabel(selectedDrive)}`;
       case "results":
-        return `已找到 ${scanResult?.files?.length ?? foundFiles.length} 个候选文件`;
+        return scanActive
+          ? `扫描仍在继续，已找到 ${foundFiles.length} 个候选文件`
+          : `已找到 ${scanResult?.files?.length ?? foundFiles.length} 个候选文件`;
       case "recovery":
         return "正在导出恢复文件";
       default:
@@ -450,6 +591,7 @@ function App() {
   }, [
     currentPage,
     bridgeState,
+    scanActive,
     foundFiles.length,
     scanResult?.files?.length,
     selectedDrive,
@@ -531,9 +673,13 @@ function App() {
         {bridgeState === "ready" && currentPage === "scanning" && (
           <ScanningPage
             foundFiles={foundFiles}
+            outputDir={outputDir}
             progress={scanProgress}
             selectedDrive={selectedDrive}
+            onSelectOutputDir={selectOutputDir}
+            onStartRecovery={startRecovery}
             onStopScan={stopScan}
+            onViewResults={viewCurrentResults}
           />
         )}
 
@@ -541,12 +687,18 @@ function App() {
           <ResultsPage
             outputDir={outputDir}
             result={
-              scanResult || buildFallbackScanResult(foundFiles, scanProgress)
+              scanActive
+                ? buildFallbackScanResult(foundFiles, scanProgress)
+                : scanResult ||
+                  buildFallbackScanResult(foundFiles, scanProgress)
             }
+            scanActive={scanActive}
             selectedDrive={selectedDrive}
             onBack={() => setCurrentPage("welcome")}
+            onBackToScan={() => setCurrentPage("scanning")}
             onSelectOutputDir={selectOutputDir}
             onStartRecovery={startRecovery}
+            onStopScan={stopScan}
           />
         )}
 
@@ -554,10 +706,17 @@ function App() {
           <RecoveryPage
             outputDir={outputDir}
             progress={recoveryProgress}
+            returnPageLabel={
+              recoveryReturnPage === "scanning"
+                ? "回到扫描进度"
+                : "回到当前结果"
+            }
+            scanActive={scanActive}
             selectedDrive={selectedDrive}
             onBack={() => setCurrentPage("welcome")}
             onNewScan={() => setCurrentPage("welcome")}
             onOpenFolder={openFolder}
+            onReturnToPrevious={() => setCurrentPage(recoveryReturnPage)}
             onStopRecovery={stopRecovery}
           />
         )}

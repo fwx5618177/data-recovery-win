@@ -53,7 +53,8 @@ function sumFileSizes(files) {
 function getSuggestedFiles(files) {
   let next = files.filter(
     (file) =>
-      file?.isValid === true || recoveryScore(file) >= HIGH_CONFIDENCE_THRESHOLD,
+      file?.isValid === true ||
+      recoveryScore(file) >= HIGH_CONFIDENCE_THRESHOLD,
   );
 
   if (next.length === 0) {
@@ -68,10 +69,13 @@ function getSuggestedFiles(files) {
 export default function ResultsPage({
   outputDir,
   result,
+  scanActive,
   selectedDrive,
   onBack,
+  onBackToScan,
   onSelectOutputDir,
   onStartRecovery,
+  onStopScan,
 }) {
   const [selectedIDs, setSelectedIDs] = useState(() => new Set());
   const [searchQuery, setSearchQuery] = useState("");
@@ -85,7 +89,8 @@ export default function ResultsPage({
   const deferredSearchQuery = useDeferredValue(
     searchQuery.trim().toLowerCase(),
   );
-  const files = result?.files || [];
+  const rawFiles = result?.files || [];
+  const files = useDeferredValue(rawFiles);
 
   useEffect(() => {
     const validIDs = new Set(files.map((file) => file.id));
@@ -101,53 +106,56 @@ export default function ResultsPage({
     });
   }, [files]);
 
-  const suggestedFiles = useMemo(() => getSuggestedFiles(files), [files]);
-  const suggestedIDs = useMemo(
-    () => suggestedFiles.map((file) => file.id),
-    [suggestedFiles],
-  );
-  const allRecoverableIDs = useMemo(
-    () => files.map((file) => file.id),
-    [files],
-  );
-
-  const categoryCounts = useMemo(() => {
-    const counts = { all: files.length };
-    files.forEach((file) => {
-      const category = file?.category || "other";
-      counts[category] = (counts[category] || 0) + 1;
-    });
-    return counts;
-  }, [files]);
-
-  const sourceCounts = useMemo(() => {
-    const counts = { all: files.length };
-    files.forEach((file) => {
-      const source = file?.source || "unknown";
-      counts[source] = (counts[source] || 0) + 1;
-    });
-    return counts;
-  }, [files]);
-
-  const summary = useMemo(() => {
+  const fileInsights = useMemo(() => {
+    const suggestedFiles = getSuggestedFiles(files);
+    const suggestedIDs = suggestedFiles.map((file) => file.id);
+    const allRecoverableIDs = files.map((file) => file.id);
+    const categoryCounts = { all: files.length };
+    const sourceCounts = { all: files.length };
+    const sizeMap = new Map();
     let validFiles = 0;
     let totalSize = 0;
 
     files.forEach((file) => {
+      const category = file?.category || "other";
+      const source = file?.source || "unknown";
+      const size = file?.size || 0;
+
+      categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+      sizeMap.set(file.id, size);
+
       if (file?.isValid === true) {
         validFiles += 1;
       }
-      totalSize += file?.size || 0;
+
+      totalSize += size;
     });
 
     return {
-      totalFiles: files.length,
-      validFiles,
-      suggestedFiles: suggestedFiles.length,
-      totalSize,
-      suggestedSize: sumFileSizes(suggestedFiles),
+      suggestedIDs,
+      allRecoverableIDs,
+      categoryCounts,
+      sourceCounts,
+      sizeMap,
+      summary: {
+        totalFiles: files.length,
+        validFiles,
+        suggestedFiles: suggestedFiles.length,
+        totalSize,
+        suggestedSize: sumFileSizes(suggestedFiles),
+      },
     };
-  }, [files, suggestedFiles]);
+  }, [files]);
+
+  const {
+    allRecoverableIDs,
+    categoryCounts,
+    sizeMap,
+    sourceCounts,
+    suggestedIDs,
+    summary,
+  } = fileInsights;
 
   const categoryOptions = useMemo(
     () =>
@@ -173,6 +181,10 @@ export default function ResultsPage({
   }, [sourceCounts]);
 
   const filteredFiles = useMemo(() => {
+    if (!showAdvanced) {
+      return [];
+    }
+
     let next = files;
 
     if (categoryFilter !== "all") {
@@ -182,7 +194,9 @@ export default function ResultsPage({
     }
 
     if (sourceFilter !== "all") {
-      next = next.filter((file) => (file?.source || "unknown") === sourceFilter);
+      next = next.filter(
+        (file) => (file?.source || "unknown") === sourceFilter,
+      );
     }
 
     if (validFilter === "valid") {
@@ -206,9 +220,20 @@ export default function ResultsPage({
     }
 
     return next;
-  }, [categoryFilter, deferredSearchQuery, files, sourceFilter, validFilter]);
+  }, [
+    categoryFilter,
+    deferredSearchQuery,
+    files,
+    showAdvanced,
+    sourceFilter,
+    validFilter,
+  ]);
 
   const sortedFiles = useMemo(() => {
+    if (!showAdvanced) {
+      return [];
+    }
+
     const next = [...filteredFiles];
 
     next.sort((left, right) => {
@@ -226,7 +251,7 @@ export default function ResultsPage({
     });
 
     return next;
-  }, [filteredFiles, sortMode]);
+  }, [filteredFiles, showAdvanced, sortMode]);
 
   const totalPages = Math.max(1, Math.ceil(sortedFiles.length / PAGE_SIZE));
   const safeCurrentPage = Math.min(currentPage, totalPages);
@@ -238,7 +263,6 @@ export default function ResultsPage({
 
   const selectedCount = selectedIDs.size;
   const selectedSize = useMemo(() => {
-    const sizeMap = new Map(files.map((file) => [file.id, file.size || 0]));
     let total = 0;
 
     selectedIDs.forEach((id) => {
@@ -246,7 +270,7 @@ export default function ResultsPage({
     });
 
     return total;
-  }, [files, selectedIDs]);
+  }, [selectedIDs, sizeMap]);
 
   const allFilteredSelected =
     filteredFiles.length > 0 &&
@@ -256,6 +280,19 @@ export default function ResultsPage({
   const canRecoverSuggested = outputReady && suggestedIDs.length > 0;
   const canRecoverAll = outputReady && allRecoverableIDs.length > 0;
   const canRecoverManual = outputReady && selectedCount > 0;
+
+  async function recoverSingleFile(fileID) {
+    let nextOutputDir = outputDir;
+    if (!nextOutputDir) {
+      nextOutputDir = await onSelectOutputDir?.();
+    }
+
+    if (!nextOutputDir) {
+      return;
+    }
+
+    onStartRecovery([fileID], "results", nextOutputDir);
+  }
 
   function resetToFirstPage() {
     startTransition(() => {
@@ -316,8 +353,14 @@ export default function ResultsPage({
       <div className="results-page">
         <section className="results-hero surface">
           <div>
-            <span className="results-hero__eyebrow">扫描完成</span>
-            <h2>这次没有找到可直接展示的恢复文件。</h2>
+            <span className="results-hero__eyebrow">
+              {scanActive ? "扫描进行中" : "扫描完成"}
+            </span>
+            <h2>
+              {scanActive
+                ? "扫描还在继续，暂时还没有拿到可直接展示的文件。"
+                : "这次没有找到可直接展示的恢复文件。"}
+            </h2>
             <p>
               源盘：<strong>{getDriveLabel(selectedDrive)}</strong>
             </p>
@@ -326,13 +369,33 @@ export default function ResultsPage({
 
         <section className="results-guide surface">
           <div className="empty-state">
-            <strong>没有拿到可恢复结果</strong>
-            <span>可以重新选择源盘再扫一次，或检查磁盘是否仍然连接正常。</span>
+            <strong>
+              {scanActive ? "还没有找到文件" : "没有拿到可恢复结果"}
+            </strong>
+            <span>
+              {scanActive
+                ? "扫描还在继续，可以再等一会儿，或者回到扫描页继续看进度。"
+                : "可以重新选择源盘再扫一次，或检查磁盘是否仍然连接正常。"}
+            </span>
           </div>
           <div className="output-status__actions">
-            <button className="btn btn-secondary" onClick={onBack} type="button">
-              重新选择源盘
-            </button>
+            {scanActive ? (
+              <button
+                className="btn btn-secondary"
+                onClick={onBackToScan}
+                type="button"
+              >
+                回到扫描进度
+              </button>
+            ) : (
+              <button
+                className="btn btn-secondary"
+                onClick={onBack}
+                type="button"
+              >
+                重新选择源盘
+              </button>
+            )}
           </div>
         </section>
       </div>
@@ -343,11 +406,17 @@ export default function ResultsPage({
     <div className="results-page">
       <section className="results-hero surface">
         <div className="results-hero__content">
-          <span className="results-hero__eyebrow">扫描完成</span>
-          <h2>已经找到可恢复文件，下一步先选恢复方式。</h2>
+          <span className="results-hero__eyebrow">
+            {scanActive ? "扫描进行中" : "扫描完成"}
+          </span>
+          <h2>
+            {scanActive
+              ? "扫描还在继续，已经找到的文件现在就能恢复。"
+              : "已经找到可恢复文件，下一步先选恢复方式。"}
+          </h2>
           <p>
-            源盘：<strong>{getDriveLabel(selectedDrive)}</strong>。如果你不想自己判断文件，
-            直接使用下面的“恢复推荐文件”即可。
+            源盘：<strong>{getDriveLabel(selectedDrive)}</strong>
+            。如果你不想自己判断文件， 直接使用下面的“恢复推荐文件”即可。
           </p>
         </div>
 
@@ -370,6 +439,33 @@ export default function ResultsPage({
           </div>
         </div>
       </section>
+
+      {scanActive && (
+        <section className="results-live surface">
+          <div>
+            <h3>扫描仍在继续</h3>
+            <p>
+              当前页面会持续加入新文件。你可以现在直接恢复已经找到的单个文件，也可以回到扫描进度页继续等待。
+            </p>
+          </div>
+          <div className="results-live__actions">
+            <button
+              className="btn btn-secondary"
+              onClick={onBackToScan}
+              type="button"
+            >
+              回到扫描进度
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={onStopScan}
+              type="button"
+            >
+              停止扫描并固定当前结果
+            </button>
+          </div>
+        </section>
+      )}
 
       <section className="results-guide surface">
         <div className="results-guide__header">
@@ -422,8 +518,12 @@ export default function ResultsPage({
             >
               选择恢复目录
             </button>
-            <button className="btn btn-ghost" onClick={onBack} type="button">
-              重新选择源盘
+            <button
+              className="btn btn-ghost"
+              onClick={scanActive ? onBackToScan : onBack}
+              type="button"
+            >
+              {scanActive ? "回到扫描进度" : "重新选择源盘"}
             </button>
           </div>
         </div>
@@ -433,7 +533,9 @@ export default function ResultsPage({
         <div className="results-primary__header">
           <div>
             <h3>先用简单恢复方式</h3>
-            <p>不知道怎么选时，先恢复推荐文件；想尽可能多找回内容，再恢复全部文件。</p>
+            <p>
+              不知道怎么选时，先恢复推荐文件；想尽可能多找回内容，再恢复全部文件。
+            </p>
           </div>
           <button
             className="btn btn-ghost"
@@ -632,7 +734,8 @@ export default function ResultsPage({
               <div>
                 <h3>手动筛选文件</h3>
                 <p>
-                  当前匹配 <strong>{sortedFiles.length}</strong> 个文件，已手动勾选
+                  当前匹配 <strong>{sortedFiles.length}</strong>{" "}
+                  个文件，已手动勾选
                   <strong> {selectedCount}</strong> 个。
                 </p>
               </div>
@@ -682,7 +785,9 @@ export default function ResultsPage({
 
                       <div className="result-file__body">
                         <div className="result-file__headline">
-                          <span className="result-file__icon">{category.icon}</span>
+                          <span className="result-file__icon">
+                            {category.icon}
+                          </span>
                           <div>
                             <strong>{file.fileName || "未命名文件"}</strong>
                             <span>{formatPath(file)}</span>
@@ -692,7 +797,9 @@ export default function ResultsPage({
                         <div className="result-file__meta">
                           <span className="meta-chip">{category.label}</span>
                           <span className="meta-chip">{source.shortLabel}</span>
-                          <span className="meta-chip">{formatSize(file.size)}</span>
+                          <span className="meta-chip">
+                            {formatSize(file.size)}
+                          </span>
                           <span className="meta-chip">
                             {file.extension ? `.${file.extension}` : "无扩展名"}
                           </span>
@@ -705,10 +812,22 @@ export default function ResultsPage({
                       </div>
 
                       <div className="result-file__score">
-                        <span className={`score-pill score-pill--${scoreLevel}`}>
+                        <span
+                          className={`score-pill score-pill--${scoreLevel}`}
+                        >
                           {score}%
                         </span>
                         <span>恢复优先级</span>
+                        <button
+                          className="btn btn-secondary result-file__recover"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            recoverSingleFile(file.id);
+                          }}
+                          type="button"
+                        >
+                          只恢复这个文件
+                        </button>
                       </div>
                     </div>
                   );

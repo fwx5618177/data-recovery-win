@@ -631,12 +631,22 @@ func (e *Engine) Recover(
 	successCount := 0
 	partialCount := 0
 	failedCount := 0
+	bytesWritten := int64(0)
 
 	safeProgress := func(p types.RecoveryProgress) {
 		if callbacks.OnProgress != nil {
 			callbacks.OnProgress(p)
 		}
 	}
+
+	safeProgress(types.RecoveryProgress{
+		Current:      0,
+		Total:        total,
+		BytesWritten: 0,
+		Success:      0,
+		Partial:      0,
+		Failed:       0,
+	})
 
 	for i, file := range targetFiles {
 		// 检查是否已取消
@@ -648,12 +658,13 @@ func (e *Engine) Recover(
 		outputPath := writer.GenerateOutputPath(file, outputDir)
 
 		safeProgress(types.RecoveryProgress{
-			Current:     i + 1,
-			Total:       total,
-			CurrentFile: file.FileName,
-			Success:     successCount,
-			Partial:     partialCount,
-			Failed:      failedCount,
+			Current:      i,
+			Total:        total,
+			CurrentFile:  file.FileName,
+			BytesWritten: bytesWritten,
+			Success:      successCount,
+			Partial:      partialCount,
+			Failed:       failedCount,
 		})
 
 		// 执行写入 —— 根据来源选择写入方式
@@ -670,23 +681,36 @@ func (e *Engine) Recover(
 		switch {
 		case writeErr == nil:
 			successCount++
+			bytesWritten += file.Size
 			log.Printf("[Engine] 恢复文件成功: %s -> %s", file.FileName, outputPath)
 		case errors.As(writeErr, &partialErr):
 			partialCount++
+			bytesWritten += partialErr.Written
 			log.Printf("[Engine] 文件仅部分恢复 [%s]: %v", file.FileName, partialErr)
 		default:
 			failedCount++
 			log.Printf("[Engine] 恢复文件失败 [%s]: %v", file.FileName, writeErr)
 		}
+
+		safeProgress(types.RecoveryProgress{
+			Current:      successCount + partialCount + failedCount,
+			Total:        total,
+			CurrentFile:  file.FileName,
+			BytesWritten: bytesWritten,
+			Success:      successCount,
+			Partial:      partialCount,
+			Failed:       failedCount,
+		})
 	}
 
 	// 最终进度
 	safeProgress(types.RecoveryProgress{
-		Current: total,
-		Total:   total,
-		Success: successCount,
-		Partial: partialCount,
-		Failed:  failedCount,
+		Current:      total,
+		Total:        total,
+		BytesWritten: bytesWritten,
+		Success:      successCount,
+		Partial:      partialCount,
+		Failed:       failedCount,
 	})
 
 	log.Printf("[Engine] 恢复完成: 成功 %d, 部分恢复 %d, 失败 %d", successCount, partialCount, failedCount)
