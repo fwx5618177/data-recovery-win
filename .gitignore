@@ -1,0 +1,38 @@
+# Build output
+build/bin/
+.gocache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Wails auto-generated bindings
+frontend/wailsjs/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env
+.env
+.env.local
+
+claude.md

@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install
+
+      - name: Build Windows exe
+        run: wails build -platform windows/amd64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 数据恢复大师 ${{ github.ref_name }}
+          body: |
+            ## 数据恢复大师 ${{ github.ref_name }}
+
+            ### 使用方法
+            1. 下载 `DataRecovery-windows-amd64.exe`
+            2. 拷贝到目标 Windows 电脑，双击运行（自动请求管理员权限）
+            3. 选择要恢复的源盘 → 开始扫描 → 选择恢复目录（必须在另一块磁盘） → 恢复文件
+
+            ### 注意事项
+            - 恢复目录必须选在与源盘不同的磁盘或 U 盘上
+            - SSD 被重置后 TRIM 可能已擦除部分数据，HDD 恢复率更高
+            - 越早执行恢复，找回数据的概率越大
+          files: build/bin/DataRecovery.exe
+          fail_on_unmatched_files: true
