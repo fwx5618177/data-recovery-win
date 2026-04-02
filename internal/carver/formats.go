@@ -2,6 +2,7 @@ package carver
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"data-recovery/internal/disk"
@@ -973,4 +974,541 @@ func refineOLE2Size(reader disk.DiskReader, offset int64, headerSize int64, sect
 		fileSize = maxSize
 	}
 	return fileSize
+}
+
+// =========================================================================
+// 9. EXE (PE) 文件大小检测
+// =========================================================================
+//
+// PE 格式: MZ DOS header → PE header → Section headers → Sections
+// DOS header 偏移 0x3C 处存储 PE header ("PE\0\0") 的文件偏移。
+// 文件实际大小 = 最后一个 section 的 RawOffset + RawSize。
+
+// detectEXESize 验证 PE 结构并计算文件大小
+// 如果不是有效的 PE 文件 (仅有 MZ 而无 PE 签名)，返回 0 表示丢弃
+func detectEXESize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	// 读取 DOS header (至少 64 字节)
+	dosHeader, err := readBytesAt(reader, offset, 64)
+	if err != nil || len(dosHeader) < 64 {
+		return 0
+	}
+
+	// 验证 MZ 签名
+	if dosHeader[0] != 'M' || dosHeader[1] != 'Z' {
+		return 0
+	}
+
+	// 偏移 0x3C: e_lfanew - PE header 的文件偏移
+	peOffset := int64(binary.LittleEndian.Uint32(dosHeader[0x3C:0x40]))
+
+	// 合理性检查: PE offset 不应太远 (通常 < 64KB)
+	if peOffset < 0x40 || peOffset > 0x10000 {
+		return 0
+	}
+
+	// 读取 PE 签名 "PE\0\0" (4 字节)
+	peSig, err := readBytesAt(reader, offset+peOffset, 4)
+	if err != nil || len(peSig) < 4 {
+		return 0
+	}
+	if peSig[0] != 'P' || peSig[1] != 'E' || peSig[2] != 0 || peSig[3] != 0 {
+		return 0 // 不是有效 PE 文件
+	}
+
+	// PE COFF header (20 bytes) starts at peOffset + 4
+	coffOffset := offset + peOffset + 4
+	coffHeader, err := readBytesAt(reader, coffOffset, 20)
+	if err != nil || len(coffHeader) < 20 {
+		return 0
+	}
+
+	numberOfSections := binary.LittleEndian.Uint16(coffHeader[2:4])
+	sizeOfOptionalHeader := binary.LittleEndian.Uint16(coffHeader[16:18])
+
+	// 合理性检查
+	if numberOfSections == 0 || numberOfSections > 96 {
+		return 0
+	}
+	if sizeOfOptionalHeader == 0 {
+		return 0
+	}
+
+	// Section headers 位于 Optional Header 之后
+	sectionTableOffset := coffOffset + 20 + int64(sizeOfOptionalHeader)
+
+	// 遍历 section headers 找到文件中最远的 section
+	// 每个 section header = 40 字节
+	var maxEnd int64
+	for i := uint16(0); i < numberOfSections; i++ {
+		secOffset := sectionTableOffset + int64(i)*40
+		secHeader, err := readBytesAt(reader, secOffset, 40)
+		if err != nil || len(secHeader) < 40 {
+			break
+		}
+		rawSize := int64(binary.LittleEndian.Uint32(secHeader[16:20]))
+		rawOffset := int64(binary.LittleEndian.Uint32(secHeader[20:24]))
+
+		sectionEnd := rawOffset + rawSize
+		if sectionEnd > maxEnd {
+			maxEnd = sectionEnd
+		}
+	}
+
+	if maxEnd <= 0 {
+		return 0
+	}
+
+	if maxEnd > maxSize {
+		maxEnd = maxSize
+	}
+
+	return maxEnd
+}
+
+// =========================================================================
+// 10. BMP 文件大小检测
+// =========================================================================
+//
+// BMP header:
+//   偏移 0: 2 字节 "BM"
+//   偏移 2: 4 字节 文件大小 (LE)
+//   偏移 6: 4 字节 保留 (应为 0)
+//   偏移 10: 4 字节 像素数据偏移 (LE)
+//   偏移 14: 4 字节 DIB header 大小 (LE)
+
+// detectBMPSize 从 BMP header 读取嵌入的文件大小
+// 如果 header 结构不合理，返回 0 表示丢弃（误报）
+func detectBMPSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	header, err := readBytesAt(reader, offset, 18)
+	if err != nil || len(header) < 18 {
+		return 0
+	}
+
+	// 验证 BM 签名
+	if header[0] != 'B' || header[1] != 'M' {
+		return 0
+	}
+
+	// 读取嵌入的文件大小
+	fileSize := int64(binary.LittleEndian.Uint32(header[2:6]))
+
+	// 保留字段应为 0
+	reserved := binary.LittleEndian.Uint32(header[6:10])
+	if reserved != 0 {
+		return 0 // 不是有效 BMP
+	}
+
+	// 像素数据偏移
+	dataOffset := int64(binary.LittleEndian.Uint32(header[10:14]))
+
+	// DIB header 大小
+	dibSize := binary.LittleEndian.Uint32(header[14:18])
+
+	// 合理性检查
+	// DIB header 常见值: 12, 40, 52, 56, 108, 124
+	validDIB := dibSize == 12 || dibSize == 40 || dibSize == 52 || dibSize == 56 ||
+		dibSize == 108 || dibSize == 124
+	if !validDIB {
+		return 0
+	}
+
+	// dataOffset 应大于等于 14 + DIB header 大小
+	if dataOffset < 14+int64(dibSize) {
+		return 0
+	}
+
+	// 文件大小应大于 dataOffset
+	if fileSize <= dataOffset {
+		return 0
+	}
+
+	if fileSize > maxSize {
+		fileSize = maxSize
+	}
+
+	return fileSize
+}
+
+// =========================================================================
+// 11. ICO 文件大小检测
+// =========================================================================
+//
+// ICO header:
+//   偏移 0: 2 字节 保留 (00 00)
+//   偏移 2: 2 字节 类型 (01 00 = ICO, 02 00 = CUR)
+//   偏移 4: 2 字节 图像数量 (LE)
+//   偏移 6: 每个图像目录条目 16 字节
+
+// =========================================================================
+// 12. AAC (ADTS) 文件大小检测
+// =========================================================================
+//
+// ADTS 帧头 (7 or 9 字节):
+//   同步字 (12 bits): 0xFFF
+//   ID (1 bit): 0=MPEG-4, 1=MPEG-2
+//   Layer (2 bits): 总是 00
+//   Protection absent (1 bit)
+//   Profile (2 bits)
+//   Sampling freq index (4 bits): 0-12 有效
+//   ...
+//   Frame length (13 bits): 包含头部的帧总长度
+
+// detectAACSize 验证连续 ADTS 帧来确定文件大小
+// 如果帧结构不合理，返回 0 表示丢弃
+func detectAACSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	endLimit := offset + maxSize
+	pos := offset
+
+	validFrames := 0
+	consecutiveInvalid := 0
+
+	for pos < endLimit {
+		// 读取 ADTS 帧头 (7 字节最小)
+		hdr, err := readBytesAt(reader, pos, 7)
+		if err != nil || len(hdr) < 7 {
+			break
+		}
+
+		// 检查同步字 0xFFF (12 bits)
+		if hdr[0] != 0xFF || (hdr[1]&0xF0) != 0xF0 {
+			consecutiveInvalid++
+			if consecutiveInvalid >= 3 {
+				break
+			}
+			pos++
+			continue
+		}
+
+		// Layer 必须为 00
+		layer := (hdr[1] >> 1) & 0x03
+		if layer != 0 {
+			consecutiveInvalid++
+			if consecutiveInvalid >= 3 {
+				break
+			}
+			pos++
+			continue
+		}
+
+		// Sampling frequency index (4 bits), 0-12 有效, 13-15 保留
+		freqIdx := (hdr[2] >> 2) & 0x0F
+		if freqIdx > 12 {
+			consecutiveInvalid++
+			if consecutiveInvalid >= 3 {
+				break
+			}
+			pos++
+			continue
+		}
+
+		// Frame length (13 bits): bytes [3][4][5]
+		frameLen := int64(hdr[3]&0x03)<<11 | int64(hdr[4])<<3 | int64(hdr[5]>>5)
+		if frameLen < 7 || frameLen > 8192 {
+			consecutiveInvalid++
+			if consecutiveInvalid >= 3 {
+				break
+			}
+			pos++
+			continue
+		}
+
+		consecutiveInvalid = 0
+		validFrames++
+		pos += frameLen
+	}
+
+	if validFrames < 5 {
+		return 0 // 有效帧太少，很可能是误报
+	}
+
+	totalSize := pos - offset
+	if totalSize > maxSize {
+		totalSize = maxSize
+	}
+	return totalSize
+}
+
+// =========================================================================
+// 13. GIF 文件大小检测
+// =========================================================================
+//
+// GIF 结构: Header(6) → LSD(7) → [GCT] → {Blocks} → Trailer(0x3B)
+// 每个数据块以 sub-block 方式存储: 1 字节长度 + 数据, 以 0x00 终止
+
+// detectGIFSize 解析 GIF 块结构来确定文件大小
+func detectGIFSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	endLimit := offset + maxSize
+
+	// 验证 GIF 头部 (6 字节: "GIF87a" or "GIF89a")
+	hdr, err := readBytesAt(reader, offset, 13)
+	if err != nil || len(hdr) < 13 {
+		return 0
+	}
+
+	if string(hdr[0:3]) != "GIF" {
+		return 0
+	}
+	version := string(hdr[3:6])
+	if version != "87a" && version != "89a" {
+		return 0
+	}
+
+	pos := offset + 6 // 跳过 Header
+
+	// Logical Screen Descriptor (7 字节)
+	// 偏移 4 处的 packed byte: bit 7 = Global Color Table Flag
+	packed := hdr[10]
+	hasGCT := (packed & 0x80) != 0
+	gctSize := 0
+	if hasGCT {
+		gctSize = 3 * (1 << ((packed & 0x07) + 1))
+	}
+	pos += 7 + int64(gctSize) // 跳过 LSD + GCT
+
+	// 解析数据块
+	for pos < endLimit {
+		b, err := readBytesAt(reader, pos, 1)
+		if err != nil || len(b) < 1 {
+			return 0
+		}
+
+		switch b[0] {
+		case 0x3B: // Trailer
+			return pos + 1 - offset
+
+		case 0x21: // Extension Block
+			// 读取 extension label
+			pos += 2 // 跳过 0x21 + label byte
+			// 跳过 sub-blocks
+			pos, err = skipGIFSubBlocks(reader, pos, endLimit)
+			if err != nil {
+				return 0
+			}
+
+		case 0x2C: // Image Descriptor
+			if pos+10 > endLimit {
+				return 0
+			}
+			imgDesc, err := readBytesAt(reader, pos+1, 9)
+			if err != nil || len(imgDesc) < 9 {
+				return 0
+			}
+			pos += 10 // 跳过 Image Descriptor
+
+			// Local Color Table
+			lctPacked := imgDesc[8]
+			hasLCT := (lctPacked & 0x80) != 0
+			if hasLCT {
+				lctSize := 3 * (1 << ((lctPacked & 0x07) + 1))
+				pos += int64(lctSize)
+			}
+
+			// LZW Minimum Code Size (1 byte)
+			pos++
+
+			// Image Data sub-blocks
+			pos, err = skipGIFSubBlocks(reader, pos, endLimit)
+			if err != nil {
+				return 0
+			}
+
+		default:
+			// 未知块类型，文件可能损坏
+			return 0
+		}
+	}
+
+	return 0
+}
+
+// skipGIFSubBlocks 跳过 GIF sub-block 序列
+// sub-block: 1 字节长度 (n), n 字节数据, 重复直到长度为 0
+func skipGIFSubBlocks(reader disk.DiskReader, start int64, limit int64) (int64, error) {
+	pos := start
+	for pos < limit {
+		b, err := readBytesAt(reader, pos, 1)
+		if err != nil || len(b) < 1 {
+			return pos, fmt.Errorf("read error")
+		}
+		blockSize := int64(b[0])
+		pos++ // 跳过长度字节
+		if blockSize == 0 {
+			return pos, nil // block terminator
+		}
+		pos += blockSize
+	}
+	return pos, fmt.Errorf("exceeded limit")
+}
+
+// =========================================================================
+// 14. TIFF 文件大小检测
+// =========================================================================
+//
+// TIFF 结构: 8 字节头 + IFD 链
+// 头部: 2字节字节序 + 2字节标记42 + 4字节首个IFD偏移
+// 每个 IFD: 2字节条目数 + N*12字节条目 + 4字节下一IFD偏移
+
+// detectTIFFSize 通过解析 IFD 链和 strip/tile 偏移来确定文件大小
+func detectTIFFSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	hdr, err := readBytesAt(reader, offset, 8)
+	if err != nil || len(hdr) < 8 {
+		return 0
+	}
+
+	// 确定字节序
+	var bo binary.ByteOrder
+	switch string(hdr[0:2]) {
+	case "II":
+		bo = binary.LittleEndian
+	case "MM":
+		bo = binary.BigEndian
+	default:
+		return 0
+	}
+
+	// 验证标记 42
+	magic := bo.Uint16(hdr[2:4])
+	if magic != 42 {
+		return 0
+	}
+
+	// 首个 IFD 偏移
+	ifdOffset := int64(bo.Uint32(hdr[4:8]))
+	if ifdOffset < 8 || ifdOffset > maxSize {
+		return 0
+	}
+
+	// 追踪文件中最远的数据位置
+	var maxEnd int64 = 8
+
+	// 最多遍历 10 个 IFD (防止循环)
+	for i := 0; i < 10 && ifdOffset > 0; i++ {
+		// 读取 IFD 条目数
+		countBuf, err := readBytesAt(reader, offset+ifdOffset, 2)
+		if err != nil || len(countBuf) < 2 {
+			break
+		}
+		entryCount := int(bo.Uint16(countBuf))
+		if entryCount <= 0 || entryCount > 1000 {
+			break
+		}
+
+		ifdEnd := ifdOffset + 2 + int64(entryCount)*12 + 4
+		if ifdEnd > maxEnd {
+			maxEnd = ifdEnd
+		}
+
+		// 遍历 IFD 条目寻找数据偏移和大小
+		for j := 0; j < entryCount; j++ {
+			entryBuf, err := readBytesAt(reader, offset+ifdOffset+2+int64(j)*12, 12)
+			if err != nil || len(entryBuf) < 12 {
+				break
+			}
+
+			tag := bo.Uint16(entryBuf[0:2])
+			// StripOffsets=273, StripByteCounts=279, TileOffsets=324, TileByteCounts=325
+			// 只关注这些和数据位置相关的 tag
+			if tag == 273 || tag == 324 {
+				// 数据偏移 tag
+				count := int(bo.Uint32(entryBuf[4:8]))
+				valueOffset := int64(bo.Uint32(entryBuf[8:12]))
+
+				if count == 1 {
+					// 值直接存储
+					if valueOffset > maxEnd {
+						maxEnd = valueOffset
+					}
+				}
+			} else if tag == 279 || tag == 325 {
+				// 数据大小 tag
+				count := int(bo.Uint32(entryBuf[4:8]))
+				valueOffset := int64(bo.Uint32(entryBuf[8:12]))
+
+				if count == 1 && valueOffset > 0 {
+					// 单个 strip/tile，值是大小
+					// 需要结合 StripOffset，这里简单估算
+					if valueOffset > maxEnd {
+						maxEnd = valueOffset
+					}
+				}
+			}
+		}
+
+		// 读取下一个 IFD 偏移
+		nextBuf, err := readBytesAt(reader, offset+ifdOffset+2+int64(entryCount)*12, 4)
+		if err != nil || len(nextBuf) < 4 {
+			break
+		}
+		ifdOffset = int64(bo.Uint32(nextBuf))
+		if ifdOffset == 0 {
+			break // 最后一个 IFD
+		}
+		if ifdOffset > maxSize {
+			break
+		}
+	}
+
+	if maxEnd <= 8 {
+		return 0
+	}
+	if maxEnd > maxSize {
+		maxEnd = maxSize
+	}
+
+	return maxEnd
+}
+
+// detectICOSize 解析 ICO 文件目录来确定大小
+// 如果结构不合理，返回 0 表示丢弃
+func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	header, err := readBytesAt(reader, offset, 6)
+	if err != nil || len(header) < 6 {
+		return 0
+	}
+
+	// 验证保留字段和类型
+	if header[0] != 0 || header[1] != 0 {
+		return 0
+	}
+	imgType := binary.LittleEndian.Uint16(header[2:4])
+	if imgType != 1 && imgType != 2 { // 1=ICO, 2=CUR
+		return 0
+	}
+
+	imgCount := binary.LittleEndian.Uint16(header[4:6])
+	if imgCount == 0 || imgCount > 256 {
+		return 0 // 不合理的图像数量
+	}
+
+	// 遍历图像目录，找到最远的图像数据
+	var maxEnd int64
+	for i := uint16(0); i < imgCount; i++ {
+		entryOffset := offset + 6 + int64(i)*16
+		entry, err := readBytesAt(reader, entryOffset, 16)
+		if err != nil || len(entry) < 16 {
+			return 0
+		}
+		// 偏移 8: 4 字节 图像数据大小 (LE)
+		dataSize := int64(binary.LittleEndian.Uint32(entry[8:12]))
+		// 偏移 12: 4 字节 图像数据偏移 (LE)
+		dataOff := int64(binary.LittleEndian.Uint32(entry[12:16]))
+
+		if dataSize <= 0 || dataOff <= 0 {
+			return 0
+		}
+
+		end := dataOff + dataSize
+		if end > maxEnd {
+			maxEnd = end
+		}
+	}
+
+	if maxEnd <= 6 {
+		return 0
+	}
+	if maxEnd > maxSize {
+		maxEnd = maxSize
+	}
+
+	return maxEnd
 }

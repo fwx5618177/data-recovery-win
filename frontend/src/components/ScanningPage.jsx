@@ -18,7 +18,7 @@ function getPhaseLabel(phase) {
   const map = {
     ready: "准备开始扫描",
     ntfs: "先查找原来的文件记录",
-    carving: "继续深度查找更多文件",
+    carving: "正在深度扫描查找更多文件",
     validating: "正在检查文件是否可用",
     complete: "扫描完成",
   };

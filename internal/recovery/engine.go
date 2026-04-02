@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -173,21 +174,21 @@ func (e *Engine) Scan(
 		allFiles = append(allFiles, files...)
 
 	case types.ScanDeep:
-		// 深度模式：仅文件雕刻
-		log.Println("[Engine] 深度扫描模式: 仅文件雕刻")
+		// 深度模式：仅深度扫描
+		log.Println("[Engine] 深度扫描模式: 仅深度扫描")
 		files, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
 			// deep 模式下 carver 占 0-95%
 			p.Percent = p.Percent * 0.95
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
-			return nil, fmt.Errorf("文件雕刻扫描失败: %w", err)
+			return nil, fmt.Errorf("深度扫描失败: %w", err)
 		}
 		allFiles = append(allFiles, files...)
 
 	case types.ScanFull:
-		// 完整模式：NTFS + 文件雕刻 + 验证
-		log.Println("[Engine] 完整扫描模式: NTFS + 文件雕刻 + 验证")
+		// 完整模式：NTFS + 深度扫描 + 验证
+		log.Println("[Engine] 完整扫描模式: NTFS + 深度扫描 + 验证")
 
 		// 阶段1: NTFS 扫描 (0-40%)
 		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
@@ -195,8 +196,8 @@ func (e *Engine) Scan(
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
-			// NTFS 扫描失败不中断，记录日志继续雕刻
-			log.Printf("[Engine] NTFS 扫描失败 (继续雕刻): %v", err)
+			// NTFS 扫描失败不中断，记录日志继续深度扫描
+			log.Printf("[Engine] NTFS 扫描失败 (继续深度扫描): %v", err)
 		} else {
 			allFiles = append(allFiles, ntfsFiles...)
 		}
@@ -206,13 +207,13 @@ func (e *Engine) Scan(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段2: 文件雕刻 (40-95%)
+		// 阶段2: 深度扫描 (40-95%)
 		carverFiles, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
 			p.Percent = 40.0 + p.Percent*0.55
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
-			log.Printf("[Engine] 文件雕刻失败: %v", err)
+			log.Printf("[Engine] 深度扫描失败: %v", err)
 		} else {
 			allFiles = append(allFiles, carverFiles...)
 		}
@@ -419,7 +420,7 @@ func mftEntryToRecoveredFile(entry *ntfs.MFTEntry, boot *ntfs.BootSector, partit
 	return file
 }
 
-// runCarverScan 执行文件雕刻扫描
+// runCarverScan 执行深度扫描
 //
 // 使用 carver.NewEngine(reader, sigDB, cfg) 创建引擎，
 // 调用 carver.Scan(ctx, start, end, onProgress, onFound) 执行扫描，
@@ -431,7 +432,7 @@ func (e *Engine) runCarverScan(
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
 
-	log.Println("[Engine] 开始文件雕刻扫描...")
+	log.Println("[Engine] 开始深度扫描...")
 
 	// 获取磁盘总大小
 	totalSize, err := reader.Size()
@@ -467,10 +468,10 @@ func (e *Engine) runCarverScan(
 	)
 
 	if err != nil {
-		return files, fmt.Errorf("文件雕刻扫描失败: %w", err)
+		return files, fmt.Errorf("深度扫描失败: %w", err)
 	}
 
-	log.Printf("[Engine] 文件雕刻完成: 找到 %d 个文件", len(files))
+	log.Printf("[Engine] 深度扫描完成: 找到 %d 个文件", len(files))
 	return files, nil
 }
 
@@ -627,6 +628,9 @@ func (e *Engine) Recover(
 	e.writer = writer
 	e.mu.Unlock()
 
+	// 恢复前即时验证：用于扫描过程中“立即恢复”场景，尽量拦截明显无效文件
+	recoverValidator := validator.NewValidator(recoverReader)
+
 	total := len(targetFiles)
 	successCount := 0
 	partialCount := 0
@@ -652,6 +656,29 @@ func (e *Engine) Recover(
 		// 检查是否已取消
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("恢复操作已取消")
+		}
+
+		// 对深度扫描来源文件做即时验证，避免导出明显不可用的数据片段
+		if file.Source == "carver" {
+			verify := recoverValidator.Validate(file)
+			file.IsValid = verify.IsValid
+			file.Confidence = verify.Confidence
+			file.ValidationMsg = verify.Message
+
+			if !verify.IsValid {
+				failedCount++
+				log.Printf("[Engine] 跳过低可靠文件 [%s]: %s", file.FileName, verify.Message)
+				safeProgress(types.RecoveryProgress{
+					Current:      successCount + partialCount + failedCount,
+					Total:        total,
+					CurrentFile:  file.FileName,
+					BytesWritten: bytesWritten,
+					Success:      successCount,
+					Partial:      partialCount,
+					Failed:       failedCount,
+				})
+				continue
+			}
 		}
 
 		// 生成输出路径
@@ -684,9 +711,12 @@ func (e *Engine) Recover(
 			bytesWritten += file.Size
 			log.Printf("[Engine] 恢复文件成功: %s -> %s", file.FileName, outputPath)
 		case errors.As(writeErr, &partialErr):
-			partialCount++
-			bytesWritten += partialErr.Written
-			log.Printf("[Engine] 文件仅部分恢复 [%s]: %v", file.FileName, partialErr)
+			// 严格模式：部分恢复视为失败，删除不完整输出，避免导出不可用文件
+			if rmErr := os.Remove(partialErr.OutputPath); rmErr != nil {
+				log.Printf("[Engine] 清理部分恢复文件失败 [%s]: %v", partialErr.OutputPath, rmErr)
+			}
+			failedCount++
+			log.Printf("[Engine] 文件恢复失败（检测到不完整，已清理）[%s]: %v", file.FileName, partialErr)
 		default:
 			failedCount++
 			log.Printf("[Engine] 恢复文件失败 [%s]: %v", file.FileName, writeErr)

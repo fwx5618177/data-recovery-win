@@ -1,9 +1,9 @@
 export function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) {
-    return '0 B';
+    return "0 B";
   }
 
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let size = bytes;
   let unitIndex = 0;
 
@@ -16,16 +16,16 @@ export function formatSize(bytes) {
 }
 
 export function formatDuration(value) {
-  if (value == null || value === '') {
-    return '--';
+  if (value == null || value === "") {
+    return "--";
   }
 
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     return value;
   }
 
   if (!Number.isFinite(value) || value < 0) {
-    return '--';
+    return "--";
   }
 
   if (value < 60) {
@@ -62,12 +62,25 @@ export function formatConfidence(value) {
 
 export function formatSpeed(bytesPerSecond) {
   if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
-    return '0 B/s';
+    return "0 B/s";
   }
 
   return `${formatSize(bytesPerSecond)}/s`;
 }
 
 export function formatPath(file) {
-  return file?.originalPath || file?.path || '原始路径不可用';
+  if (file?.originalPath) {
+    return file.originalPath;
+  }
+  if (file?.path) {
+    return file.path;
+  }
+  // 对于深度扫描来源的文件，优先使用文件类型描述
+  if (file?.source === "carver" && file?.description) {
+    return file.description;
+  }
+  if (file?.source === "carver" && file?.validationMsg) {
+    return file.validationMsg;
+  }
+  return "原始路径不可用";
 }

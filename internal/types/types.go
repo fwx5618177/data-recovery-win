@@ -63,8 +63,8 @@ type ScanMode string
 
 const (
 	ScanQuick ScanMode = "quick" // 快速：仅 NTFS MFT
-	ScanDeep  ScanMode = "deep"  // 深度：仅文件雕刻
-	ScanFull  ScanMode = "full"  // 完整：NTFS + 雕刻
+	ScanDeep  ScanMode = "deep"  // 深度：仅深度扫描
+	ScanFull  ScanMode = "full"  // 完整：NTFS + 深度扫描
 )
 
 // DriveInfo 驱动器信息
@@ -103,6 +103,7 @@ type RecoveredFile struct {
 	ModifiedTime  *time.Time   `json:"modifiedTime,omitempty"`
 	IsDeleted     bool         `json:"isDeleted"`
 	OriginalPath  string       `json:"originalPath"`
+	Description   string       `json:"description"`
 	IsValid       bool         `json:"isValid"`
 	ValidationMsg string       `json:"validationMsg"`
 }

@@ -30,7 +30,7 @@ type rawMatch struct {
 	Pattern   []byte
 }
 
-// Config 雕刻引擎配置
+// Config 深度扫描引擎配置
 type Config struct {
 	ChunkSize   int64 // 每次读取块大小，默认 4MB
 	Workers     int   // 工作 goroutine 数量，默认 runtime.NumCPU()
@@ -51,7 +51,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// Engine 文件雕刻引擎
+// Engine 深度扫描引擎
 // 通过多线程流水线扫描磁盘原始数据，使用 Aho-Corasick 签名匹配找到文件，
 // 然后用格式专用解析器确定文件边界。
 type Engine struct {
@@ -68,7 +68,7 @@ type Engine struct {
 	cancel context.CancelFunc
 }
 
-// NewEngine 创建文件雕刻引擎
+// NewEngine 创建深度扫描引擎
 // 从 sigDB 获取所有 HeaderEntry，构建 AhoCorasick 自动机，
 // 设置 overlap = sigDB.MaxHeaderLen() - 1（至少 64）
 func NewEngine(reader disk.DiskReader, sigDB *signature.SignatureDB, cfg Config) *Engine {
@@ -297,6 +297,8 @@ func (e *Engine) Scan(
 
 		// 用 map 去重，同一偏移只处理一次
 		seen := make(map[int64]bool)
+		// 每种扩展名的序号计数器，用于生成可读文件名
+		extCounter := make(map[string]int)
 
 		for m := range matchCh {
 			// 去重
@@ -318,6 +320,7 @@ func (e *Engine) Scan(
 
 			ext := m.Signature.Extension
 			cat := m.Signature.Category
+			desc := m.Signature.Description
 
 			// 对容器格式进行细分类
 			switch ext {
@@ -338,17 +341,53 @@ func (e *Engine) Scan(
 				}
 			}
 
+			// 根据细分后的实际扩展名更新描述
+			switch ext {
+			case "wav":
+				desc = "WAV 音频"
+			case "avi":
+				desc = "AVI 视频"
+			case "webp":
+				desc = "WebP 图片"
+			case "doc":
+				desc = "Word 文档 (DOC)"
+			case "xls":
+				desc = "Excel 表格 (XLS)"
+			case "ppt":
+				desc = "PowerPoint 演示 (PPT)"
+			case "docx":
+				desc = "Word 文档 (DOCX)"
+			case "xlsx":
+				desc = "Excel 表格 (XLSX)"
+			case "pptx":
+				desc = "PowerPoint 演示 (PPTX)"
+			case "epub":
+				desc = "EPUB 电子书"
+			case "odt":
+				desc = "OpenDocument 文档"
+			case "ods":
+				desc = "OpenDocument 表格"
+			case "odp":
+				desc = "OpenDocument 演示"
+			}
+
+			// 生成可读文件名：{EXT}_{序号}.{ext}
+			extCounter[ext]++
+			seq := extCounter[ext]
+			fileName := fmt.Sprintf("%s_%06d.%s", strings.ToUpper(ext), seq, ext)
+
 			// 构建恢复文件信息
 			file := &types.RecoveredFile{
-				ID:         fmt.Sprintf("carve_%d", m.Offset),
-				Source:     "carver",
-				FileName:   fmt.Sprintf("recovered_%d.%s", m.Offset, ext),
-				Extension:  ext,
-				Category:   cat,
-				Size:       fileSize,
-				SizeHuman:  types.FormatSize(fileSize),
-				Offset:     m.Offset,
-				Confidence: 0.7, // 雕刻的基础置信度
+				ID:          fmt.Sprintf("carve_%d", m.Offset),
+				Source:      "carver",
+				FileName:    fileName,
+				Extension:   ext,
+				Category:    cat,
+				Size:        fileSize,
+				SizeHuman:   types.FormatSize(fileSize),
+				Offset:      m.Offset,
+				Confidence:  0.7, // 深度扫描的基础置信度
+				Description: desc,
 			}
 
 			e.filesFound.Add(1)
@@ -495,6 +534,18 @@ func (e *Engine) determineFileSize(
 		size = detectRIFFSize(reader, offset, maxSize)
 	case "ole2", "doc", "xls", "ppt":
 		size = detectOLE2Size(reader, offset, maxSize)
+	case "exe":
+		size = detectEXESize(reader, offset, maxSize)
+	case "bmp":
+		size = detectBMPSize(reader, offset, maxSize)
+	case "ico":
+		size = detectICOSize(reader, offset, maxSize)
+	case "aac":
+		size = detectAACSize(reader, offset, maxSize)
+	case "gif":
+		size = detectGIFSize(reader, offset, maxSize)
+	case "tiff":
+		size = detectTIFFSize(reader, offset, maxSize)
 	default:
 		// 对未知格式，如果有 footer，搜索 footer 来确定文件边界
 		if len(sig.Footers) > 0 {
@@ -502,13 +553,22 @@ func (e *Engine) determineFileSize(
 		}
 	}
 
-	// 检测失败时返回合理默认值（不返回 0）
+	// 检测失败时的处理策略:
+	// - 对高误报率格式 (exe, bmp, ico, elf)，返回 0 直接丢弃
+	// - 对其他格式，返回合理默认值
 	if size <= 0 {
-		defaultSize := int64(1 * 1024 * 1024) // 默认 1MB
-		if sig.MaxSize > 0 && sig.MaxSize < defaultSize {
-			defaultSize = sig.MaxSize
+		switch sig.Extension {
+		case "exe", "elf", "bmp", "ico", "aac", "tiff":
+			// 这些格式的签名太短 (2-4 字节)，误报率极高
+			// 如果结构检测失败，说明不是该类型的真实文件
+			return 0
+		default:
+			defaultSize := int64(1 * 1024 * 1024) // 默认 1MB
+			if sig.MaxSize > 0 && sig.MaxSize < defaultSize {
+				defaultSize = sig.MaxSize
+			}
+			return defaultSize
 		}
-		return defaultSize
 	}
 
 	return size
@@ -640,55 +700,66 @@ func (e *Engine) classifyOLE2(reader disk.DiskReader, offset int64) (string, typ
 }
 
 // classifyZIP 检查 ZIP 内部文件名来细分格式
-// 读取第一个 local file header 中的文件名进行判断
+// 读取多个 local file header 中的文件名进行判断
 func (e *Engine) classifyZIP(reader disk.DiskReader, offset int64, size int64) (string, types.FileCategory) {
-	// ZIP local file header: PK\x03\x04 ...
-	// 偏移 26: 文件名长度 (2 bytes LE)
-	// 偏移 28: extra field 长度 (2 bytes LE)
-	// 偏移 30: 文件名
-	header, err := readBytesAt(reader, offset, 256)
-	if err != nil || len(header) < 30 {
+	// 策略1: 读取前 8KB 数据，搜索 OOXML/ODT 特征路径
+	// 这比逐个解析 local file header 更健壮，因为即使文件名检查错位也能找到
+	readSize := int64(16384)
+	if size > 0 && readSize > size {
+		readSize = size
+	}
+	data, err := readBytesAt(reader, offset, int(readSize))
+	if err != nil || len(data) < 30 {
 		return "", types.CategoryArchive
 	}
 
-	nameLen := int(header[26]) | int(header[27])<<8
-	if nameLen <= 0 || nameLen > 220 || 30+nameLen > len(header) {
-		return "", types.CategoryArchive
-	}
-	extraLen := int(header[28]) | int(header[29])<<8
-
-	firstName := string(header[30 : 30+nameLen])
+	dataStr := string(data)
 
 	// --- Office Open XML (DOCX/XLSX/PPTX) ---
-	if firstName == "[Content_Types].xml" || firstName == "_rels/.rels" || firstName == "_rels/" {
-		// 读取更多数据以区分具体类型
-		readSize := int64(8192)
-		if readSize > size && size > 0 {
-			readSize = size
+	// 检查常见 OOXML 标志
+	hasContentTypes := strings.Contains(dataStr, "[Content_Types].xml")
+	hasRels := strings.Contains(dataStr, "_rels/")
+
+	if hasContentTypes || hasRels {
+		if strings.Contains(dataStr, "word/") || strings.Contains(dataStr, "word\\") {
+			return "docx", types.CategoryDocument
 		}
-		data, err := readBytesAt(reader, offset, int(readSize))
-		if err == nil {
-			dataStr := string(data)
-			if strings.Contains(dataStr, "word/") || strings.Contains(dataStr, "word\\") {
-				return "docx", types.CategoryDocument
-			}
-			if strings.Contains(dataStr, "xl/") || strings.Contains(dataStr, "xl\\") {
-				return "xlsx", types.CategoryDocument
-			}
-			if strings.Contains(dataStr, "ppt/") || strings.Contains(dataStr, "ppt\\") {
-				return "pptx", types.CategoryDocument
-			}
+		if strings.Contains(dataStr, "xl/") || strings.Contains(dataStr, "xl\\") {
+			return "xlsx", types.CategoryDocument
 		}
-		// 无法进一步区分，但确实是 OOXML
-		return "zip", types.CategoryArchive
+		if strings.Contains(dataStr, "ppt/") || strings.Contains(dataStr, "ppt\\") {
+			return "pptx", types.CategoryDocument
+		}
 	}
+
+	// 即使没有 [Content_Types].xml 在前 8KB，也搜索特征路径
+	if strings.Contains(dataStr, "word/document.xml") || strings.Contains(dataStr, "word/styles.xml") {
+		return "docx", types.CategoryDocument
+	}
+	if strings.Contains(dataStr, "xl/workbook.xml") || strings.Contains(dataStr, "xl/sharedStrings.xml") || strings.Contains(dataStr, "xl/worksheets/") {
+		return "xlsx", types.CategoryDocument
+	}
+	if strings.Contains(dataStr, "ppt/presentation.xml") || strings.Contains(dataStr, "ppt/slides/") {
+		return "pptx", types.CategoryDocument
+	}
+
+	// --- 解析第一个 local file header 中的文件名 ---
+	nameLen := int(data[26]) | int(data[27])<<8
+	if nameLen <= 0 || nameLen > 220 || 30+nameLen > len(data) {
+		return "", types.CategoryArchive
+	}
+	extraLen := int(data[28]) | int(data[29])<<8
+
+	firstName := string(data[30 : 30+nameLen])
 
 	// --- EPUB ---
 	if firstName == "mimetype" {
-		dataOffset := offset + 30 + int64(nameLen) + int64(extraLen)
-		mimeData, err := readBytesAt(reader, dataOffset, 40)
-		if err == nil && strings.Contains(string(mimeData), "epub") {
-			return "epub", types.CategoryDocument
+		dataOffset := 30 + nameLen + extraLen
+		if dataOffset+40 <= len(data) {
+			mimeData := string(data[dataOffset : dataOffset+40])
+			if strings.Contains(mimeData, "epub") {
+				return "epub", types.CategoryDocument
+			}
 		}
 	}
 
@@ -704,10 +775,9 @@ func (e *Engine) classifyZIP(reader disk.DiskReader, offset int64, size int64) (
 
 	// --- OpenDocument (ODT/ODS/ODP) ---
 	if firstName == "mimetype" {
-		dataOffset := offset + 30 + int64(nameLen) + int64(extraLen)
-		mimeData, err := readBytesAt(reader, dataOffset, 60)
-		if err == nil {
-			mime := string(mimeData)
+		dataOffset := 30 + nameLen + extraLen
+		if dataOffset+60 <= len(data) {
+			mime := string(data[dataOffset : dataOffset+60])
 			if strings.Contains(mime, "opendocument.text") {
 				return "odt", types.CategoryDocument
 			}

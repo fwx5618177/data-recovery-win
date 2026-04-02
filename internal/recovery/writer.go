@@ -312,12 +312,15 @@ func (w *SafeWriter) GenerateOutputPath(file *types.RecoveredFile, baseDir strin
 		subDir := categoryToDir(file.Category)
 		dir := filepath.Join(baseDir, subDir)
 
-		// Carver 来源使用 recovered_{offset}.{ext} 格式
-		ext := file.Extension
-		if ext == "" {
-			ext = "bin"
+		// 直接使用 FileName（由深度扫描生成的可读文件名）
+		fileName := file.FileName
+		if fileName == "" {
+			ext := file.Extension
+			if ext == "" {
+				ext = "bin"
+			}
+			fileName = fmt.Sprintf("FILE_%d.%s", file.Offset, ext)
 		}
-		fileName := fmt.Sprintf("recovered_%d.%s", file.Offset, ext)
 		fullPath = filepath.Join(dir, fileName)
 	}
 

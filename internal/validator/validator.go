@@ -49,6 +49,10 @@ func (v *Validator) Validate(file *types.RecoveredFile) Result {
 		result = v.validateMP4(file.Offset, file.Size)
 	case "mp3":
 		result = v.validateMP3(file.Offset, file.Size)
+	case "exe":
+		result = v.validateEXE(file.Offset, file.Size)
+	case "bmp":
+		result = v.validateBMP(file.Offset, file.Size)
 	default:
 		result = v.validateGeneric(file.Offset, file.Size)
 	}
@@ -842,6 +846,177 @@ func countConsecutiveFrames(v *Validator, baseOffset, frameOffset, totalSize int
 	}
 
 	return count
+}
+
+// ---------- EXE (PE) 验证器 ----------
+
+func (v *Validator) validateEXE(offset, size int64) Result {
+	confidence := 0.0
+	messages := make([]string, 0, 5)
+
+	if size < 64 {
+		return Result{IsValid: false, Confidence: 0, Message: "EXE 文件过小，无法包含有效的 PE 头部"}
+	}
+
+	// 读取 DOS header
+	header, err := v.readAt(offset, 64)
+	if err != nil {
+		return Result{IsValid: false, Confidence: 0, Message: fmt.Sprintf("读取 EXE 头部失败: %v", err)}
+	}
+
+	// 验证 MZ 签名
+	if header[0] != 'M' || header[1] != 'Z' {
+		return Result{IsValid: false, Confidence: 0, Message: "MZ 签名缺失"}
+	}
+	confidence += 0.1
+	messages = append(messages, "MZ 签名正确")
+
+	// 读取 PE offset (e_lfanew at 0x3C)
+	peOffset := int64(binary.LittleEndian.Uint32(header[0x3C:0x40]))
+	if peOffset < 0x40 || peOffset > 0x10000 || peOffset+4 > size {
+		messages = append(messages, fmt.Sprintf("PE 偏移异常: 0x%X", peOffset))
+		return Result{IsValid: false, Confidence: confidence, Message: fmt.Sprintf("EXE 验证: %s", joinMessages(messages))}
+	}
+
+	// 验证 PE 签名
+	peSig, err := v.readAt(offset+peOffset, 4)
+	if err != nil || len(peSig) < 4 {
+		messages = append(messages, "无法读取 PE 签名")
+		return Result{IsValid: false, Confidence: confidence, Message: fmt.Sprintf("EXE 验证: %s", joinMessages(messages))}
+	}
+
+	if peSig[0] == 'P' && peSig[1] == 'E' && peSig[2] == 0 && peSig[3] == 0 {
+		confidence += 0.4
+		messages = append(messages, "PE 签名正确")
+	} else {
+		messages = append(messages, fmt.Sprintf("PE 签名错误: %02X%02X%02X%02X", peSig[0], peSig[1], peSig[2], peSig[3]))
+		return Result{IsValid: false, Confidence: confidence, Message: fmt.Sprintf("EXE 验证: %s", joinMessages(messages))}
+	}
+
+	// 读取 COFF header
+	coffOffset := peOffset + 4
+	if coffOffset+20 <= size {
+		coffHeader, err := v.readAt(offset+coffOffset, 20)
+		if err == nil && len(coffHeader) >= 20 {
+			machine := binary.LittleEndian.Uint16(coffHeader[0:2])
+			numSections := binary.LittleEndian.Uint16(coffHeader[2:4])
+
+			// 验证 machine type
+			validMachines := map[uint16]string{
+				0x014C: "x86",
+				0x0200: "IA64",
+				0x8664: "x64",
+				0xAA64: "ARM64",
+				0x01C0: "ARM",
+				0x01C4: "ARMv7",
+			}
+			if name, ok := validMachines[machine]; ok {
+				confidence += 0.2
+				messages = append(messages, fmt.Sprintf("平台: %s", name))
+			} else {
+				messages = append(messages, fmt.Sprintf("未知平台: 0x%04X", machine))
+			}
+
+			// Section 数量合理性
+			if numSections > 0 && numSections <= 96 {
+				confidence += 0.2
+				messages = append(messages, fmt.Sprintf("Section 数: %d", numSections))
+			} else {
+				messages = append(messages, fmt.Sprintf("异常 Section 数: %d", numSections))
+			}
+		}
+	}
+
+	// 大小合理性 (>= 1KB)
+	if size >= 1024 {
+		confidence += 0.1
+		messages = append(messages, fmt.Sprintf("文件大小: %s", types.FormatSize(size)))
+	}
+
+	if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	return Result{
+		IsValid:    confidence >= 0.5,
+		Confidence: confidence,
+		Message:    fmt.Sprintf("EXE 验证: %s", joinMessages(messages)),
+	}
+}
+
+// ---------- BMP 验证器 ----------
+
+func (v *Validator) validateBMP(offset, size int64) Result {
+	confidence := 0.0
+	messages := make([]string, 0, 5)
+
+	if size < 18 {
+		return Result{IsValid: false, Confidence: 0, Message: "BMP 文件过小"}
+	}
+
+	header, err := v.readAt(offset, 18)
+	if err != nil {
+		return Result{IsValid: false, Confidence: 0, Message: fmt.Sprintf("读取 BMP 头部失败: %v", err)}
+	}
+
+	// 验证 BM 签名
+	if header[0] != 'B' || header[1] != 'M' {
+		return Result{IsValid: false, Confidence: 0, Message: "BM 签名缺失"}
+	}
+	confidence += 0.1
+	messages = append(messages, "BM 签名正确")
+
+	// 嵌入的文件大小
+	embeddedSize := int64(binary.LittleEndian.Uint32(header[2:6]))
+
+	// 保留字段应为 0
+	reserved := binary.LittleEndian.Uint32(header[6:10])
+	if reserved != 0 {
+		messages = append(messages, fmt.Sprintf("保留字段非零: 0x%08X", reserved))
+		return Result{IsValid: false, Confidence: confidence, Message: fmt.Sprintf("BMP 验证: %s", joinMessages(messages))}
+	}
+	confidence += 0.2
+	messages = append(messages, "保留字段正确")
+
+	// 像素数据偏移
+	dataOffset := int64(binary.LittleEndian.Uint32(header[10:14]))
+
+	// DIB header 大小
+	dibSize := binary.LittleEndian.Uint32(header[14:18])
+
+	validDIB := dibSize == 12 || dibSize == 40 || dibSize == 52 || dibSize == 56 ||
+		dibSize == 108 || dibSize == 124
+	if validDIB {
+		confidence += 0.3
+		messages = append(messages, fmt.Sprintf("DIB 头大小有效: %d", dibSize))
+	} else {
+		messages = append(messages, fmt.Sprintf("DIB 头大小异常: %d", dibSize))
+		return Result{IsValid: false, Confidence: confidence, Message: fmt.Sprintf("BMP 验证: %s", joinMessages(messages))}
+	}
+
+	// 验证关系: dataOffset >= 14 + dibSize
+	if dataOffset >= 14+int64(dibSize) {
+		confidence += 0.2
+		messages = append(messages, fmt.Sprintf("像素偏移合理: %d", dataOffset))
+	} else {
+		messages = append(messages, fmt.Sprintf("像素偏移异常: %d (期望 >= %d)", dataOffset, 14+int64(dibSize)))
+	}
+
+	// 嵌入大小应大致匹配实际大小
+	if embeddedSize > 0 && embeddedSize <= size*2 && embeddedSize >= size/2 {
+		confidence += 0.2
+		messages = append(messages, fmt.Sprintf("嵌入大小匹配: %s", types.FormatSize(embeddedSize)))
+	}
+
+	if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	return Result{
+		IsValid:    confidence >= 0.5,
+		Confidence: confidence,
+		Message:    fmt.Sprintf("BMP 验证: %s", joinMessages(messages)),
+	}
 }
 
 // ---------- 通用验证器 ----------

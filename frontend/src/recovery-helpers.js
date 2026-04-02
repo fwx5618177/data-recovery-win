@@ -7,7 +7,7 @@ export const DEFAULT_SCAN_PLAN = {
   label: "默认完整恢复扫描",
   duration: "约 1-5 小时",
   description:
-    "自动执行 NTFS 分区发现、MFT 扫描、文件雕刻和完整性验证，尽可能把可恢复内容都找回来。",
+    "自动执行分区发现、文件记录扫描、深度扫描和完整性验证，尽可能把可恢复内容都找回来。",
   bestFor: "系统被重置、磁盘被格式化、需要最大化恢复范围",
 };
 
@@ -25,7 +25,7 @@ const categoryMeta = {
 const sourceMeta = {
   all: { key: "all", label: "全部来源", shortLabel: "全部" },
   ntfs: { key: "ntfs", label: "NTFS MFT", shortLabel: "MFT" },
-  carver: { key: "carver", label: "文件雕刻", shortLabel: "雕刻" },
+  carver: { key: "carver", label: "深度扫描", shortLabel: "深度" },
   signature: { key: "signature", label: "签名匹配", shortLabel: "签名" },
   fat: { key: "fat", label: "FAT 元数据", shortLabel: "FAT" },
   journal: { key: "journal", label: "日志恢复", shortLabel: "日志" },
