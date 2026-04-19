@@ -54,16 +54,8 @@ jobs:
             runner: windows-latest
             platform: windows/arm64
             source: build/bin/DataRecovery.exe
-          # macOS 拆分成两个架构：darwin/universal 在新 macOS runner 上偶发产物路径异常，
-          # 分开构建可读、可调试，也避免 lipo 合并失败导致 .app 不出现在默认路径
-          - name: macos-arm64
-            runner: macos-latest
-            platform: darwin/arm64
-            source: build/bin/DataRecovery.app
-          - name: macos-amd64
-            runner: macos-latest
-            platform: darwin/amd64
-            source: build/bin/DataRecovery.app
+          # macOS 暂时移除：darwin/universal 在新 macOS runner 上产物路径异常，
+          # darwin/arm64 和 darwin/amd64 分开构建也都拿不到 .app（需要进一步排查 Wails 与 Xcode 的兼容问题）
           # ubuntu-22.04 仍带 libwebkit2gtk-4.0-dev；ubuntu-latest（24.04）已废弃该包
           - name: linux-amd64
             runner: ubuntu-22.04

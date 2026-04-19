@@ -38,18 +38,8 @@ jobs:
             artifact: DataRecovery-windows-arm64.exe
             source: build/bin/DataRecovery.exe
             archive: copy
-          - name: macos-arm64
-            runner: macos-latest
-            platform: darwin/arm64
-            artifact: DataRecovery-macos-arm64.zip
-            source: build/bin/DataRecovery.app
-            archive: zip
-          - name: macos-amd64
-            runner: macos-latest
-            platform: darwin/amd64
-            artifact: DataRecovery-macos-amd64.zip
-            source: build/bin/DataRecovery.app
-            archive: zip
+          # macOS 暂时移除：Wails 在 macos runner 上 darwin/* 构建完成后没有把 .app
+          # 落到 build/bin/ 下（待排查 Wails × Xcode 版本问题）。需要发布 macOS 时再打开。
           # ubuntu-22.04 仍带 libwebkit2gtk-4.0-dev；ubuntu-latest（24.04）已废弃该包
           - name: linux-amd64
             runner: ubuntu-22.04
@@ -155,14 +145,13 @@ jobs:
             | --- | --- | --- |
             | Windows | Intel/AMD 64位 | `DataRecovery-windows-amd64.exe` |
             | Windows | ARM64 | `DataRecovery-windows-arm64.exe` |
-            | macOS | Apple Silicon (M1/M2/M3/M4) | `DataRecovery-macos-arm64.zip` |
-            | macOS | Intel | `DataRecovery-macos-amd64.zip` |
             | Linux | amd64 | `DataRecovery-linux-amd64.tar.gz` |
+
+            > macOS 版暂未包含，需要的用户可从源码自行 `make build-darwin` 构建。
 
             ### 使用方法
 
             - **Windows**：双击 exe 运行（会自动请求管理员权限）
-            - **macOS**：解压 zip → 右键 → 打开（首次需绕过 Gatekeeper）。读块设备需要 `sudo`
             - **Linux**：`tar -xzf DataRecovery-linux-amd64.tar.gz && sudo ./DataRecovery`（读块设备需要 root）
 
             ### 注意事项
