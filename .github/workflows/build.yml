@@ -1,6 +1,6 @@
 name: Build
 
-# main 推送 / PR 时触发的 CI：仅验证三平台都能构建，产物只作为短期 artifact 留 7 天。
+# main 推送 / PR 时触发的 CI：仅验证所有平台都能构建，产物只作为短期 artifact 留 7 天。
 # 目的：在打 tag 之前就发现跨平台问题，别等发版时 Release job 挂掉。
 on:
   push:
@@ -8,16 +8,30 @@ on:
   pull_request:
     branches: [main]
 
+# Node.js 20 deprecation 的预先迁移：让 actions 里内嵌的 JS 在 Node 24 上跑。
+# 等 actions 自己升到 Node 24 后可以去掉这行。
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # 快速的 Go 侧体检 —— 不跑 wails，只跑单元测试 + 交叉编译冒烟
   go-check:
     name: Go test + cross-compile smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+
+      # main.go 的 //go:embed all:frontend/dist 在没跑过前端构建时会让 go build 失败，
+      # 导致 vet/test/cross-compile 全挂。给一个占位目录满足 embed，不影响运行时语义
+      # （这个 job 不产出可执行文件）。
+      - name: Stub frontend/dist for //go:embed
+        run: |
+          mkdir -p frontend/dist
+          echo "ci stub, replaced by wails build" > frontend/dist/index.html
+
       - name: Go vet
         run: go vet ./...
       - name: Go test (race)
@@ -40,12 +54,19 @@ jobs:
             runner: windows-latest
             platform: windows/arm64
             source: build/bin/DataRecovery.exe
-          - name: macos-universal
+          # macOS 拆分成两个架构：darwin/universal 在新 macOS runner 上偶发产物路径异常，
+          # 分开构建可读、可调试，也避免 lipo 合并失败导致 .app 不出现在默认路径
+          - name: macos-arm64
             runner: macos-latest
-            platform: darwin/universal
+            platform: darwin/arm64
             source: build/bin/DataRecovery.app
+          - name: macos-amd64
+            runner: macos-latest
+            platform: darwin/amd64
+            source: build/bin/DataRecovery.app
+          # ubuntu-22.04 仍带 libwebkit2gtk-4.0-dev；ubuntu-latest（24.04）已废弃该包
           - name: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             platform: linux/amd64
             source: build/bin/DataRecovery
     runs-on: ${{ matrix.runner }}
@@ -69,7 +90,7 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
       - name: Install Linux build deps
-        if: matrix.runner == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
@@ -81,7 +102,16 @@ jobs:
       - name: Wails build
         run: wails build -platform ${{ matrix.platform }}
 
-      - name: Upload artifact (main only)
+      # 平台差异 debug：确认产物是否在预期路径；万一 wails 输出路径变了不用盲调 yaml
+      - name: List build output
+        shell: bash
+        run: |
+          echo "=== build/bin tree ==="
+          ls -la build/bin/ || true
+          echo "=== find *.app / *.exe / DataRecovery ==="
+          find build -maxdepth 3 \( -name "*.app" -o -name "*.exe" -o -name "DataRecovery" \) -print || true
+
+      - name: Upload artifact (main push only)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:

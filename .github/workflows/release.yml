@@ -9,11 +9,16 @@ on:
 permissions:
   contents: write
 
+# Node.js 20 deprecation 迁移：actions 自身的 JS 在 Node 24 上跑
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # =============================================================
-  # 并行构建 4 个平台产物
+  # 并行构建所有平台产物
   # Wails v2 的 macOS 构建必须在 macos runner 上跑（需要 Apple 工具链）；
-  # Windows / Linux 用各自的原生 runner，避免交叉编译引入的坑（webview 绑定等）。
+  # Windows / Linux 用各自的原生 runner。
+  # macOS 拆两个架构单独构建，避免 darwin/universal 在新 macOS 上偶发的合并异常。
   # =============================================================
   build:
     name: Build ${{ matrix.name }}
@@ -33,14 +38,21 @@ jobs:
             artifact: DataRecovery-windows-arm64.exe
             source: build/bin/DataRecovery.exe
             archive: copy
-          - name: macos-universal
+          - name: macos-arm64
             runner: macos-latest
-            platform: darwin/universal
-            artifact: DataRecovery-macos-universal.zip
+            platform: darwin/arm64
+            artifact: DataRecovery-macos-arm64.zip
             source: build/bin/DataRecovery.app
             archive: zip
+          - name: macos-amd64
+            runner: macos-latest
+            platform: darwin/amd64
+            artifact: DataRecovery-macos-amd64.zip
+            source: build/bin/DataRecovery.app
+            archive: zip
+          # ubuntu-22.04 仍带 libwebkit2gtk-4.0-dev；ubuntu-latest（24.04）已废弃该包
           - name: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             platform: linux/amd64
             artifact: DataRecovery-linux-amd64.tar.gz
             source: build/bin/DataRecovery
@@ -65,9 +77,8 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-      # Linux 上 Wails 依赖 webkit2gtk + gtk 开发头文件，runner 默认没装
       - name: Install Linux build deps
-        if: matrix.runner == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
@@ -79,8 +90,15 @@ jobs:
       - name: Wails build
         run: wails build -platform ${{ matrix.platform }}
 
+      - name: List build output
+        shell: bash
+        run: |
+          echo "=== build/bin tree ==="
+          ls -la build/bin/ || true
+          echo "=== find *.app / *.exe / DataRecovery ==="
+          find build -maxdepth 3 \( -name "*.app" -o -name "*.exe" -o -name "DataRecovery" \) -print || true
+
       # ---------- 归档 / 重命名 ----------
-      # Windows exe 单文件直接重命名；macOS .app 是目录必须 zip；Linux 二进制 tar.gz 兼容 chmod
       - name: Package (Windows exe)
         if: matrix.archive == 'copy'
         shell: bash
@@ -107,14 +125,13 @@ jobs:
           retention-days: 7
 
   # =============================================================
-  # 汇总到 GitHub Release
-  # 单独一个 job 下载所有 artifact 再创建 Release，避免多个 build job
-  # 并发写同一个 Release 引起的竞态。
+  # 汇总到 GitHub Release —— 单独一个 job 下载所有 artifact 再统一创建，
+  # 避免多个 build job 并发写同一个 Release 的竞态。
   # =============================================================
   release:
     name: Publish Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -138,13 +155,14 @@ jobs:
             | --- | --- | --- |
             | Windows | Intel/AMD 64位 | `DataRecovery-windows-amd64.exe` |
             | Windows | ARM64 | `DataRecovery-windows-arm64.exe` |
-            | macOS | Intel + Apple Silicon (Universal) | `DataRecovery-macos-universal.zip` |
+            | macOS | Apple Silicon (M1/M2/M3/M4) | `DataRecovery-macos-arm64.zip` |
+            | macOS | Intel | `DataRecovery-macos-amd64.zip` |
             | Linux | amd64 | `DataRecovery-linux-amd64.tar.gz` |
 
             ### 使用方法
 
             - **Windows**：双击 exe 运行（会自动请求管理员权限）
-            - **macOS**：解压 zip → 右键 → 打开（首次绕过 Gatekeeper）。读块设备需要 `sudo`
+            - **macOS**：解压 zip → 右键 → 打开（首次需绕过 Gatekeeper）。读块设备需要 `sudo`
             - **Linux**：`tar -xzf DataRecovery-linux-amd64.tar.gz && sudo ./DataRecovery`（读块设备需要 root）
 
             ### 注意事项
