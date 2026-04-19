@@ -2,33 +2,26 @@ import { formatConfidence } from "./formatters";
 
 export const DEFAULT_SCAN_MODE = "full";
 
-export const DEFAULT_SCAN_PLAN = {
-  value: DEFAULT_SCAN_MODE,
-  label: "默认完整恢复扫描",
-  duration: "约 1-5 小时",
-  description:
-    "自动执行分区发现、文件记录扫描、深度扫描和完整性验证，尽可能把可恢复内容都找回来。",
-  bestFor: "系统被重置、磁盘被格式化、需要最大化恢复范围",
-};
-
+/**
+ * 分类元数据：只保留文字标签（图标由 icons.jsx 根据分类 key 返回）。
+ * 新增一个分类时在这里加一行即可。
+ */
 const categoryMeta = {
-  all: { key: "all", icon: "全部", label: "全部文件" },
-  image: { key: "image", icon: "图片", label: "图片" },
-  document: { key: "document", icon: "文档", label: "文档" },
-  video: { key: "video", icon: "视频", label: "视频" },
-  audio: { key: "audio", icon: "音频", label: "音频" },
-  archive: { key: "archive", icon: "压缩包", label: "压缩包" },
-  database: { key: "database", icon: "数据库", label: "数据库" },
-  other: { key: "other", icon: "其他", label: "其他" },
+  all: { key: "all", label: "全部文件" },
+  image: { key: "image", label: "图片" },
+  document: { key: "document", label: "文档" },
+  video: { key: "video", label: "视频" },
+  audio: { key: "audio", label: "音频" },
+  archive: { key: "archive", label: "压缩包" },
+  database: { key: "database", label: "数据库" },
+  other: { key: "other", label: "其他" },
 };
 
 const sourceMeta = {
   all: { key: "all", label: "全部来源", shortLabel: "全部" },
-  ntfs: { key: "ntfs", label: "NTFS MFT", shortLabel: "MFT" },
+  ntfs: { key: "ntfs", label: "NTFS MFT", shortLabel: "NTFS" },
   carver: { key: "carver", label: "深度扫描", shortLabel: "深度" },
   signature: { key: "signature", label: "签名匹配", shortLabel: "签名" },
-  fat: { key: "fat", label: "FAT 元数据", shortLabel: "FAT" },
-  journal: { key: "journal", label: "日志恢复", shortLabel: "日志" },
   unknown: { key: "unknown", label: "未知来源", shortLabel: "未知" },
 };
 
@@ -67,20 +60,18 @@ export function isCancellationError(message) {
   );
 }
 
-export function mergeRecoveredFile(list, file) {
-  if (!file?.id) {
-    return list;
+/**
+ * 把扫描事件 payload 合并到 fileIndex（Map<id, file>）里。
+ * 使用 Map 让 O(n) 变成 O(1)，对 10 万级文件规模必需。
+ */
+export function mergeFileIntoIndex(index, file) {
+  if (!file?.id) return;
+  const prev = index.get(file.id);
+  if (prev) {
+    index.set(file.id, { ...prev, ...file });
+  } else {
+    index.set(file.id, file);
   }
-
-  const index = list.findIndex((item) => item.id === file.id);
-
-  if (index === -1) {
-    return [...list, file];
-  }
-
-  const next = [...list];
-  next[index] = { ...next[index], ...file };
-  return next;
 }
 
 export function normalizeRecoveryCompletion(
@@ -113,6 +104,7 @@ export function normalizeRecoveryCompletion(
     success,
     partial,
     failed,
+    records: payload?.records ?? payload?.Records ?? null,
   };
 }
 
@@ -132,4 +124,64 @@ export function recoveryScore(file) {
   }
 
   return 45;
+}
+
+/**
+ * 把用户在 UI 里设定的过滤条件应用到文件列表上。
+ * 为了扫描中也能高频调用，保持 O(n) 且无对象分配（除结果数组）。
+ */
+export function filterFiles(files, filter) {
+  if (!files || files.length === 0) return [];
+  const keyword = (filter.keyword || "").trim().toLowerCase();
+  const categories = filter.categories instanceof Set ? filter.categories : null;
+  const sources = filter.sources instanceof Set ? filter.sources : null;
+  const validityMode = filter.validity || "all"; // all | valid | invalid
+
+  const out = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (!f) continue;
+    if (categories && categories.size > 0 && !categories.has(f.category)) continue;
+    if (sources && sources.size > 0 && !sources.has(f.source)) continue;
+    if (validityMode === "valid" && !f.isValid) continue;
+    if (validityMode === "invalid" && f.isValid) continue;
+    if (keyword) {
+      const name = (f.fileName || "").toLowerCase();
+      const path = (f.originalPath || "").toLowerCase();
+      if (!name.includes(keyword) && !path.includes(keyword)) continue;
+    }
+    out.push(f);
+  }
+  return out;
+}
+
+export function countByCategory(files) {
+  const counts = {};
+  for (let i = 0; i < files.length; i++) {
+    const cat = files[i]?.category || "other";
+    counts[cat] = (counts[cat] || 0) + 1;
+  }
+  return counts;
+}
+
+export function countBySource(files) {
+  const counts = {};
+  for (let i = 0; i < files.length; i++) {
+    const src = files[i]?.source || "unknown";
+    counts[src] = (counts[src] || 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * 把一个字节数和另一个字节数比一下：返回 "富余 / 刚好 / 不够" 三态。
+ * 30% 余量以上算 富余，保底 1GB。
+ */
+export function sufficiencyOf(needed, available) {
+  if (!Number.isFinite(needed) || needed <= 0) return "unknown";
+  if (!Number.isFinite(available) || available <= 0) return "unknown";
+  if (available < needed) return "short";
+  const margin = Math.max(needed * 0.3, 1 * 1024 * 1024 * 1024);
+  if (available < needed + margin) return "tight";
+  return "ample";
 }

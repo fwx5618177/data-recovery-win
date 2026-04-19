@@ -1,4 +1,6 @@
-.PHONY: dev build build-windows clean deps install-wails check-wails
+.PHONY: dev build build-windows build-windows-arm64 build-darwin build-darwin-universal \
+        build-linux build-linux-arm64 build-all test lint clean deps install-wails check-wails \
+        verify-platforms
 
 # Go 代理设置（解决国内/网络不稳定环境下载依赖超时问题）
 # 可通过环境变量覆盖，例如: GOPROXY=https://proxy.golang.org,direct make deps
@@ -24,17 +26,55 @@ check-wails:
 		exit 1; \
 	}
 
-# 开发模式（macOS 本地）
+# 开发模式（本地平台）
 dev: check-wails
 	$(WAILS) dev
 
-# 构建 Windows 可执行文件（从 macOS 交叉编译）
+# 本地构建（自动识别平台）
+build: check-wails
+	$(WAILS) build
+
+# ===== 交叉编译目标 =====
+# 原始系统被盗并被重置到 Windows 时，用户可能在 macOS 或 Linux 上构建并回挂源盘扫描。
+# 以下提供三平台的交叉编译目标。
+
 build-windows: check-wails
 	$(WAILS) build -platform windows/amd64
 
-# 本地构建
-build: check-wails
-	$(WAILS) build
+build-windows-arm64: check-wails
+	$(WAILS) build -platform windows/arm64
+
+build-darwin: check-wails
+	$(WAILS) build -platform darwin/arm64
+
+build-darwin-universal: check-wails
+	$(WAILS) build -platform darwin/universal
+
+build-linux: check-wails
+	$(WAILS) build -platform linux/amd64
+
+build-linux-arm64: check-wails
+	$(WAILS) build -platform linux/arm64
+
+# 一键构建三平台（amd64）
+build-all: build-darwin build-linux build-windows
+
+# ===== 质量 =====
+test:
+	go test -race ./...
+
+lint:
+	go vet ./...
+
+# 只跑平台交叉编译冒烟，不依赖 wails CLI（CI 快速验证）
+verify-platforms:
+	@echo "🔧 交叉编译冒烟测试..."
+	GOOS=darwin  GOARCH=arm64 go build ./...
+	GOOS=darwin  GOARCH=amd64 go build ./...
+	GOOS=linux   GOARCH=amd64 go build ./...
+	GOOS=linux   GOARCH=arm64 go build ./...
+	GOOS=windows GOARCH=amd64 go build ./...
+	@echo "✅ 所有平台交叉编译均通过"
 
 # 安装依赖
 deps:

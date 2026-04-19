@@ -4,14 +4,17 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"data-recovery/internal/logging"
 )
+
+var adminLogger = logging.L().With("component", "admin")
 
 var (
 	modShell32        = windows.NewLazySystemDLL("shell32.dll")
@@ -32,7 +35,7 @@ func isWindowsAdmin() bool {
 		&sid,
 	)
 	if err != nil {
-		log.Printf("无法分配 SID: %v", err)
+		adminLogger.Warn("无法分配 SID", "err", err)
 		return false
 	}
 	defer windows.FreeSid(sid)
@@ -41,7 +44,7 @@ func isWindowsAdmin() bool {
 	token := windows.Token(0)
 	isMember, err := token.IsMember(sid)
 	if err != nil {
-		log.Printf("检查管理员权限失败: %v", err)
+		adminLogger.Warn("检查管理员权限失败", "err", err)
 		return false
 	}
 

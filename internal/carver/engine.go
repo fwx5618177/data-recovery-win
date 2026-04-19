@@ -3,24 +3,33 @@ package carver
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"data-recovery/internal/disk"
+	"data-recovery/internal/logging"
 	"data-recovery/internal/signature"
 	"data-recovery/internal/types"
 )
 
-// chunk 表示从磁盘读取的一个数据块
+var logger = logging.L().With("component", "carver")
+
+// chunk 表示从磁盘读取的一个数据块。
+//
+// Data 是池化的大缓冲区（容量固定为 ChunkSize+Overlap），处理完后必须归还：
+// 调用方（worker）在做完 AC 搜索后用 release() 把它还给 Engine.chunkPool。
+// matcher.Search 返回的 Pattern 是引用 AC 树里的常量字节，不是 Data 的切片，
+// 因此归还 Data 不会让后续 Collector 用到悬空引用。
 type chunk struct {
-	Data   []byte // 数据内容
-	Offset int64  // 在磁盘上的起始偏移
-	Size   int    // 有效数据长度（可能比 Data 小因为 overlap）
+	Data    []byte     // 池化的数据缓冲区（归还前 worker 会用 Data[:Size] 做匹配）
+	Offset  int64      // 在磁盘上的起始偏移
+	Size    int        // 有效数据长度（可能比 cap(Data) 小，因为 overlap 不足或到达末尾）
+	release func()     // 把 Data 归还到 Engine.chunkPool
 }
 
 // rawMatch 是 AC 匹配器的原始匹配结果
@@ -60,12 +69,106 @@ type Engine struct {
 	matcher *signature.AhoCorasick
 	config  Config
 
+	// chunkPool 复用 IO 读块的大缓冲（容量 = ChunkSize + Overlap）。
+	// 扫 64GB 盘 = 16k 个 chunk，不池化会产生 ~64GB 累计分配，GC 会越跑越慢；
+	// 池化后稳定在 "Workers+chanBuf+1" 个对象上。
+	chunkPool sync.Pool
+
 	// 统计
 	bytesScanned atomic.Int64
 	filesFound   atomic.Int32
 
+	// 每签名的 AC 命中数 / 最终产出数，便于在日志里定位"哪类签名在制造噪声"。
+	// 在 Scan() 开始时初始化。
+	hitsByExt    sync.Map // map[string]*int64 — 通过 AC 的裸命中数
+	emittedByExt sync.Map // map[string]*int64 — 成功产出 RecoveredFile 的数量
+
 	// 控制
 	cancel context.CancelFunc
+}
+
+// bumpCounter 把 sync.Map 里指定 key 的计数 +1；不存在则插入。
+func bumpCounter(m *sync.Map, key string) {
+	if v, ok := m.Load(key); ok {
+		atomic.AddInt64(v.(*int64), 1)
+		return
+	}
+	n := int64(1)
+	actual, loaded := m.LoadOrStore(key, &n)
+	if loaded {
+		atomic.AddInt64(actual.(*int64), 1)
+	}
+}
+
+// counterSnapshot 把 sync.Map 快照成一张可排序的 map，便于日志输出。
+func counterSnapshot(m *sync.Map) map[string]int64 {
+	out := make(map[string]int64)
+	m.Range(func(k, v any) bool {
+		out[k.(string)] = atomic.LoadInt64(v.(*int64))
+		return true
+	})
+	return out
+}
+
+// logCarverCounters 把本次扫描每签名的 AC 命中 vs 最终产出打印成一行易读日志。
+// 用途：当某类文件数量异常（例如"全是 MP3"），日志会直接暴露是签名筛选太松还是检测器太宽。
+func logCarverCounters(hits, emitted map[string]int64) {
+	// 把两个 map 合并成"ext -> hits/emitted"字符串。
+	keys := make(map[string]struct{}, len(hits)+len(emitted))
+	for k := range hits {
+		keys[k] = struct{}{}
+	}
+	for k := range emitted {
+		keys[k] = struct{}{}
+	}
+	// 按命中数倒序稳定排序，最先看到"噪音签名"
+	ordered := make([]string, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return hits[ordered[i]] > hits[ordered[j]]
+	})
+
+	// 简要行：ac_hits 总数 + emitted 总数
+	var totalHits, totalEmitted int64
+	for _, v := range hits {
+		totalHits += v
+	}
+	for _, v := range emitted {
+		totalEmitted += v
+	}
+	logger.Info("carver 签名统计汇总",
+		"ac_hits_total", totalHits,
+		"emitted_total", totalEmitted,
+		"drop_rate", dropRate(totalHits, totalEmitted),
+	)
+
+	// 明细行：ext=hits→emitted
+	for _, ext := range ordered {
+		h := hits[ext]
+		e := emitted[ext]
+		logger.Info("carver 签名明细",
+			"ext", ext,
+			"ac_hits", h,
+			"emitted", e,
+			"pass_rate", passRate(h, e),
+		)
+	}
+}
+
+func passRate(hits, emitted int64) string {
+	if hits == 0 {
+		return "--"
+	}
+	return fmt.Sprintf("%.1f%%", float64(emitted)/float64(hits)*100)
+}
+
+func dropRate(hits, emitted int64) string {
+	if hits == 0 {
+		return "--"
+	}
+	return fmt.Sprintf("%.1f%%", float64(hits-emitted)/float64(hits)*100)
 }
 
 // NewEngine 创建深度扫描引擎
@@ -127,6 +230,15 @@ func (e *Engine) Scan(
 
 	startTime := time.Now()
 
+	// 初始化 chunkPool（容量固定）—— 每次 Scan 都重建以避免跨 Scan 复用老 overlap 的缓冲
+	bufCap := int(e.config.ChunkSize) + e.config.Overlap
+	e.chunkPool = sync.Pool{
+		New: func() any {
+			b := make([]byte, bufCap)
+			return &b
+		},
+	}
+
 	// ---- 创建流水线 channel ----
 	chunkCh := make(chan *chunk, e.config.Workers*2) // IO → Workers
 	matchCh := make(chan *rawMatch, 1000)            // Workers → Collector
@@ -142,7 +254,6 @@ func (e *Engine) Scan(
 
 		offset := startOffset
 		overlap64 := int64(e.config.Overlap)
-		buf := make([]byte, e.config.ChunkSize+overlap64)
 
 		for offset < endOffset {
 			select {
@@ -150,6 +261,10 @@ func (e *Engine) Scan(
 				return
 			default:
 			}
+
+			// 从池里拿一块大缓冲
+			bufPtr := e.chunkPool.Get().(*[]byte)
+			buf := *bufPtr
 
 			// 计算本次实际读取大小（包含 overlap）
 			readSize := e.config.ChunkSize + overlap64
@@ -159,19 +274,30 @@ func (e *Engine) Scan(
 
 			n, err := e.reader.ReadAt(buf[:readSize], offset)
 			if n > 0 {
-				// 复制数据，避免多个 worker 之间的竞争
-				data := make([]byte, n)
-				copy(data, buf[:n])
-
+				// 不再做拷贝：worker 直接对池化缓冲做 AC 搜索，
+				// 完成后通过 release 归还（AC Match.Pattern 指向签名表，不是数据切片）
+				sentBuf := bufPtr
+				ch := &chunk{
+					Data:   buf,
+					Offset: offset,
+					Size:   n,
+					release: func() {
+						e.chunkPool.Put(sentBuf)
+					},
+				}
 				select {
-				case chunkCh <- &chunk{Data: data, Offset: offset, Size: n}:
+				case chunkCh <- ch:
 				case <-ctx.Done():
+					ch.release()
 					return
 				}
+			} else {
+				// n==0 没进 channel，缓冲直接归还
+				e.chunkPool.Put(bufPtr)
 			}
 
 			if err != nil && n == 0 {
-				log.Printf("[carver] IO: 读取偏移 0x%X 失败 (跳过): %v", offset, err)
+				logger.Warn("读取磁盘块失败(跳过)", "offset", fmt.Sprintf("0x%X", offset), "err", err)
 				// 跳过此块，继续下一个
 			}
 
@@ -195,12 +321,15 @@ func (e *Engine) Scan(
 			for c := range chunkCh {
 				select {
 				case <-ctx.Done():
+					if c.release != nil {
+						c.release()
+					}
 					return
 				default:
 				}
 
-				// 使用 AC 自动机在数据块中搜索所有签名
-				matches := e.matcher.Search(c.Data, c.Offset)
+				// 使用 AC 自动机在数据块中搜索所有签名（只看 Size 范围内的有效数据）
+				matches := e.matcher.Search(c.Data[:c.Size], c.Offset)
 				for _, m := range matches {
 					select {
 					case matchCh <- &rawMatch{
@@ -209,8 +338,17 @@ func (e *Engine) Scan(
 						Pattern:   m.Pattern,
 					}:
 					case <-ctx.Done():
+						if c.release != nil {
+							c.release()
+						}
 						return
 					}
+				}
+
+				// AC 搜索结果里的 Pattern 引用签名表常量，与 c.Data 无关，
+				// 因此这里立刻归还缓冲安全。
+				if c.release != nil {
+					c.release()
 				}
 			}
 		}(i)
@@ -295,17 +433,47 @@ func (e *Engine) Scan(
 	go func() {
 		defer wgCollector.Done()
 
-		// 用 map 去重，同一偏移只处理一次
+		// 用 map 去重，同一偏移只处理一次。
+		// IO 顺序读使偏移近似单调递增——当 map 过大时丢掉"远远落在水位线后面"的旧偏移，
+		// 避免扫大盘时 map 无限膨胀（千万级 entry 会恶化 GC，让扫描越跑越慢）。
+		//
+		// 保留窗口必须 >= Worker 乱序处理引起的最大延迟，否则过早删除的条目可能在
+		// overlap 区因另一个 chunk 再次命中被误判为新条目：
+		//   - N 个 worker 并行处理，最迟到达的 chunk 可能落后 ~N * ChunkSize
+		//   - 再留 chunkCh / matchCh 的缓冲余量
 		seen := make(map[int64]bool)
+		const seenSoftCap = 200_000 // 达到这个规模就尝试裁剪
+		lagChunks := int64(e.config.Workers)*4 + 16
+		keepLagBytes := lagChunks * e.config.ChunkSize
+		var maxSeenOffset int64
+
 		// 每种扩展名的序号计数器，用于生成可读文件名
 		extCounter := make(map[string]int)
 
 		for m := range matchCh {
+			// 追踪最大偏移作为水位线
+			if m.Offset > maxSeenOffset {
+				maxSeenOffset = m.Offset
+			}
+
 			// 去重
 			if seen[m.Offset] {
 				continue
 			}
 			seen[m.Offset] = true
+
+			// 超阈值时裁剪：删掉距水位线太远的老条目
+			if len(seen) > seenSoftCap {
+				cutoff := maxSeenOffset - keepLagBytes
+				for k := range seen {
+					if k < cutoff {
+						delete(seen, k)
+					}
+				}
+			}
+
+			// 诊断：记录 AC 命中
+			bumpCounter(&e.hitsByExt, m.Signature.Extension)
 
 			// 调用格式解析器确定文件大小
 			fileSize := e.determineFileSize(e.reader, m.Offset, m.Signature, m.Pattern)
@@ -371,10 +539,19 @@ func (e *Engine) Scan(
 				desc = "OpenDocument 演示"
 			}
 
-			// 生成可读文件名：{EXT}_{序号}.{ext}
+			// 生成可读文件名：<ext>_0x<offset>_<seq>.<ext>
+			// 偏移是磁盘级唯一坐标，便于从文件名反查扫描位置、做差异核对与复查
+			// （PhotoRec 的 f<offset>.<ext> 思路；这里再追加每类序号提高可读性）
 			extCounter[ext]++
 			seq := extCounter[ext]
-			fileName := fmt.Sprintf("%s_%06d.%s", strings.ToUpper(ext), seq, ext)
+			fileName := fmt.Sprintf("%s_0x%x_%06d.%s", ext, m.Offset, seq, ext)
+
+			// 基础置信度：格式解析能得到明确边界时稍高，只能靠 footer 搜索的稍低。
+			// 最终置信度由 validator 阶段根据文件结构完整性覆盖。
+			baseConfidence := 0.55
+			if sizeDetectionReliable(ext) {
+				baseConfidence = 0.7
+			}
 
 			// 构建恢复文件信息
 			file := &types.RecoveredFile{
@@ -386,11 +563,13 @@ func (e *Engine) Scan(
 				Size:        fileSize,
 				SizeHuman:   types.FormatSize(fileSize),
 				Offset:      m.Offset,
-				Confidence:  0.7, // 深度扫描的基础置信度
+				Confidence:  baseConfidence,
 				Description: desc,
 			}
 
 			e.filesFound.Add(1)
+			// 诊断：记录最终产出（用细分后的 ext，不是原始签名 ext）
+			bumpCounter(&e.emittedByExt, ext)
 
 			if onFound != nil {
 				onFound(file)
@@ -400,6 +579,9 @@ func (e *Engine) Scan(
 
 	// ---- 等待 Collector 完成（意味着所有匹配已处理）----
 	wgCollector.Wait()
+
+	// 诊断：打印每签名的 AC 命中 vs 实际产出，帮助定位误报源
+	logCarverCounters(counterSnapshot(&e.hitsByExt), counterSnapshot(&e.emittedByExt))
 
 	// 停止 Progress Goroutine
 	cancel()
@@ -553,25 +735,26 @@ func (e *Engine) determineFileSize(
 		}
 	}
 
-	// 检测失败时的处理策略:
-	// - 对高误报率格式 (exe, bmp, ico, elf)，返回 0 直接丢弃
-	// - 对其他格式，返回合理默认值
+	// 检测失败统一丢弃：返回凭空猜测的默认大小会把"签名在但实际不是该格式"的
+	// 误报变成凭空伪造的垃圾文件，对用户而言比少恢复一个文件更糟。
 	if size <= 0 {
-		switch sig.Extension {
-		case "exe", "elf", "bmp", "ico", "aac", "tiff":
-			// 这些格式的签名太短 (2-4 字节)，误报率极高
-			// 如果结构检测失败，说明不是该类型的真实文件
-			return 0
-		default:
-			defaultSize := int64(1 * 1024 * 1024) // 默认 1MB
-			if sig.MaxSize > 0 && sig.MaxSize < defaultSize {
-				defaultSize = sig.MaxSize
-			}
-			return defaultSize
-		}
+		return 0
 	}
 
 	return size
+}
+
+// sizeDetectionReliable 指示某个签名是否能通过格式解析得到可靠文件大小。
+// 用于 collector 判断结果文件的基础置信度。
+func sizeDetectionReliable(ext string) bool {
+	switch ext {
+	case "jpg", "jpeg", "png", "pdf", "zip", "mp4", "mov", "m4a", "3gp",
+		"mp3", "riff", "avi", "wav", "ole2", "doc", "xls", "ppt",
+		"bmp", "ico", "aac", "gif", "tiff", "exe":
+		return true
+	default:
+		return false
+	}
 }
 
 // searchFooter 在 [offset, offset+maxSize) 范围内搜索 footer 签名来确定文件大小

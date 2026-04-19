@@ -4,20 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"data-recovery/internal/carver"
 	"data-recovery/internal/disk"
+	"data-recovery/internal/logging"
 	"data-recovery/internal/ntfs"
 	"data-recovery/internal/signature"
 	"data-recovery/internal/types"
 	"data-recovery/internal/validator"
 )
+
+// logger 为本包的结构化 logger，所有日志统一加 component=engine 便于过滤。
+var logger = logging.L().With("component", "engine")
 
 // ScanCallbacks 扫描回调函数集合
 type ScanCallbacks struct {
@@ -30,12 +34,39 @@ type RecoverCallbacks struct {
 	OnProgress func(types.RecoveryProgress)
 }
 
-// RecoveryResult 恢复操作的结果
+// FileRecoveryState 单个文件的恢复最终状态。
+type FileRecoveryState string
+
+const (
+	RecoveryStateSuccess FileRecoveryState = "success"
+	RecoveryStateFailed  FileRecoveryState = "failed"
+	RecoveryStatePartial FileRecoveryState = "partial"
+	RecoveryStateSkipped FileRecoveryState = "skipped"
+)
+
+// FileRecoveryRecord 记录一次恢复操作中单个文件的落地情况，
+// 用于前端展示失败清单和"只重试失败文件"功能。
+type FileRecoveryRecord struct {
+	FileID      string            `json:"fileId"`
+	FileName    string            `json:"fileName"`
+	Category    string            `json:"category"`
+	Size        int64             `json:"size"`
+	SizeHuman   string            `json:"sizeHuman"`
+	State       FileRecoveryState `json:"state"`
+	OutputPath  string            `json:"outputPath,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	DurationMs  int64             `json:"durationMs"`
+	CompletedAt time.Time         `json:"completedAt"`
+}
+
+// RecoveryResult 恢复操作的结果汇总。
 type RecoveryResult struct {
-	Succeeded int `json:"success"`
-	Partial   int `json:"partial"`
-	Failed    int `json:"failed"`
-	Total     int `json:"total"`
+	Succeeded  int                   `json:"success"`
+	Partial    int                   `json:"partial"`
+	Failed     int                   `json:"failed"`
+	Duplicates int                   `json:"duplicates"` // 跨源 SHA-256 去重数量
+	Total      int                   `json:"total"`
+	Records    []*FileRecoveryRecord `json:"records"`
 }
 
 type ntfsRecoverySource struct {
@@ -61,6 +92,9 @@ type Engine struct {
 	results    []*types.RecoveredFile
 	scanning   bool
 	recovering bool
+
+	// 最近一次恢复操作的每文件结果，供前端展示失败清单和执行重试
+	lastRecovery []*FileRecoveryRecord
 
 	scanCancel    context.CancelFunc
 	recoverCancel context.CancelFunc
@@ -121,7 +155,7 @@ func (e *Engine) Scan(
 	}
 	defer func() {
 		if err := reader.Close(); err != nil {
-			log.Printf("[Engine] 关闭磁盘设备失败: %v", err)
+			logger.Warn("关闭磁盘设备失败", "err", err)
 		}
 	}()
 
@@ -162,7 +196,7 @@ func (e *Engine) Scan(
 	switch mode {
 	case types.ScanQuick:
 		// 快速模式：仅 NTFS MFT 扫描
-		log.Println("[Engine] 快速扫描模式: 仅 NTFS MFT")
+		logger.Info("扫描模式", "mode", "quick")
 		files, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
 			// quick 模式下 NTFS 占 0-95%
 			p.Percent = p.Percent * 0.95
@@ -175,7 +209,7 @@ func (e *Engine) Scan(
 
 	case types.ScanDeep:
 		// 深度模式：仅深度扫描
-		log.Println("[Engine] 深度扫描模式: 仅深度扫描")
+		logger.Info("扫描模式", "mode", "deep")
 		files, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
 			// deep 模式下 carver 占 0-95%
 			p.Percent = p.Percent * 0.95
@@ -188,7 +222,7 @@ func (e *Engine) Scan(
 
 	case types.ScanFull:
 		// 完整模式：NTFS + 深度扫描 + 验证
-		log.Println("[Engine] 完整扫描模式: NTFS + 深度扫描 + 验证")
+		logger.Info("扫描模式", "mode", "full")
 
 		// 阶段1: NTFS 扫描 (0-40%)
 		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
@@ -197,7 +231,7 @@ func (e *Engine) Scan(
 		}, safeFound)
 		if err != nil {
 			// NTFS 扫描失败不中断，记录日志继续深度扫描
-			log.Printf("[Engine] NTFS 扫描失败 (继续深度扫描): %v", err)
+			logger.Warn("NTFS 扫描失败 (继续深度扫描)", "err", err)
 		} else {
 			allFiles = append(allFiles, ntfsFiles...)
 		}
@@ -213,7 +247,7 @@ func (e *Engine) Scan(
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
-			log.Printf("[Engine] 深度扫描失败: %v", err)
+			logger.Warn("深度扫描失败", "err", err)
 		} else {
 			allFiles = append(allFiles, carverFiles...)
 		}
@@ -267,7 +301,7 @@ func (e *Engine) Scan(
 		Elapsed:      types.FormatDuration(duration),
 	})
 
-	log.Printf("[Engine] 扫描完成: 耗时 %.1f 秒, 找到 %d 个文件", duration, len(allFiles))
+	logger.Info("扫描完成", "duration_seconds", duration, "files", len(allFiles))
 	return result, nil
 }
 
@@ -286,7 +320,7 @@ func (e *Engine) runNTFSScan(
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	log.Println("[Engine] 开始 NTFS MFT 扫描...")
+	logger.Info("开始 NTFS MFT 扫描")
 
 	scanner := ntfs.NewScanner(reader)
 	e.mu.Lock()
@@ -347,7 +381,7 @@ func (e *Engine) runNTFSScan(
 				return files, ctx.Err()
 			}
 			lastErr = partitionErr
-			log.Printf("[Engine] %s 扫描失败: %v", partitionLabel, partitionErr)
+			logger.Warn("分区扫描失败", "partition", partitionLabel, "err", partitionErr)
 			accumulatedWeight += normalizedWeight
 			continue
 		}
@@ -362,7 +396,7 @@ func (e *Engine) runNTFSScan(
 		return nil, lastErr
 	}
 
-	log.Printf("[Engine] NTFS 扫描完成: 共扫描 %d 个分区，找到 %d 个可恢复文件", partitionScanned, len(files))
+	logger.Info("NTFS 扫描完成", "partitions", partitionScanned, "files", len(files))
 	return files, nil
 }
 
@@ -432,7 +466,7 @@ func (e *Engine) runCarverScan(
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
 
-	log.Println("[Engine] 开始深度扫描...")
+	logger.Info("开始深度扫描")
 
 	// 获取磁盘总大小
 	totalSize, err := reader.Size()
@@ -471,7 +505,7 @@ func (e *Engine) runCarverScan(
 		return files, fmt.Errorf("深度扫描失败: %w", err)
 	}
 
-	log.Printf("[Engine] 深度扫描完成: 找到 %d 个文件", len(files))
+	logger.Info("深度扫描完成", "files", len(files))
 	return files, nil
 }
 
@@ -489,7 +523,7 @@ func (e *Engine) validateAll(
 		return
 	}
 
-	log.Printf("[Engine] 开始验证 %d 个文件...", len(files))
+	logger.Info("开始验证文件", "files", len(files))
 
 	v := validator.NewValidator(reader)
 	e.mu.Lock()
@@ -543,7 +577,14 @@ func (e *Engine) validateAll(
 		}
 	}
 
-	log.Printf("[Engine] 验证完成: %d/%d 有效", validCount, total)
+	logger.Info("验证完成", "valid", validCount, "total", total)
+}
+
+// RecoverOptions 恢复选项，暴露给前端细粒度控制的开关。
+type RecoverOptions struct {
+	// AllowSameDisk=true 时跳过"恢复目录与源盘同一物理磁盘"的安全检查。
+	// 业界标准实践是拒绝同盘恢复（可能覆盖源扇区）。仅在用户显式勾选"我已了解风险"时才启用。
+	AllowSameDisk bool
 }
 
 // Recover 恢复选中的文件到输出目录
@@ -555,6 +596,17 @@ func (e *Engine) validateAll(
 func (e *Engine) Recover(
 	fileIDs []string,
 	outputDir string,
+	callbacks RecoverCallbacks,
+) (*RecoveryResult, error) {
+	return e.RecoverWithOptions(fileIDs, outputDir, RecoverOptions{}, callbacks)
+}
+
+// RecoverWithOptions 是 Recover 的扩展版本，接受 RecoverOptions。
+// 保留 Recover 兼容老调用点；新调用点优先走这个。
+func (e *Engine) RecoverWithOptions(
+	fileIDs []string,
+	outputDir string,
+	opts RecoverOptions,
 	callbacks RecoverCallbacks,
 ) (*RecoveryResult, error) {
 	e.mu.Lock()
@@ -582,7 +634,14 @@ func (e *Engine) Recover(
 		return nil, fmt.Errorf("恢复源磁盘路径为空，请重新扫描后再试")
 	}
 	if err := disk.ValidateRecoveryTarget(devicePath, outputDir); err != nil {
-		return nil, err
+		if opts.AllowSameDisk {
+			logger.Warn("用户已确认风险，跳过同盘安全检查",
+				"source", devicePath,
+				"output", outputDir,
+				"blocked_reason", err.Error())
+		} else {
+			return nil, err
+		}
 	}
 
 	// Scan() 结束时会关闭扫描阶段使用的 reader，因此恢复阶段需要重新打开一个新的 reader。
@@ -592,7 +651,7 @@ func (e *Engine) Recover(
 	}
 	defer func() {
 		if err := recoverReader.Close(); err != nil {
-			log.Printf("[Engine] 关闭恢复阶段 reader 失败: %v", err)
+			logger.Warn("关闭恢复阶段 reader 失败", "err", err)
 		}
 	}()
 
@@ -622,20 +681,49 @@ func (e *Engine) Recover(
 		return nil, fmt.Errorf("未找到要恢复的文件 (请求 %d 个 ID)", len(fileIDs))
 	}
 
+	// 跨源去重优先级：NTFS 先于 carver 落地。
+	// 同一内容（SHA-256 一致）时保留带元数据（原路径/时间戳）的 NTFS 版本，
+	// 丢弃后到达的 carver 版本。
+	sort.SliceStable(targetFiles, func(i, j int) bool {
+		return ntfsFirstLess(targetFiles[i].Source, targetFiles[j].Source)
+	})
+
 	// 创建 SafeWriter
 	writer := NewSafeWriter(recoverReader, outputDir)
 	e.mu.Lock()
 	e.writer = writer
 	e.mu.Unlock()
 
-	// 恢复前即时验证：用于扫描过程中“立即恢复”场景，尽量拦截明显无效文件
+	// 恢复前即时验证：用于扫描过程中"立即恢复"场景，尽量拦截明显无效文件
 	recoverValidator := validator.NewValidator(recoverReader)
+
+	// 跨源 SHA-256 去重表：写入成功后登记；若后续文件命中同 hash 则跳过。
+	// 排序已保证 NTFS 先于 carver（ntfs_ 字典序在 carve_ 前），因此命中时丢弃的
+	// 一定是后来的、元数据更少的 carver 文件。
+	seenHashes := make(map[string]string) // sha256 -> 已保留的输出路径
 
 	total := len(targetFiles)
 	successCount := 0
 	partialCount := 0
 	failedCount := 0
+	duplicateCount := 0
 	bytesWritten := int64(0)
+	records := make([]*FileRecoveryRecord, 0, total)
+
+	appendRecord := func(file *types.RecoveredFile, state FileRecoveryState, outputPath, msg string, started time.Time) {
+		records = append(records, &FileRecoveryRecord{
+			FileID:      file.ID,
+			FileName:    file.FileName,
+			Category:    string(file.Category),
+			Size:        file.Size,
+			SizeHuman:   types.FormatSize(file.Size),
+			State:       state,
+			OutputPath:  outputPath,
+			Message:     msg,
+			DurationMs:  time.Since(started).Milliseconds(),
+			CompletedAt: time.Now(),
+		})
+	}
 
 	safeProgress := func(p types.RecoveryProgress) {
 		if callbacks.OnProgress != nil {
@@ -647,16 +735,19 @@ func (e *Engine) Recover(
 		Current:      0,
 		Total:        total,
 		BytesWritten: 0,
-		Success:      0,
-		Partial:      0,
-		Failed:       0,
 	})
 
 	for i, file := range targetFiles {
 		// 检查是否已取消
 		if ctx.Err() != nil {
+			// 把已经跑过的记录保存下来，便于用户看到取消时的状态
+			e.mu.Lock()
+			e.lastRecovery = records
+			e.mu.Unlock()
 			return nil, fmt.Errorf("恢复操作已取消")
 		}
+
+		started := time.Now()
 
 		// 对深度扫描来源文件做即时验证，避免导出明显不可用的数据片段
 		if file.Source == "carver" {
@@ -667,7 +758,8 @@ func (e *Engine) Recover(
 
 			if !verify.IsValid {
 				failedCount++
-				log.Printf("[Engine] 跳过低可靠文件 [%s]: %s", file.FileName, verify.Message)
+				appendRecord(file, RecoveryStateSkipped, "", "深度扫描结果校验失败: "+verify.Message, started)
+				logger.Info("跳过低可靠文件", "file", file.FileName, "reason", verify.Message)
 				safeProgress(types.RecoveryProgress{
 					Current:      successCount + partialCount + failedCount,
 					Total:        total,
@@ -681,8 +773,23 @@ func (e *Engine) Recover(
 			}
 		}
 
-		// 生成输出路径
-		outputPath := writer.GenerateOutputPath(file, outputDir)
+		// 生成输出路径（新版会按置信度/批次分目录；扩展名非法时返回错误直接跳过）
+		outputPath, pathErr := writer.GenerateOutputPath(file, outputDir)
+		if pathErr != nil {
+			failedCount++
+			appendRecord(file, RecoveryStateSkipped, "", "生成输出路径失败: "+pathErr.Error(), started)
+			logger.Warn("跳过输出路径生成失败的文件", "file", file.FileName, "err", pathErr)
+			safeProgress(types.RecoveryProgress{
+				Current:      successCount + partialCount + failedCount,
+				Total:        total,
+				CurrentFile:  file.FileName,
+				BytesWritten: bytesWritten,
+				Success:      successCount,
+				Partial:      partialCount,
+				Failed:       failedCount,
+			})
+			continue
+		}
 
 		safeProgress(types.RecoveryProgress{
 			Current:      i,
@@ -704,26 +811,54 @@ func (e *Engine) Recover(
 			writeErr = writer.WriteFile(file, outputPath)
 		}
 
+		// 写入成功后做跨源 SHA-256 去重：同 hash 已落地过则删掉当前副本
+		if writeErr == nil && file.SHA256 != "" {
+			if prevPath, dup := seenHashes[file.SHA256]; dup {
+				if rmErr := os.Remove(outputPath); rmErr != nil {
+					logger.Warn("删除重复文件失败", "path", outputPath, "err", rmErr)
+				}
+				duplicateCount++
+				appendRecord(file, RecoveryStateSkipped, "",
+					fmt.Sprintf("与已恢复文件内容重复 (SHA256=%s...)，已去重：保留 %s",
+						file.SHA256[:12], prevPath), started)
+				logger.Info("跨源去重", "file", file.FileName, "keep", prevPath)
+				safeProgress(types.RecoveryProgress{
+					Current:      successCount + partialCount + failedCount + duplicateCount,
+					Total:        total,
+					CurrentFile:  file.FileName,
+					BytesWritten: bytesWritten,
+					Success:      successCount,
+					Partial:      partialCount,
+					Failed:       failedCount,
+				})
+				continue
+			}
+			seenHashes[file.SHA256] = outputPath
+		}
+
 		var partialErr *PartialWriteError
 		switch {
 		case writeErr == nil:
 			successCount++
 			bytesWritten += file.Size
-			log.Printf("[Engine] 恢复文件成功: %s -> %s", file.FileName, outputPath)
+			appendRecord(file, RecoveryStateSuccess, outputPath, "", started)
+			logger.Info("恢复文件成功", "file", file.FileName, "output", outputPath)
 		case errors.As(writeErr, &partialErr):
 			// 严格模式：部分恢复视为失败，删除不完整输出，避免导出不可用文件
 			if rmErr := os.Remove(partialErr.OutputPath); rmErr != nil {
-				log.Printf("[Engine] 清理部分恢复文件失败 [%s]: %v", partialErr.OutputPath, rmErr)
+				logger.Warn("清理部分恢复文件失败", "path", partialErr.OutputPath, "err", rmErr)
 			}
 			failedCount++
-			log.Printf("[Engine] 文件恢复失败（检测到不完整，已清理）[%s]: %v", file.FileName, partialErr)
+			appendRecord(file, RecoveryStateFailed, "", fmt.Sprintf("部分恢复已清理: %s", partialErr.Error()), started)
+			logger.Warn("文件恢复失败(不完整，已清理)", "file", file.FileName, "err", partialErr)
 		default:
 			failedCount++
-			log.Printf("[Engine] 恢复文件失败 [%s]: %v", file.FileName, writeErr)
+			appendRecord(file, RecoveryStateFailed, "", writeErr.Error(), started)
+			logger.Warn("恢复文件失败", "file", file.FileName, "err", writeErr)
 		}
 
 		safeProgress(types.RecoveryProgress{
-			Current:      successCount + partialCount + failedCount,
+			Current:      successCount + partialCount + failedCount + duplicateCount,
 			Total:        total,
 			CurrentFile:  file.FileName,
 			BytesWritten: bytesWritten,
@@ -743,13 +878,58 @@ func (e *Engine) Recover(
 		Failed:       failedCount,
 	})
 
-	log.Printf("[Engine] 恢复完成: 成功 %d, 部分恢复 %d, 失败 %d", successCount, partialCount, failedCount)
+	// 缓存每文件记录，供 GetLastRecoveryResult / ExportRecoveryReport / RetryFailedRecovery 使用
+	e.mu.Lock()
+	e.lastRecovery = records
+	e.mu.Unlock()
+
+	// 写入 JSON manifest（机读元数据）。失败只记日志，不阻塞恢复流程。
+	if manifestPath, err := ExportManifestJSON(records, targetFiles, outputDir); err != nil {
+		logger.Warn("导出 manifest.json 失败", "err", err)
+	} else {
+		logger.Info("manifest 已导出", "path", manifestPath)
+	}
+
+	logger.Info("恢复完成",
+		"success", successCount,
+		"partial", partialCount,
+		"failed", failedCount,
+		"duplicates", duplicateCount)
 	return &RecoveryResult{
-		Succeeded: successCount,
-		Partial:   partialCount,
-		Failed:    failedCount,
-		Total:     total,
+		Succeeded:  successCount,
+		Partial:    partialCount,
+		Failed:     failedCount,
+		Duplicates: duplicateCount,
+		Total:      total,
+		Records:    records,
 	}, nil
+}
+
+// GetLastRecoveryResult 返回最近一次恢复的每文件记录（按失败在前排序便于前端展示）。
+func (e *Engine) GetLastRecoveryResult() []*FileRecoveryRecord {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if len(e.lastRecovery) == 0 {
+		return nil
+	}
+	out := make([]*FileRecoveryRecord, len(e.lastRecovery))
+	copy(out, e.lastRecovery)
+	return out
+}
+
+// FailedRecoveryFileIDs 返回最近一次恢复中状态为 failed / partial / skipped 的文件 ID。
+func (e *Engine) FailedRecoveryFileIDs() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var ids []string
+	for _, r := range e.lastRecovery {
+		if r.State == RecoveryStateFailed || r.State == RecoveryStatePartial || r.State == RecoveryStateSkipped {
+			ids = append(ids, r.FileID)
+		}
+	}
+	return ids
 }
 
 func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
@@ -775,9 +955,9 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 
 // recoverNTFSFile 使用 NTFS MFT 数据恢复文件
 //
-// 在缓存的 NTFS 恢复源中按 ID 查找对应条目，
-// 找到则使用 WriteNTFSFile 按 DataRuns 读取，
-// 找不到则回退到通用 WriteFile。
+// 从缓存的 NTFS 恢复源中按 ID 查找对应条目，
+// 然后使用 WriteNTFSFile 按 DataRuns 读取。若缓存缺失则直接失败，
+// 不再回退到按 Offset 的 WriteFile——因为碎片化文件的后续段在那里会被忽略。
 func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) error {
 	e.mu.RLock()
 	source, ok := e.ntfsSources[file.ID]
@@ -789,9 +969,7 @@ func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) e
 	}
 
 	if !ok || source.Entry == nil || source.Boot == nil {
-		// MFT 条目不可用，回退到通用写入
-		log.Printf("[Engine] NTFS 条目未找到 (ID=%s)，回退通用写入", file.ID)
-		return writer.WriteFile(file, outputPath)
+		return fmt.Errorf("NTFS 恢复源已丢失 (ID=%s)，请重新扫描后再恢复", file.ID)
 	}
 
 	return writer.WriteNTFSFile(file, source.Entry, source.Boot, source.PartitionOffset, outputPath)
@@ -804,7 +982,7 @@ func (e *Engine) Stop() {
 	e.mu.RUnlock()
 
 	if cancel != nil {
-		log.Println("[Engine] 正在取消扫描...")
+		logger.Info("正在取消扫描")
 		cancel()
 	}
 }
@@ -816,7 +994,7 @@ func (e *Engine) StopRecovery() {
 	e.mu.RUnlock()
 
 	if cancel != nil {
-		log.Println("[Engine] 正在取消恢复操作...")
+		logger.Info("正在取消恢复操作")
 		cancel()
 	}
 }
@@ -846,7 +1024,7 @@ func (e *Engine) Results() *types.ScanResult {
 
 // Shutdown 关闭引擎，释放所有资源
 func (e *Engine) Shutdown() {
-	log.Println("[Engine] 正在关闭引擎...")
+	logger.Info("正在关闭引擎")
 
 	// 取消所有正在进行的操作
 	e.Stop()
@@ -858,7 +1036,7 @@ func (e *Engine) Shutdown() {
 	// 关闭磁盘读取器
 	if e.reader != nil {
 		if err := e.reader.Close(); err != nil {
-			log.Printf("[Engine] 关闭磁盘读取器失败: %v", err)
+			logger.Warn("关闭磁盘读取器失败", "err", err)
 		}
 		e.reader = nil
 	}
@@ -871,7 +1049,7 @@ func (e *Engine) Shutdown() {
 	e.results = nil
 	e.ntfsSources = nil
 
-	log.Println("[Engine] 引擎已关闭")
+	logger.Info("引擎已关闭")
 }
 
 func (e *Engine) resolveNTFSPartitions(
@@ -1031,8 +1209,11 @@ func (e *Engine) scanNTFSPartition(
 		}
 	}
 
-	log.Printf("[Engine] %s 扫描完成: 共 %d 条目, %d 个已删除, %d 个可恢复文件",
-		partitionLabel, len(allEntries), len(deletedEntries), len(files))
+	logger.Info("分区扫描完成",
+		"partition", partitionLabel,
+		"entries", len(allEntries),
+		"deleted", len(deletedEntries),
+		"recoverable", len(files))
 	return files, nil
 }
 
@@ -1054,6 +1235,20 @@ func partitionWeight(partition ntfs.Partition) float64 {
 
 func ntfsFileID(partitionOffset int64, entryNumber int64) string {
 	return fmt.Sprintf("ntfs_%X_%d", partitionOffset, entryNumber)
+}
+
+// ntfsFirstLess 让 NTFS 来源排在其它来源（carver 等）之前。
+// 用于 sort.SliceStable 的 less 函数，确保跨源 SHA-256 去重时保留带元数据的 NTFS 版本。
+//
+// 注意：不能依赖字母序 —— "carver" < "ntfs" 会让 carver 跑在前面，与去重意图相反。
+func ntfsFirstLess(a, b string) bool {
+	if a == "ntfs" && b != "ntfs" {
+		return true
+	}
+	if a != "ntfs" && b == "ntfs" {
+		return false
+	}
+	return false
 }
 
 func (e *Engine) cacheNTFSSource(fileID string, source ntfsRecoverySource) {

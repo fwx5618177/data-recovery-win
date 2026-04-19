@@ -566,116 +566,140 @@ func isValidAtomType(t string) bool {
 //   一系列 MPEG audio frames (帧同步: 11 bit, 0xFFE0 mask)
 //   可选 ID3v1 tag (以 "TAG" 开头, 固定 128 字节)
 
-// detectMP3Size 解析 ID3 tag 和 MP3 帧来确定文件大小
+// detectMP3Size 解析 ID3 tag 和 MP3 帧来确定文件大小。
+//
+// 对误报敏感：MP3 帧同步只有 11 bit（~1/2048 随机命中），再加上
+// 合法 bitrate/sample-rate/layer 组合也只有 2/3 过滤率，纯随机数据也能
+// 偶发凑出几个"valid-looking frame"。所以这里做三层硬性校验：
+//
+//   1. AC 命中偏移处必须直接是一个合法帧头（FFFB/FFF3/FFF2），或
+//      是一个合法的 ID3v2 头（"ID3" + syncsafe size + 非零版本号）。
+//   2. 跳过 ID3v2 tag 后，**下一个字节**就必须是合法帧头（不允许移位搜索）。
+//   3. 从第一帧起连续读 minValidFrames 帧，每帧必须正好落在 prev+fs 偏移上
+//      （不允许 1-3 字节的 slack），且 fs 在合法范围（16..2881 字节）内。
+//      一旦失败就整体放弃，而不是"容忍 3 次"。
+//
+// 常量 minValidFrames = 16 的依据：
+//   - 单帧 FF + valid header 的随机发生率 ≈ 1/3100
+//   - 连续 16 帧全中的随机概率 ≈ (1/3100)^15 ≈ 10^-52，比宇宙总数都小
+//   - 真实 MP3 最小是 10 帧级别（低比特率长度 1 秒以下），给 16 留点缓冲
+const (
+	mp3MinValidFrames = 16
+	mp3MinFrameSize   = 16   // MPEG2.5 Layer III @ 8kbps, 24kHz 的下限
+	mp3MaxFrameSize   = 2881 // MPEG1 Layer I @ 448kbps, 32kHz 的上限 + padding
+)
+
 func detectMP3Size(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 	endLimit := offset + maxSize
-	pos := offset
 
-	// ---- 第一步：检查并跳过 ID3v2 tag ----
-	id3hdr, err := readBytesAt(reader, pos, 10)
-	if err != nil {
+	// ---- 层 1: AC 命中处的合法性判定 + 可能跳过 ID3v2 ----
+	head, err := readBytesAt(reader, offset, 10)
+	if err != nil || len(head) < 4 {
 		return 0
 	}
 
-	if len(id3hdr) >= 10 && id3hdr[0] == 'I' && id3hdr[1] == 'D' && id3hdr[2] == '3' {
-		// ID3v2 tag size 存储为 syncsafe integer (每字节仅低 7 位有效)
-		if id3hdr[6] <= 0x7F && id3hdr[7] <= 0x7F && id3hdr[8] <= 0x7F && id3hdr[9] <= 0x7F {
-			tagSize := int64(id3hdr[6]&0x7F)<<21 |
-				int64(id3hdr[7]&0x7F)<<14 |
-				int64(id3hdr[8]&0x7F)<<7 |
-				int64(id3hdr[9]&0x7F)
-			pos += 10 + tagSize // 跳过 10 字节 header + tag 数据
+	pos := offset
+	if head[0] == 'I' && head[1] == 'D' && head[2] == '3' {
+		// ID3v2：版本号必须 2/3/4，flags 允许任意，size 是 syncsafe（4 字节高位为 0）
+		if !(head[3] == 2 || head[3] == 3 || head[3] == 4) {
+			return 0
+		}
+		if head[6] > 0x7F || head[7] > 0x7F || head[8] > 0x7F || head[9] > 0x7F {
+			return 0
+		}
+		tagSize := int64(head[6]&0x7F)<<21 |
+			int64(head[7]&0x7F)<<14 |
+			int64(head[8]&0x7F)<<7 |
+			int64(head[9]&0x7F)
+		pos = offset + 10 + tagSize
+	} else {
+		// 非 ID3 必须直接是合法帧头
+		if head[0] != 0xFF || (head[1]&0xE0) != 0xE0 {
+			return 0
+		}
+		if mp3FrameSize(head[:4]) <= 0 {
+			return 0
 		}
 	}
-
-	// ---- 第二步：寻找第一个有效帧同步 ----
 	if pos >= endLimit {
 		return 0
 	}
 
-	// 在接下来的数据中搜索帧同步 (最多搜索 4KB)
-	syncSearchLen := int64(4096)
-	if syncSearchLen > endLimit-pos {
-		syncSearchLen = endLimit - pos
+	// ---- 层 2: 跳过 tag 后下一帧必须立即出现 ----
+	fhBuf, err := readBytesAt(reader, pos, 4)
+	if err != nil || len(fhBuf) < 4 {
+		return 0
 	}
-	syncBuf, err := readBytesAt(reader, pos, int(syncSearchLen))
-	if err != nil || len(syncBuf) < 4 {
+	if fhBuf[0] != 0xFF || (fhBuf[1]&0xE0) != 0xE0 {
+		return 0
+	}
+	firstFS := mp3FrameSize(fhBuf)
+	if firstFS < mp3MinFrameSize || firstFS > mp3MaxFrameSize {
 		return 0
 	}
 
-	frameStart := int64(-1)
-	for i := 0; i < len(syncBuf)-3; i++ {
-		if syncBuf[i] == 0xFF && (syncBuf[i+1]&0xE0) == 0xE0 {
-			// 找到可能的帧同步，验证帧头
-			fh := syncBuf[i : i+4]
-			fs := mp3FrameSize(fh)
-			if fs > 0 {
-				frameStart = pos + int64(i)
-				break
-			}
-		}
-	}
+	// 帧头的前 3 个字节（除 padding bit 外）在整首 MP3 内保持一致，
+	// 我们用这把"指纹"来反制那些只是"看起来合法"的随机噪声——
+	// 真实 MP3 每帧都匹配这把指纹；随机数据几乎不可能连续匹配。
+	refByte1 := fhBuf[1]
+	refByte2 := fhBuf[2] & 0xFD // 抹掉 padding bit
 
-	if frameStart < 0 {
-		// 没找到有效帧，返回默认值
-		return 0
-	}
+	validFrames := 1
+	framePos := pos + int64(firstFS)
 
-	// ---- 第三步：验证连续帧并扫描到文件结束 ----
-	pos = frameStart
-	validFrames := 0
-	consecutiveInvalid := 0
-	const maxConsecutiveInvalid = 3 // 连续无效帧容忍次数
-
-	for pos < endLimit {
-		fhBuf, err := readBytesAt(reader, pos, 4)
-		if err != nil || len(fhBuf) < 4 {
+	// ---- 层 3: 严格连续帧链 ----
+	for validFrames < mp3MinValidFrames {
+		if framePos+4 > endLimit {
 			break
 		}
-
-		// 检查帧同步
-		if fhBuf[0] != 0xFF || (fhBuf[1]&0xE0) != 0xE0 {
-			// 检查是否是 ID3v1 tag ("TAG" 在末尾 128 字节)
-			if fhBuf[0] == 'T' && fhBuf[1] == 'A' && fhBuf[2] == 'G' {
-				return pos + 128 - offset
-			}
-			// 检查是否是 APE tag ("APETAGEX")
-			if fhBuf[0] == 'A' && fhBuf[1] == 'P' && fhBuf[2] == 'E' {
-				// APE tag 长度不定，这里简单取当前位置
-				if validFrames > 0 {
-					return pos - offset
-				}
-			}
-
-			consecutiveInvalid++
-			if consecutiveInvalid >= maxConsecutiveInvalid {
-				break
-			}
-			pos++
-			continue
+		b, err := readBytesAt(reader, framePos, 4)
+		if err != nil || len(b) < 4 {
+			break
 		}
-
-		fs := mp3FrameSize(fhBuf)
-		if fs <= 0 {
-			consecutiveInvalid++
-			if consecutiveInvalid >= maxConsecutiveInvalid {
-				break
-			}
-			pos++
-			continue
+		if b[0] != 0xFF || (b[1]&0xE0) != 0xE0 {
+			return 0
 		}
-
-		consecutiveInvalid = 0
+		if b[1] != refByte1 || (b[2]&0xFD) != refByte2 {
+			return 0
+		}
+		fs := mp3FrameSize(b)
+		if fs < mp3MinFrameSize || fs > mp3MaxFrameSize {
+			return 0
+		}
 		validFrames++
-		pos += int64(fs)
+		framePos += int64(fs)
 	}
 
-	if validFrames < 3 {
-		// 有效帧太少，不太可信
-		return 0
+	// 通过了严格校验：继续读到文件末尾（遇到无效帧 / TAG / APE / 越界就收尾）。
+	// 这阶段无需像以前那么严，因为已经证明"这是真 MP3"。
+	for framePos < endLimit {
+		b, err := readBytesAt(reader, framePos, 4)
+		if err != nil || len(b) < 4 {
+			break
+		}
+		// ID3v1 tag：128 字节 "TAG..."，在文件末尾
+		if b[0] == 'T' && b[1] == 'A' && b[2] == 'G' {
+			framePos += 128
+			break
+		}
+		// APEv2 tag
+		if b[0] == 'A' && b[1] == 'P' && b[2] == 'E' {
+			break
+		}
+		if b[0] != 0xFF || (b[1]&0xE0) != 0xE0 {
+			break
+		}
+		if b[1] != refByte1 || (b[2]&0xFD) != refByte2 {
+			break
+		}
+		fs := mp3FrameSize(b)
+		if fs < mp3MinFrameSize || fs > mp3MaxFrameSize {
+			break
+		}
+		framePos += int64(fs)
 	}
 
-	totalSize := pos - offset
+	totalSize := framePos - offset
 	if totalSize > maxSize {
 		totalSize = maxSize
 	}
@@ -1153,79 +1177,110 @@ func detectBMPSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 //   ...
 //   Frame length (13 bits): 包含头部的帧总长度
 
-// detectAACSize 验证连续 ADTS 帧来确定文件大小
-// 如果帧结构不合理，返回 0 表示丢弃
+// detectAACSize —— 严格验证 ADTS 帧链
+//
+// AAC 的签名是 2 字节（fff1/fff9），随机数据触发率极高；必须像 MP3 那样做：
+//  1. AC 命中偏移处必须直接是合法 ADTS 帧头（不允许 slack 搜索）
+//  2. 连续 aacMinValidFrames 帧，每帧都必须精确位于 prev + frameLen 偏移
+//  3. profile/channel-config 在整流内保持一致（真实 AAC 这些字段不变）
+const (
+	aacMinValidFrames = 16
+)
+
 func detectAACSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 	endLimit := offset + maxSize
-	pos := offset
 
-	validFrames := 0
-	consecutiveInvalid := 0
+	// 第一帧：AC 命中处必须直接是合法 ADTS 帧
+	first, err := readBytesAt(reader, offset, 7)
+	if err != nil || len(first) < 7 {
+		return 0
+	}
+	frameLen := adtsFrameLen(first)
+	if frameLen <= 0 {
+		return 0
+	}
+	// 前 3 个字节的关键位（profile+samplerate+channel-cfg）当"指纹"用
+	refByte1 := first[1] // version/layer
+	refByte2 := first[2] // profile+freq+channel-high
+	refByte3Mask := first[3] & 0xC0
 
-	for pos < endLimit {
-		// 读取 ADTS 帧头 (7 字节最小)
-		hdr, err := readBytesAt(reader, pos, 7)
-		if err != nil || len(hdr) < 7 {
+	validFrames := 1
+	pos := offset + int64(frameLen)
+
+	for validFrames < aacMinValidFrames {
+		if pos+7 > endLimit {
 			break
 		}
-
-		// 检查同步字 0xFFF (12 bits)
-		if hdr[0] != 0xFF || (hdr[1]&0xF0) != 0xF0 {
-			consecutiveInvalid++
-			if consecutiveInvalid >= 3 {
-				break
-			}
-			pos++
-			continue
+		b, err := readBytesAt(reader, pos, 7)
+		if err != nil || len(b) < 7 {
+			break
 		}
-
-		// Layer 必须为 00
-		layer := (hdr[1] >> 1) & 0x03
-		if layer != 0 {
-			consecutiveInvalid++
-			if consecutiveInvalid >= 3 {
-				break
-			}
-			pos++
-			continue
+		if b[0] != 0xFF || (b[1]&0xF0) != 0xF0 {
+			return 0
 		}
-
-		// Sampling frequency index (4 bits), 0-12 有效, 13-15 保留
-		freqIdx := (hdr[2] >> 2) & 0x0F
-		if freqIdx > 12 {
-			consecutiveInvalid++
-			if consecutiveInvalid >= 3 {
-				break
-			}
-			pos++
-			continue
+		if b[1] != refByte1 || b[2] != refByte2 || (b[3]&0xC0) != refByte3Mask {
+			return 0
 		}
-
-		// Frame length (13 bits): bytes [3][4][5]
-		frameLen := int64(hdr[3]&0x03)<<11 | int64(hdr[4])<<3 | int64(hdr[5]>>5)
-		if frameLen < 7 || frameLen > 8192 {
-			consecutiveInvalid++
-			if consecutiveInvalid >= 3 {
-				break
-			}
-			pos++
-			continue
+		fl := adtsFrameLen(b)
+		if fl <= 0 {
+			return 0
 		}
-
-		consecutiveInvalid = 0
 		validFrames++
-		pos += frameLen
+		pos += int64(fl)
 	}
 
-	if validFrames < 5 {
-		return 0 // 有效帧太少，很可能是误报
+	// 已经证明是真 AAC，继续读到第一次不匹配为止
+	for pos < endLimit {
+		if pos+7 > endLimit {
+			break
+		}
+		b, err := readBytesAt(reader, pos, 7)
+		if err != nil || len(b) < 7 {
+			break
+		}
+		if b[0] != 0xFF || (b[1]&0xF0) != 0xF0 {
+			break
+		}
+		if b[1] != refByte1 || b[2] != refByte2 || (b[3]&0xC0) != refByte3Mask {
+			break
+		}
+		fl := adtsFrameLen(b)
+		if fl <= 0 {
+			break
+		}
+		pos += int64(fl)
 	}
 
-	totalSize := pos - offset
-	if totalSize > maxSize {
-		totalSize = maxSize
+	total := pos - offset
+	if total > maxSize {
+		total = maxSize
 	}
-	return totalSize
+	return total
+}
+
+// adtsFrameLen 校验 ADTS 帧头并返回帧长度；无效时返回 0。
+func adtsFrameLen(hdr []byte) int {
+	if len(hdr) < 7 {
+		return 0
+	}
+	// sync 12 bits
+	if hdr[0] != 0xFF || (hdr[1]&0xF0) != 0xF0 {
+		return 0
+	}
+	// layer 必须 00
+	if (hdr[1]>>1)&0x03 != 0 {
+		return 0
+	}
+	// sampling freq index 合法 0..12
+	if (hdr[2]>>2)&0x0F > 12 {
+		return 0
+	}
+	// frame length 13 bits
+	fl := int(hdr[3]&0x03)<<11 | int(hdr[4])<<3 | int(hdr[5]>>5)
+	if fl < 7 || fl > 8192 {
+		return 0
+	}
+	return fl
 }
 
 // =========================================================================

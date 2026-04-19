@@ -10,6 +10,39 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// alignedBufPool 复用扇区对齐缓冲区，避免每次 ReadAt 都 make 一块新内存。
+// 约定按常见调用尺寸分级：64KB / 1MB / 4MB / 8MB / >8MB。
+// 池按上界取整分配，命中时复用；不命中时单次 make 一块。
+var alignedBufPool = [...]struct {
+	max  int64
+	pool sync.Pool
+}{
+	{max: 64 * 1024, pool: sync.Pool{New: func() any { b := make([]byte, 64*1024); return &b }}},
+	{max: 1 * 1024 * 1024, pool: sync.Pool{New: func() any { b := make([]byte, 1*1024*1024); return &b }}},
+	{max: 4 * 1024 * 1024, pool: sync.Pool{New: func() any { b := make([]byte, 4*1024*1024); return &b }}},
+	{max: 8 * 1024 * 1024, pool: sync.Pool{New: func() any { b := make([]byte, 8*1024*1024); return &b }}},
+}
+
+// getAlignedBuf 获取长度至少 size 的缓冲区，返回 (buf, release)。
+// 调用方用完后必须 release()；超出最大档位时 release 为 no-op。
+func getAlignedBuf(size int64) ([]byte, func()) {
+	for i := range alignedBufPool {
+		if size <= alignedBufPool[i].max {
+			ptr := alignedBufPool[i].pool.Get().(*[]byte)
+			idx := i
+			return (*ptr)[:size], func() {
+				// 归还时保持原始容量，切回最大长度避免调用者持有截短切片
+				full := (*ptr)[:cap(*ptr)]
+				*ptr = full
+				alignedBufPool[idx].pool.Put(ptr)
+			}
+		}
+	}
+	// 超大读，不进池
+	b := make([]byte, size)
+	return b, func() {}
+}
+
 var (
 	modkernel32          = windows.NewLazySystemDLL("kernel32.dll")
 	procSetFilePointerEx = modkernel32.NewProc("SetFilePointerEx")
@@ -153,8 +186,9 @@ func (r *windowsReader) ReadAt(buf []byte, offset int64) (int, error) {
 	}
 	alignedSize := alignedEnd - alignedOffset
 
-	// 分配对齐缓冲区
-	alignedBuf := make([]byte, alignedSize)
+	// 从缓冲池取一块对齐缓冲区（4MB 块 × worker 数 × 秒级调用，不池化会频繁触发 GC）
+	alignedBuf, release := getAlignedBuf(alignedSize)
+	defer release()
 
 	// 设置文件指针到对齐位置
 	err := setFilePointerEx(r.handle, alignedOffset, nil, windows.FILE_BEGIN)

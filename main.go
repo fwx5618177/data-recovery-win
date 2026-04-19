@@ -2,21 +2,26 @@ package main
 
 import (
 	"embed"
-	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
+
+	"data-recovery/internal/logging"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
+	bootLogger := logging.L().With("component", "boot")
+
 	relaunched, err := ensureAdminPrivileges()
 	if err != nil {
-		log.Fatal("启动失败，无法获取管理员权限: ", err)
+		bootLogger.Error("无法获取管理员权限", "err", err)
+		os.Exit(1)
 	}
 	if relaunched {
 		return
@@ -45,6 +50,7 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Fatal("启动失败: ", err)
+		bootLogger.Error("Wails 启动失败", "err", err)
+		os.Exit(1)
 	}
 }

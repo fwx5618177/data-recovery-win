@@ -4,21 +4,23 @@ package disk
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
+	"data-recovery/internal/logging"
 	"data-recovery/internal/types"
 )
+
+var driveLogger = logging.L().With("component", "disk")
 
 // listDrivesPlatform 非 Windows 平台的驱动器枚举实现
 func listDrivesPlatform() ([]*types.DriveInfo, error) {
 	// 检查是否有 root 权限
 	if os.Geteuid() != 0 {
-		log.Println("⚠️  非 root 用户，可能无法访问磁盘设备。请使用 sudo 运行程序以获取完整的驱动器列表。")
+		driveLogger.Warn("非 root 用户，可能无法访问磁盘设备。请使用 sudo 获取完整驱动器列表。")
 	}
 
 	switch runtime.GOOS {

@@ -111,14 +111,23 @@ data-recovery/
 
 ## 🖥️ 系统要求
 
-| 项目          | 要求                            |
-| ------------- | ------------------------------- |
-| **目标平台**  | Windows 10/11（需要管理员权限） |
-| **开发平台**  | macOS / Linux / Windows         |
-| **Go**        | 1.21 或更高版本                 |
-| **Node.js**   | 16 或更高版本                   |
-| **Wails CLI** | v2.9+                           |
-| **内存**      | 建议 4GB 以上                   |
+| 项目          | 要求                                              |
+| ------------- | ------------------------------------------------- |
+| **目标平台**  | Windows 10/11、macOS 12+、Linux (amd64/arm64)     |
+| **开发平台**  | macOS / Linux / Windows（可相互交叉编译）         |
+| **权限**      | Windows 管理员；macOS/Linux 需 `sudo` 读取原始盘  |
+| **Go**        | 1.22 或更高版本                                   |
+| **Node.js**   | 16 或更高版本                                     |
+| **Wails CLI** | v2.9+                                             |
+| **内存**      | 建议 4GB 以上                                     |
+
+### 各平台说明
+
+- **Windows**：启动时自动请求 UAC，管理员权限下可直接读 `\\.\PhysicalDriveN` 与 `\\.\C:`。
+- **macOS**：需要 `sudo ./DataRecovery`。系统保护会阻止读挂载中的内置盘，推荐把源盘通过 USB 外接扫描（`/dev/diskN`）。
+- **Linux**：需要 `sudo ./DataRecovery` 或将当前用户加入 `disk` 组；扫描 `/dev/sdX`、`/dev/nvmeXnY`、`/dev/mmcblkN` 等块设备。
+
+当原 Windows 盘被盗、数据需要恢复时，把它通过硬盘盒接到任意一台 macOS / Linux / Windows 电脑都可以运行本程序扫描，恢复目录选到 *另一块* 盘即可。
 
 ## 📦 安装与构建
 
@@ -160,29 +169,48 @@ wails dev
 # 构建当前平台
 wails build
 
-# 从 macOS 交叉编译 Windows 版本
+# 三平台交叉编译
 wails build -platform windows/amd64
+wails build -platform darwin/universal   # macOS Intel + Apple Silicon
+wails build -platform linux/amd64
 
-# 输出: build/bin/DataRecovery.exe
+# 输出目录: build/bin/
 ```
 
 ### 使用 Makefile
 
 ```bash
-make deps           # 安装所有依赖
-make dev            # 开发模式
-make build          # 本地构建
-make build-windows  # 交叉编译 Windows
-make clean          # 清理构建产物
+make deps                   # 安装所有依赖
+make dev                    # 开发模式（当前平台）
+make build                  # 本地构建
+make build-windows          # 交叉编译 Windows amd64
+make build-darwin-universal # macOS (Intel + Apple Silicon) 通用二进制
+make build-linux            # Linux amd64
+make build-all              # 一键构建三平台
+make verify-platforms       # 仅跑 `go build` 做交叉编译冒烟（CI 友好）
+make test                   # 运行全部测试（-race）
+make clean                  # 清理构建产物
+```
+
+### 日志
+
+全局日志以 slog 输出结构化 key=value，默认级别 info。
+通过环境变量调优：
+
+```bash
+DATA_RECOVERY_LOG_LEVEL=debug ./DataRecovery   # 打开 debug 日志
+DATA_RECOVERY_LOG_LEVEL=warn  ./DataRecovery   # 只看警告/错误
 ```
 
 ## 🚀 使用指南
 
 ### 步骤 1：直接启动程序
 
-Windows 版本默认在启动时请求管理员权限。双击 `DataRecovery.exe` 后请确认 UAC 授权。
+- **Windows**：默认在启动时请求 UAC，双击 `DataRecovery.exe` 后确认授权。
+- **macOS**：终端运行 `sudo ./build/bin/DataRecovery.app/Contents/MacOS/DataRecovery`。
+- **Linux**：`sudo ./build/bin/DataRecovery`。
 
-> ⚠️ 读取磁盘原始数据必须有管理员权限。若拒绝 UAC，程序将无法执行真实扫描。
+> ⚠️ 读取磁盘原始数据必须有管理员/root 权限。若拒绝或没有 root 身份，程序将无法执行真实扫描。
 
 ### 步骤 2：选择目标磁盘
 

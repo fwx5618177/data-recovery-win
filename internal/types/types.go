@@ -106,6 +106,7 @@ type RecoveredFile struct {
 	Description   string       `json:"description"`
 	IsValid       bool         `json:"isValid"`
 	ValidationMsg string       `json:"validationMsg"`
+	SHA256        string       `json:"sha256,omitempty"` // 写入完成后回填，用于 manifest 与跨源去重
 }
 
 // ScanProgress 扫描进度（实时推送到前端）
