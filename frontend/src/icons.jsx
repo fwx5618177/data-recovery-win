@@ -89,6 +89,15 @@ export const IconCheck = (p) =>
 export const IconX = (p) =>
   I(p, <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>);
 
+export const IconEye = (p) =>
+  I(
+    p,
+    <>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </>,
+  );
+
 export const IconAlertTriangle = (p) =>
   I(
     p,

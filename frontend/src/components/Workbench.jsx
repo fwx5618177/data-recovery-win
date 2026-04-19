@@ -13,6 +13,8 @@ import {
   filterFiles,
   countByCategory,
   countBySource,
+  countSystemFiles,
+  isSystemFile,
   getCategoryMeta,
   getSourceMeta,
   getDriveLabel,
@@ -41,6 +43,7 @@ export default function Workbench({
   onStartRecovery,
   onSelectOutputDir,
   onBackToWelcome,
+  onRequestPreview,
 }) {
   const [keyword, setKeyword] = useState("");
   const [categories, setCategories] = useState(() => new Set()); // 空集合表示"不过滤"
@@ -48,6 +51,8 @@ export default function Workbench({
   const [validity, setValidity] = useState("all");
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [allowSameDisk, setAllowSameDisk] = useState(false);
+  // 默认隐藏系统文件（.exe/.dll/.ico/.sys 等 + /Windows 子树），让真正的照片文档浮上来
+  const [hideSystemFiles, setHideSystemFiles] = useState(true);
 
   // outputDir 或 outputValidation 变化时重置"我已了解风险"开关，避免旧盘留的勾延用到新盘
   useEffect(() => { setAllowSameDisk(false); }, [outputDir]);
@@ -70,13 +75,20 @@ export default function Workbench({
   }, [files]);
 
   const filter = useMemo(
-    () => ({ keyword, categories, sources, validity }),
-    [keyword, categories, sources, validity],
+    () => ({ keyword, categories, sources, validity, hideSystemFiles }),
+    [keyword, categories, sources, validity, hideSystemFiles],
   );
   const filtered = useMemo(() => filterFiles(files, filter), [files, filter]);
 
-  const catCounts = useMemo(() => countByCategory(files), [files]);
-  const srcCounts = useMemo(() => countBySource(files), [files]);
+  // 分类/来源的计数跟随 hideSystemFiles 一起过滤——避免出现"侧栏说有 500 张图片，
+  // 但表里只看到 20 张"的困惑（ICO 计入图片分类的常见误解）
+  const baseForCounts = useMemo(
+    () => (hideSystemFiles ? files.filter((f) => !isSystemFile(f)) : files),
+    [files, hideSystemFiles],
+  );
+  const catCounts = useMemo(() => countByCategory(baseForCounts), [baseForCounts]);
+  const srcCounts = useMemo(() => countBySource(baseForCounts), [baseForCounts]);
+  const systemFileCount = useMemo(() => countSystemFiles(files), [files]);
 
   const selectedFiles = useMemo(
     () => files.filter((f) => selectedIds.has(f.id)),
@@ -180,6 +192,47 @@ export default function Workbench({
               {scanProgress.currentFile}
             </div>
           )}
+          {systemFileCount > 0 && (
+            <div
+              className="system-file-banner"
+              style={{
+                marginTop: 6,
+                padding: "6px 10px",
+                fontSize: 12,
+                borderRadius: "var(--radius-md)",
+                background: hideSystemFiles ? "var(--accent-soft)" : "var(--warning-soft)",
+                border: "1px solid " + (hideSystemFiles ? "var(--accent-border, var(--border-strong))" : "var(--warning-border)"),
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              {hideSystemFiles ? (
+                <>
+                  <span>
+                    已隐藏 <b>{systemFileCount.toLocaleString()}</b> 个系统文件
+                    （<span className="mono">.exe / .dll / .ico / .sys</span> 以及
+                    <span className="mono"> Windows/ / Program Files</span> 子目录下的内容）
+                  </span>
+                  <button className="btn btn--sm btn--ghost" onClick={() => setHideSystemFiles(false)}>
+                    显示全部
+                  </button>
+                </>
+              ) : (
+                <>
+                  <IconAlertTriangle size={14} />
+                  <span>
+                    当前显示全部文件，其中 <b>{systemFileCount.toLocaleString()}</b> 个是系统文件。
+                    被重置的 Windows 盘 MFT 里积累了大量旧系统残留，通常不是你想要的个人数据。
+                  </span>
+                  <button className="btn btn--sm" onClick={() => setHideSystemFiles(true)}>
+                    只看我的文件
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -245,6 +298,27 @@ export default function Workbench({
           </div>
 
           <div className="filter-group">
+            <div className="filter-group__title">系统文件</div>
+            <label className="filter-row" title=".exe / .dll / .ico / .sys 以及 /Windows、/Program Files 子树下的文件">
+              <span className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={hideSystemFiles}
+                  onChange={() => setHideSystemFiles((v) => !v)}
+                />
+                <span>隐藏系统文件</span>
+              </span>
+              {systemFileCount > 0 && (
+                <span className="filter-row__count">{systemFileCount.toLocaleString()}</span>
+              )}
+            </label>
+            <div className="muted" style={{ fontSize: 11, padding: "0 8px 4px", lineHeight: 1.5 }}>
+              重置前旧系统的 .exe / .dll 等会大量出现在 MFT 里，
+              默认隐藏它们让真正的照片文档浮上来。需要恢复系统文件时取消勾选。
+            </div>
+          </div>
+
+          <div className="filter-group">
             <div className="filter-group__title">批量选择</div>
             <button className="btn btn--sm" onClick={selectAllValidVisible}>
               选中当前筛选中的有效文件
@@ -265,6 +339,7 @@ export default function Workbench({
           onToggleAll={toggleAllPage}
           keyword={keyword}
           onKeywordChange={setKeyword}
+          onRequestPreview={onRequestPreview}
           headerRight={
             <div className="btn-group">
               <button className="btn btn--sm" onClick={selectAllValidVisible} disabled={filtered.length === 0}>
@@ -319,6 +394,18 @@ export default function Workbench({
             <div className="banner__content">
               <div className="banner__title">输出目录不可用</div>
               <div className="banner__text">{outputValidation}</div>
+            </div>
+          </div>
+        )}
+        {scanActive && canRecover && (
+          <div className="banner banner--info" style={{ flexBasis: "100%" }}>
+            <IconCheckCircle size={16} className="banner__icon" />
+            <div className="banner__content">
+              <div className="banner__title">扫描进行中也可以先恢复已找到的文件</div>
+              <div className="banner__text">
+                深度扫描可能持续十几分钟。对已勾选的文件可以立即点"开始恢复"，
+                不必等扫描跑完。后续新发现的文件随时再加进选择。
+              </div>
             </div>
           </div>
         )}

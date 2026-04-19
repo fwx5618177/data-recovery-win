@@ -1,7 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { formatSize, formatConfidence, formatPath } from "../formatters";
 import { getCategoryMeta, getSourceMeta } from "../recovery-helpers";
-import { IconForCategory, IconSearch } from "../icons";
+import { IconEye, IconForCategory, IconSearch, IconX } from "../icons";
 
 /**
  * FileTable — 大列表展示 + 行选中。
@@ -22,10 +22,12 @@ export default function FileTable({
   showSearch = true,
   headerRight = null,
   pageSize = 200,
+  onRequestPreview,   // 新增：(file) => Promise<string | null>  返回 data URL；父组件注入
 }) {
   const [sortKey, setSortKey] = useState("size");
   const [sortDir, setSortDir] = useState("desc"); // asc | desc
   const [page, setPage] = useState(1);
+  const [previewFile, setPreviewFile] = useState(null);
 
   const sorted = useMemo(() => {
     const arr = files.slice();
@@ -113,6 +115,7 @@ export default function FileTable({
                 file={f}
                 selected={selectedIds.has(f.id)}
                 onToggle={onToggle}
+                onPreview={onRequestPreview ? () => setPreviewFile(f) : null}
               />
             ))}
           </tbody>
@@ -128,6 +131,14 @@ export default function FileTable({
           </div>
         )}
       </div>
+
+      {previewFile && (
+        <PreviewModal
+          file={previewFile}
+          onClose={() => setPreviewFile(null)}
+          onRequestPreview={onRequestPreview}
+        />
+      )}
 
       {sorted.length > pageSize && (
         <div className="pagination">
@@ -162,12 +173,13 @@ export default function FileTable({
   );
 }
 
-function Row({ file, selected, onToggle }) {
+function Row({ file, selected, onToggle, onPreview }) {
   const confidence = formatConfidence(file.confidence);
   const confClass =
     confidence >= 70 ? "confidence-bar--high" : confidence >= 40 ? "confidence-bar--mid" : "confidence-bar--low";
   const categoryMeta = getCategoryMeta(file.category);
   const sourceMeta = getSourceMeta(file.source);
+  const canPreview = onPreview && file.category === "image";
 
   return (
     <tr
@@ -175,6 +187,7 @@ function Row({ file, selected, onToggle }) {
       onClick={(e) => {
         // 避免与 checkbox label 冲突
         if ((e.target instanceof HTMLElement) && e.target.closest(".cell-check")) return;
+        if ((e.target instanceof HTMLElement) && e.target.closest(".cell-preview")) return;
         onToggle?.(file);
       }}
     >
@@ -189,7 +202,20 @@ function Row({ file, selected, onToggle }) {
           <span style={{ fontSize: 12 }}>{categoryMeta.label}</span>
         </span>
       </td>
-      <td className="file-name" title={file.fileName}>{file.fileName}</td>
+      <td className="file-name" title={file.fileName}>
+        {file.fileName}
+        {canPreview && (
+          <button
+            type="button"
+            className="btn btn--sm btn--ghost cell-preview"
+            style={{ marginLeft: 8, padding: "2px 6px" }}
+            title="预览图片（从源盘直接读取前若干字节）"
+            onClick={(e) => { e.stopPropagation(); onPreview(); }}
+          >
+            <IconEye size={12} /> 预览
+          </button>
+        )}
+      </td>
       <td className="cell-num">{formatSize(file.size)}</td>
       <td>
         <span className="badge">{sourceMeta.shortLabel}</span>
@@ -204,6 +230,74 @@ function Row({ file, selected, onToggle }) {
       </td>
       <td className="file-path" title={formatPath(file)}>{formatPath(file)}</td>
     </tr>
+  );
+}
+
+// PreviewModal 调用父组件注入的 onRequestPreview 拉取 data URL，成功后展示。
+// 失败时展示明确提示而不是静默——源盘可能已被拔出/被写入覆盖，这些情况用户需要知道。
+function PreviewModal({ file, onClose, onRequestPreview }) {
+  const [state, setState] = useState({ loading: true, url: "", error: "" });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, url: "", error: "" });
+    (async () => {
+      try {
+        const url = await onRequestPreview(file);
+        if (cancelled) return;
+        if (!url) {
+          setState({ loading: false, url: "", error: "无法获取预览数据" });
+          return;
+        }
+        setState({ loading: false, url, error: "" });
+      } catch (err) {
+        if (cancelled) return;
+        setState({ loading: false, url: "", error: String(err?.message || err) });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [file, onRequestPreview]);
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    globalThis.addEventListener("keydown", onKey);
+    return () => globalThis.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="preview-modal"
+      onClick={onClose}
+      role="dialog"
+      aria-label={`预览 ${file.fileName}`}
+    >
+      <div className="preview-modal__inner" onClick={(e) => e.stopPropagation()}>
+        <div className="preview-modal__header">
+          <div className="preview-modal__title" title={file.fileName}>{file.fileName}</div>
+          <button className="btn btn--sm btn--ghost" onClick={onClose} title="关闭 (Esc)">
+            <IconX size={14} />
+          </button>
+        </div>
+        <div className="preview-modal__body">
+          {state.loading && <div className="muted">正在从源盘读取首批字节…</div>}
+          {state.error && (
+            <div className="banner banner--danger" style={{ margin: 0 }}>
+              <div className="banner__content">
+                <div className="banner__title">无法预览</div>
+                <div className="banner__text">{state.error}</div>
+              </div>
+            </div>
+          )}
+          {state.url && (
+            <img src={state.url} alt={file.fileName} className="preview-modal__image" />
+          )}
+        </div>
+        <div className="preview-modal__footer muted" style={{ fontSize: 11 }}>
+          {formatSize(file.size)} · 偏移 0x{Number(file.offset || 0).toString(16)} ·
+          {" "}只预览前若干字节，不代表完整解码；完整恢复后用系统图片程序打开更可靠。
+        </div>
+      </div>
+    </div>
   );
 }
 

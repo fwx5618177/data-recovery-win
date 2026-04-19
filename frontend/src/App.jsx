@@ -231,7 +231,17 @@ export default function App() {
     if (bridgeState !== "ready" || !wailsRuntime?.EventsOn) return;
 
     const offProg = wailsRuntime.EventsOn("scan:progress", (p) => {
-      setScanProgress((prev) => ({ ...prev, ...p }));
+      setScanProgress((prev) => {
+        const merged = { ...prev, ...p };
+        // 单调进度：阶段切换（ntfs → carving → validating）会引起百分比基线变动，
+        // 兜底不让显示值倒退，避免用户觉得"扫着扫着倒退了"
+        if (typeof prev.percent === "number" && typeof merged.percent === "number") {
+          if (merged.percent < prev.percent && merged.percent < 100) {
+            merged.percent = prev.percent;
+          }
+        }
+        return merged;
+      });
     });
     const offFound = wailsRuntime.EventsOn("scan:fileFound", (f) => queueFile(f));
     const offDone = wailsRuntime.EventsOn("scan:completed", (result) => {
@@ -409,6 +419,29 @@ export default function App() {
     [wailsApp],
   );
 
+  // 图片预览：从源盘直接读前若干字节，拼成 data URL 给 <img> 渲染。
+  // Wails 在 JSON 层会把 Go []byte 自动编码成 base64 字符串。
+  const requestPreview = useCallback(
+    async (file) => {
+      if (!file?.id || !wailsApp?.ReadFilePreview) return null;
+      const ext = (file.extension || "").toLowerCase();
+      const mime =
+        ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
+        ext === "png" ? "image/png" :
+        ext === "gif" ? "image/gif" :
+        ext === "bmp" ? "image/bmp" :
+        ext === "webp" ? "image/webp" :
+        ext === "tiff" || ext === "tif" ? "image/tiff" :
+        ext === "ico" ? "image/x-icon" :
+        "application/octet-stream";
+      const maxBytes = 2 * 1024 * 1024; // 2MB 够 99% 图片缩略
+      const b64 = await wailsApp.ReadFilePreview(file.id, maxBytes);
+      if (!b64) return null;
+      return `data:${mime};base64,${b64}`;
+    },
+    [wailsApp],
+  );
+
   /* =====================================================================
      7. 会话恢复
      ===================================================================== */
@@ -539,6 +572,7 @@ export default function App() {
             onStartRecovery={startRecovery}
             onSelectOutputDir={selectOutputDir}
             onBackToWelcome={() => setCurrentPage("welcome")}
+            onRequestPreview={requestPreview}
           />
         )}
 

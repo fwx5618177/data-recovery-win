@@ -1514,7 +1514,14 @@ func detectTIFFSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 }
 
 // detectICOSize 解析 ICO 文件目录来确定大小
-// 如果结构不合理，返回 0 表示丢弃
+//
+// ICO 签名 `00 00 01 00` 只有 4 字节近零值，在磁盘自由空间中误报率极高。
+// 这里做严格结构校验，任何字段不合理立刻返回 0 丢弃：
+//  1. imgCount 落入合理范围（ICO 实际很少超过 20 条，远低于 256 上限）
+//  2. 每条目录项的 color planes 只能是 0 或 1
+//  3. bit count 只能是 0/1/4/8/16/24/32
+//  4. 数据偏移必须跨过目录区（6 + count*16）
+//  5. 数据大小不能太离谱（> 10MB 的 "ICO" 几乎肯定是误报）
 func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 	header, err := readBytesAt(reader, offset, 6)
 	if err != nil || len(header) < 6 {
@@ -1531,9 +1538,13 @@ func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 	}
 
 	imgCount := binary.LittleEndian.Uint16(header[4:6])
-	if imgCount == 0 || imgCount > 256 {
-		return 0 // 不合理的图像数量
+	// 收紧：真实 ICO 条目数通常 1-16，超过 64 就极可疑
+	if imgCount == 0 || imgCount > 64 {
+		return 0
 	}
+
+	headerEnd := int64(6) + int64(imgCount)*16
+	const maxReasonableICOSize = int64(10 * 1024 * 1024) // 10MB
 
 	// 遍历图像目录，找到最远的图像数据
 	var maxEnd int64
@@ -1543,12 +1554,31 @@ func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 		if err != nil || len(entry) < 16 {
 			return 0
 		}
+
+		// entry[4]: color planes — 必须是 0 或 1
+		colorPlanes := binary.LittleEndian.Uint16(entry[4:6])
+		if colorPlanes > 1 {
+			return 0
+		}
+
+		// entry[6]: bit count — 只允许标准位深度
+		bitCount := binary.LittleEndian.Uint16(entry[6:8])
+		switch bitCount {
+		case 0, 1, 4, 8, 16, 24, 32:
+			// ok
+		default:
+			return 0
+		}
+
 		// 偏移 8: 4 字节 图像数据大小 (LE)
 		dataSize := int64(binary.LittleEndian.Uint32(entry[8:12]))
 		// 偏移 12: 4 字节 图像数据偏移 (LE)
 		dataOff := int64(binary.LittleEndian.Uint32(entry[12:16]))
 
-		if dataSize <= 0 || dataOff <= 0 {
+		if dataSize <= 0 || dataOff < headerEnd {
+			return 0
+		}
+		if dataSize > maxReasonableICOSize {
 			return 0
 		}
 
@@ -1558,7 +1588,8 @@ func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 		}
 	}
 
-	if maxEnd <= 6 {
+	// 整个文件超过 10MB 也按误报处理
+	if maxEnd <= headerEnd || maxEnd > maxReasonableICOSize {
 		return 0
 	}
 	if maxEnd > maxSize {

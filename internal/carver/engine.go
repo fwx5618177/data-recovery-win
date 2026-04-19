@@ -45,6 +45,15 @@ type Config struct {
 	Workers     int   // 工作 goroutine 数量，默认 runtime.NumCPU()
 	Overlap     int   // 块重叠字节数（自动根据最大签名长度设置）
 	MaxFileSize int64 // 单文件最大大小限制，默认 4GB
+
+	// DisabledExtensions 深度扫描时跳过的签名扩展名（小写）。
+	// 业界主流实践（参考 PhotoRec 默认 profile）：
+	//   - 被重置/格式化的 Windows 盘在自由空间里会残留大量 .exe / .ico / .elf 等系统文件碎片，
+	//     这些文件基本不是用户想要的数据，却会淹没真正的照片、文档等用户内容。
+	//   - ICO 头部仅 4 字节近零值（`00 00 01 00`），在未初始化扇区里误报率极高。
+	//   - EXE 头部只有 2 字节（`MZ`）也是一样。
+	// 所以默认把 ico/exe/elf 从深度扫描集合中剔除；用户如需恢复系统文件可显式启用。
+	DisabledExtensions []string
 }
 
 // DefaultConfig 返回默认配置
@@ -54,9 +63,10 @@ func DefaultConfig() Config {
 		workers = 2
 	}
 	return Config{
-		ChunkSize:   4 * 1024 * 1024, // 4MB
-		Workers:     workers,
-		MaxFileSize: 4 * 1024 * 1024 * 1024, // 4GB
+		ChunkSize:          4 * 1024 * 1024, // 4MB
+		Workers:            workers,
+		MaxFileSize:        4 * 1024 * 1024 * 1024, // 4GB
+		DisabledExtensions: []string{"ico", "exe", "elf"},
 	}
 }
 
@@ -178,12 +188,35 @@ func NewEngine(reader disk.DiskReader, sigDB *signature.SignatureDB, cfg Config)
 	// 从签名数据库获取所有头部条目
 	headers := sigDB.AllHeaders()
 
+	// 应用 DisabledExtensions 过滤：被禁用的扩展名不进入 AC 自动机，
+	// 从而彻底避免对应签名造成的命中噪声（而不是事后丢弃，浪费扫描 CPU）。
+	disabled := make(map[string]struct{}, len(cfg.DisabledExtensions))
+	for _, ext := range cfg.DisabledExtensions {
+		disabled[strings.ToLower(strings.TrimSpace(ext))] = struct{}{}
+	}
+
 	// 构建 Aho-Corasick 多模式匹配自动机（使用 builder 模式）
 	matcher := signature.NewAhoCorasick()
+	registered := 0
+	skipped := 0
 	for _, entry := range headers {
+		if entry.Signature != nil {
+			if _, drop := disabled[strings.ToLower(entry.Signature.Extension)]; drop {
+				skipped++
+				continue
+			}
+		}
 		matcher.AddPattern(entry.Pattern, entry.Signature)
+		registered++
 	}
 	matcher.Build()
+	if len(disabled) > 0 {
+		logger.Info("深度扫描签名过滤",
+			"registered", registered,
+			"skipped", skipped,
+			"disabled_exts", cfg.DisabledExtensions,
+		)
+	}
 
 	// 设置 overlap 为最大签名长度 - 1，保证跨块边界的签名不会被遗漏
 	overlap := sigDB.MaxHeaderLen() - 1

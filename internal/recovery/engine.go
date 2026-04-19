@@ -224,9 +224,12 @@ func (e *Engine) Scan(
 		// 完整模式：NTFS + 深度扫描 + 验证
 		logger.Info("扫描模式", "mode", "full")
 
-		// 阶段1: NTFS 扫描 (0-40%)
+		// 阶段1: NTFS 扫描 (0-15%)
+		// 注意权重：NTFS 只读 MFT（磁盘很小一部分），对 U 盘通常几秒到十几秒就完成；
+		// 深度扫描要读全盘，耗时占大头。把 NTFS 权重从原本的 40% 降到 15%，
+		// 避免 NTFS 一跑完进度就 "突然跳到 40%" 的视觉错乱（用户反馈"一点击就 50%"的根因）。
 		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
-			p.Percent = p.Percent * 0.40
+			p.Percent = p.Percent * 0.15
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
@@ -241,9 +244,9 @@ func (e *Engine) Scan(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段2: 深度扫描 (40-95%)
+		// 阶段2: 深度扫描 (15-95%) — 占 80% 的总进度，与实际耗时比例更接近
 		carverFiles, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 40.0 + p.Percent*0.55
+			p.Percent = 15.0 + p.Percent*0.80
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
@@ -903,6 +906,106 @@ func (e *Engine) RecoverWithOptions(
 		Total:      total,
 		Records:    records,
 	}, nil
+}
+
+// ReadFilePreview 返回指定 fileID 在源盘上的前 maxBytes 字节，供前端做图片缩略图/预览。
+//
+// 读取策略：
+//   - NTFS resident data：直接从 MFT 的内存拷贝里截取
+//   - NTFS 非 resident（有 DataRuns）：只读第一个 DataRun 的头部（预览够了，不跟随碎片）
+//   - Carver 来源：按 file.Offset 顺序读取
+//
+// maxBytes 会被夹到 [1KB, 8MB] 区间，避免前端误请求把整个多 GB 文件拉回来。
+func (e *Engine) ReadFilePreview(fileID string, maxBytes int) ([]byte, error) {
+	const (
+		minPreview = 1024
+		maxPreview = 8 * 1024 * 1024
+	)
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20 // 默认 1MB，够大部分缩略图
+	}
+	if maxBytes < minPreview {
+		maxBytes = minPreview
+	}
+	if maxBytes > maxPreview {
+		maxBytes = maxPreview
+	}
+
+	e.mu.RLock()
+	var file *types.RecoveredFile
+	for _, f := range e.results {
+		if f != nil && f.ID == fileID {
+			file = f
+			break
+		}
+	}
+	var devicePath string
+	if e.reader != nil {
+		devicePath = e.reader.DevicePath()
+	}
+	source, hasNTFS := e.ntfsSources[fileID]
+	e.mu.RUnlock()
+
+	if file == nil {
+		return nil, fmt.Errorf("未找到文件 ID=%s（可能扫描已被清空）", fileID)
+	}
+
+	// NTFS resident：数据在 MFT 内存里，直接截取
+	if hasNTFS && source.Entry != nil && source.Entry.IsResident && len(source.Entry.ResidentData) > 0 {
+		data := source.Entry.ResidentData
+		if len(data) > maxBytes {
+			data = data[:maxBytes]
+		}
+		return append([]byte(nil), data...), nil
+	}
+
+	if devicePath == "" {
+		return nil, fmt.Errorf("源盘路径不可用，请重新扫描后再试")
+	}
+
+	// 为预览单独开一个 reader（Windows FILE_SHARE_READ 允许并发），避免与扫描/恢复 reader 相互阻塞
+	reader := disk.NewReader(devicePath)
+	if err := reader.Open(); err != nil {
+		return nil, fmt.Errorf("打开源盘失败: %w", err)
+	}
+	defer func() {
+		if err := reader.Close(); err != nil {
+			logger.Warn("关闭预览 reader 失败", "err", err)
+		}
+	}()
+
+	readSize := int64(maxBytes)
+	if file.Size > 0 && file.Size < readSize {
+		readSize = file.Size
+	}
+
+	// NTFS 非 resident：只读第一个 DataRun 的头部（预览不需要跟碎片）
+	if hasNTFS && source.Entry != nil && len(source.Entry.DataRuns) > 0 && source.Boot != nil {
+		firstRun := source.Entry.DataRuns[0]
+		if firstRun.Sparse {
+			return make([]byte, readSize), nil
+		}
+		bytesPerCluster := int64(source.Boot.BytesPerSector) * int64(source.Boot.SectorsPerCluster)
+		runOffset := source.PartitionOffset + firstRun.ClusterOffset*bytesPerCluster
+		runLen := firstRun.ClusterCount * bytesPerCluster
+		if readSize > runLen {
+			readSize = runLen
+		}
+		buf := make([]byte, readSize)
+		n, err := reader.ReadAt(buf, runOffset)
+		if err != nil && n == 0 {
+			return nil, fmt.Errorf("读取预览数据失败: %w", err)
+		}
+		return buf[:n], nil
+	}
+
+	// Carver 或兜底：从 file.Offset 顺序读
+	buf := make([]byte, readSize)
+	n, err := reader.ReadAt(buf, file.Offset)
+	if err != nil && n == 0 {
+		return nil, fmt.Errorf("读取预览数据失败: %w", err)
+	}
+	return buf[:n], nil
 }
 
 // GetLastRecoveryResult 返回最近一次恢复的每文件记录（按失败在前排序便于前端展示）。

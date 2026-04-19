@@ -209,6 +209,16 @@ func (a *App) GetScanResults() *types.ScanResult {
 	return a.engine.Results()
 }
 
+// ReadFilePreview 读取指定 fileID 在源盘上的前 maxBytes 字节，供前端做图片预览。
+// 返回的 []byte 在 Wails JSON 传输层会自动被 base64 编码为字符串。
+// 建议仅对 category=image 的文件调用，调用者自行根据扩展名拼 data URL。
+func (a *App) ReadFilePreview(fileID string, maxBytes int) ([]byte, error) {
+	if fileID == "" {
+		return nil, fmt.Errorf("文件 ID 为空")
+	}
+	return a.engine.ReadFilePreview(fileID, maxBytes)
+}
+
 // ============================================================
 // 恢复
 // ============================================================
