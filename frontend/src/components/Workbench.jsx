@@ -14,6 +14,7 @@ import {
   countByCategory,
   countBySource,
   countSystemFiles,
+  countHighPriority,
   isSystemFile,
   getCategoryMeta,
   getSourceMeta,
@@ -89,6 +90,7 @@ export default function Workbench({
   const catCounts = useMemo(() => countByCategory(baseForCounts), [baseForCounts]);
   const srcCounts = useMemo(() => countBySource(baseForCounts), [baseForCounts]);
   const systemFileCount = useMemo(() => countSystemFiles(files), [files]);
+  const highPriorityCount = useMemo(() => countHighPriority(files), [files]);
 
   const selectedFiles = useMemo(
     () => files.filter((f) => selectedIds.has(f.id)),
@@ -168,6 +170,15 @@ export default function Workbench({
             </div>
             <div className="progress-strip__stats">
               <span className="progress-strip__stat"><b>{files.length.toLocaleString()}</b> 已发现</span>
+              {highPriorityCount > 0 && (
+                <span
+                  className="progress-strip__stat"
+                  style={{ color: "var(--success)" }}
+                  title="来自 Windows.old 或 Users/ 的文件 —— 最可能是原主人个人数据"
+                >
+                  <b>{highPriorityCount.toLocaleString()}</b> 高优先级
+                </span>
+              )}
               <span className="progress-strip__stat"><b>{formatSize(scanProgress?.bytesScanned || 0)}</b> / {formatSize(scanProgress?.totalBytes || 0)}</span>
               <span className="progress-strip__stat"><b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
               {scanActive && <span className="progress-strip__stat">剩余 <b>{formatDuration(scanProgress?.eta)}</b></span>}

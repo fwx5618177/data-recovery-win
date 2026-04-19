@@ -494,4 +494,54 @@ func (db *SignatureDB) initSignatures() {
 		},
 		MaxSize: 500 * MB,
 	})
+
+	// ==================== 扩展：只加能给出可靠文件大小的签名 ====================
+	//
+	// 本项目的一条硬约束：determineFileSize 返回 0 的签名会被直接丢弃
+	// （避免凭空伪造文件大小输出垃圾文件）。所以新增签名必须满足以下之一：
+	//   1. 有专用 detect*Size 函数解析格式结构；或
+	//   2. 有足够特异的 footer 做 searchFooter 兜底
+	// 只有 magic 没有大小判定的签名加了等于没加（AC 命中了但 collector 会丢）。
+	//
+	// PhotoRec 的 480+ 格式里有相当比例是"只留 magic + MaxSize 猜一刀"的估算方式，
+	// 本项目目前偏保守，只引入能走结构解析的格式。后续要扩量的话：
+	//   - 写专用 detect 函数（如 DjVu 的 FORM size、MOBI 的 PalmDB record0）
+	//   - 或把策略改成 PhotoRec 风格的"猜最大 N MB 然后交给用户验证"
+
+	// DjVu - 扫描书籍常用格式；IFF 容器有 FORM 大小字段，可解析
+	db.add(&types.FileSignature{
+		Extension:   "djvu",
+		Description: "DjVu 扫描文档",
+		Category:    types.CategoryDocument,
+		Headers: [][]byte{
+			hex("41542654464f524d"), // "AT&TFORM"
+		},
+		MaxSize: 500 * MB,
+	})
+
+	// MIDI - 轻量音频；MThd + 后续 MTrk chunk 链有明确长度，可解析
+	db.add(&types.FileSignature{
+		Extension:   "mid",
+		Description: "MIDI 音乐",
+		Category:    types.CategoryAudio,
+		Headers: [][]byte{
+			hex("4d546864"), // "MThd"
+		},
+		MaxSize: 10 * MB,
+	})
+
+	// XZ - 有明确尾部 "YZ" footer；长度短但有更前面的 footer magic block 可校验
+	db.add(&types.FileSignature{
+		Extension:   "xz",
+		Description: "XZ 压缩包",
+		Category:    types.CategoryArchive,
+		Headers: [][]byte{
+			hex("fd377a585a00"), // "\xFD7zXZ\x00"
+		},
+		Footers: [][]byte{
+			// Stream Footer magic：完整为 12 字节，但末尾 "YZ" + "7zXZ backward" 相对可靠
+			hex("595a"),
+		},
+		MaxSize: 4 * GB,
+	})
 }

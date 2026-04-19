@@ -101,6 +101,10 @@ export default function App() {
   // ------------------------- 会话 -------------------------
   const [pendingSession, setPendingSession] = useState(null);
 
+  // ------------------------- VSS 卷影副本 -------------------------
+  // 仅在 Windows 平台才有数据；非 Windows 一律空数组
+  const [shadows, setShadows] = useState([]);
+
   // ------------------------- 扫描态 -------------------------
   const [scanActive, setScanActive] = useState(false);
   const [scanProgress, setScanProgress] = useState(INITIAL_SCAN_PROGRESS);
@@ -120,6 +124,16 @@ export default function App() {
   const [recoveryActive, setRecoveryActive] = useState(false);
   const [recoveryProgress, setRecoveryProgress] = useState(INITIAL_RECOVERY_PROGRESS);
   const [recoveryRecords, setRecoveryRecords] = useState([]);
+
+  // ------------------------- 版本更新态 -------------------------
+  // updateInfo:     null 代表没检查到更新；对象代表有新版可用
+  // downloadState:  "idle" | "downloading" | "done" | "error"
+  // pendingUpdate:  已下载好、等重启应用的 Pending；从后端拉或 update:downloaded 事件得
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [downloadState, setDownloadState] = useState("idle");
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const [pendingUpdate, setPendingUpdate] = useState(null);
 
   /* =====================================================================
      1. 加载 Wails bridge
@@ -178,6 +192,13 @@ export default function App() {
         if (wailsApp.LoadLastSession) {
           const snap = await wailsApp.LoadLastSession();
           if (snap && Array.isArray(snap.files)) setPendingSession(snap);
+        }
+      } catch { /* noop */ }
+      // VSS 枚举：非 Windows 会返回 null；Windows 无快照返回空数组
+      try {
+        if (wailsApp.ListShadowCopies) {
+          const list = await wailsApp.ListShadowCopies();
+          if (Array.isArray(list)) setShadows(list);
         }
       } catch { /* noop */ }
     })();
@@ -281,12 +302,39 @@ export default function App() {
       alert(getFriendlyActionError("恢复", msg));
     });
 
+    const offUpdate = wailsRuntime.EventsOn("update:available", (payload) => {
+      if (payload?.hasUpdate) setUpdateInfo(payload);
+    });
+    const offDownloadProg = wailsRuntime.EventsOn("update:downloadProgress", (p) => {
+      setDownloadProgress(p);
+    });
+    const offDownloaded = wailsRuntime.EventsOn("update:downloaded", (p) => {
+      setDownloadState("done");
+      setPendingUpdate(p);
+    });
+    const offDownloadErr = wailsRuntime.EventsOn("update:downloadError", (msg) => {
+      setDownloadState("error");
+      alert("下载更新失败：" + (msg?.message || msg || "未知错误"));
+    });
+
     return () => {
-      [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr]
+      [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
+       offUpdate, offDownloadProg, offDownloaded, offDownloadErr]
         .filter((fn) => typeof fn === "function")
         .forEach((fn) => fn());
     };
   }, [bridgeState, wailsRuntime, wailsApp, queueFile, flushPending]);
+
+  // 启动后拉一次 pending 状态；如果上一次会话下载好了，进入本次直接展示"重启以应用"
+  useEffect(() => {
+    if (bridgeState !== "ready" || !wailsApp?.GetPendingUpdate) return;
+    wailsApp.GetPendingUpdate().then((p) => {
+      if (p && p.version) {
+        setPendingUpdate(p);
+        setDownloadState("done");
+      }
+    }).catch(() => {});
+  }, [bridgeState, wailsApp]);
 
   /* =====================================================================
      4. 操作：开始扫描 / 停止扫描
@@ -312,6 +360,51 @@ export default function App() {
       setCurrentPage("welcome");
     }
   }, [selectedDrive, bridgeState, wailsApp]);
+
+  // 扫描一个 VSS 快照设备 —— 后端 NewReader 已识别 \\?\GLOBALROOT\... 路径
+  const scanShadow = useCallback(async (shadow) => {
+    if (!shadow?.DevicePath || !wailsApp?.StartScan) return;
+    setSelectedDrive({
+      path: shadow.DevicePath,
+      name: `VSS 快照 (${shadow.CreatedAt ? new Date(shadow.CreatedAt).toLocaleString() : "未知时间"})`,
+    });
+    resetScanState();
+    setScanActive(true);
+    setCurrentPage("workbench");
+    try {
+      await wailsApp.StartScan(shadow.DevicePath, DEFAULT_SCAN_MODE);
+    } catch (err) {
+      setScanActive(false);
+      alert(getFriendlyActionError("启动 VSS 扫描", err));
+      setCurrentPage("welcome");
+    }
+  }, [wailsApp]);
+
+  // 选一个磁盘镜像 (.img/.dd/.raw) 作为扫描源——无须管理员权限，也不占用设备句柄。
+  const selectImageFileAndScan = useCallback(async () => {
+    if (!wailsApp?.SelectImageFile || !wailsApp?.StartScan) return;
+    let path = "";
+    try {
+      path = await wailsApp.SelectImageFile();
+    } catch (err) {
+      alert(getFriendlyActionError("选择镜像文件", err));
+      return;
+    }
+    if (!path) return; // 用户取消
+
+    const fakeDrive = { path, name: `镜像: ${path.split(/[\\/]/).pop()}` };
+    setSelectedDrive(fakeDrive);
+    resetScanState();
+    setScanActive(true);
+    setCurrentPage("workbench");
+    try {
+      await wailsApp.StartScan(path, DEFAULT_SCAN_MODE);
+    } catch (err) {
+      setScanActive(false);
+      alert(getFriendlyActionError("启动镜像扫描", err));
+      setCurrentPage("welcome");
+    }
+  }, [wailsApp]);
 
   const stopScan = useCallback(() => {
     if (!wailsApp?.StopScan) return;
@@ -433,6 +526,8 @@ export default function App() {
         ext === "webp" ? "image/webp" :
         ext === "tiff" || ext === "tif" ? "image/tiff" :
         ext === "ico" ? "image/x-icon" :
+        ext === "heic" || ext === "heif" ? "image/heic" :
+        ext === "avif" ? "image/avif" :
         "application/octet-stream";
       const maxBytes = 2 * 1024 * 1024; // 2MB 够 99% 图片缩略
       const b64 = await wailsApp.ReadFilePreview(file.id, maxBytes);
@@ -519,6 +614,57 @@ export default function App() {
         </div>
       </header>
 
+      <UpdateBanner
+        updateInfo={updateInfo}
+        updateDismissed={updateDismissed}
+        setUpdateDismissed={setUpdateDismissed}
+        downloadState={downloadState}
+        downloadProgress={downloadProgress}
+        pendingUpdate={pendingUpdate}
+        busy={scanActive || recoveryActive}
+        onDownload={() => {
+          if (!updateInfo) return;
+          // 优先挑 Windows amd64 asset；桌面端实际跑什么平台 Wails 不直接告知，
+          // 用名字启发（包含 "windows-amd64"、".exe" 等关键词）
+          const plat = platform || "windows";
+          const asset = pickAssetForPlatform(updateInfo.assets || [], plat);
+          if (!asset) {
+            alert("未找到适合当前平台的更新资源，请访问下载页手动下载");
+            return;
+          }
+          setDownloadState("downloading");
+          setDownloadProgress(null);
+          // asset 字段对齐后端 JSON tag：name / size / downloadUrl
+          wailsApp?.DownloadUpdate?.(
+            updateInfo.latestVersion,
+            asset.downloadUrl || "",
+            asset.name || "",
+            asset.size || 0,
+          ).catch((err) => {
+            setDownloadState("error");
+            alert("启动下载失败：" + (err?.message || err));
+          });
+        }}
+        onRestart={() => {
+          if (!globalThis.confirm?.("应用即将关闭并以新版本重启，继续吗？")) return;
+          wailsApp?.ApplyPendingUpdate?.().catch((err) => {
+            alert("应用更新失败：" + (err?.message || err));
+          });
+        }}
+        onCancelPending={() => {
+          wailsApp?.CancelPendingUpdate?.().catch(() => {});
+          setPendingUpdate(null);
+          setDownloadState("idle");
+        }}
+        onOpenRelease={() => {
+          if (!updateInfo?.downloadPage) return;
+          wailsApp?.OpenFolder?.(updateInfo.downloadPage).catch(() => {
+            globalThis.navigator?.clipboard?.writeText?.(updateInfo.downloadPage);
+            alert(`下载页已复制到剪贴板：\n${updateInfo.downloadPage}`);
+          });
+        }}
+      />
+
       <main className="app-stage">
         {bridgeState === "loading" && (
           <div className="blocker">
@@ -548,6 +694,7 @@ export default function App() {
             selectedDrive={selectedDrive}
             onSelectDrive={setSelectedDrive}
             onStartScan={startScan}
+            onSelectImageFile={selectImageFileAndScan}
             onRefreshDrives={loadDrives}
             isLoadingDrives={isLoadingDrives}
             driveLoadError={driveLoadError}
@@ -556,6 +703,8 @@ export default function App() {
             pendingSession={pendingSession}
             onRestoreSession={restoreSession}
             onDiscardSession={discardSession}
+            shadows={shadows}
+            onScanShadow={scanShadow}
           />
         )}
 
@@ -601,4 +750,87 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+/* ======================================================================
+   UpdateBanner —— 三态顶栏：
+     - 发现新版（点击"下载"）
+     - 下载中（显示进度）
+     - 已下载好（点击"立即重启应用"）
+   在扫描 / 恢复期间自动隐藏，避免干扰长任务
+   ====================================================================== */
+function UpdateBanner({
+  updateInfo, updateDismissed, setUpdateDismissed,
+  downloadState, downloadProgress, pendingUpdate, busy,
+  onDownload, onRestart, onCancelPending, onOpenRelease,
+}) {
+  if (busy) return null;
+
+  // 最高优先级：已下载完成，等重启
+  if (pendingUpdate && pendingUpdate.version) {
+    return (
+      <div className="update-banner update-banner--ready">
+        <span>✅ 新版 <b>{pendingUpdate.version}</b> 已下载完成，重启后生效</span>
+        <button className="btn btn--sm btn--primary" onClick={onRestart}>立即重启应用</button>
+        <button className="btn btn--sm btn--ghost" onClick={onCancelPending}>放弃更新</button>
+      </div>
+    );
+  }
+
+  // 中等优先级：正在下载
+  if (downloadState === "downloading") {
+    const pct = downloadProgress && downloadProgress.bytesTotal > 0
+      ? Math.round(downloadProgress.bytesDone / downloadProgress.bytesTotal * 100)
+      : 0;
+    const speed = downloadProgress?.speed || 0;
+    const speedTxt = speed > 0 ? `${(speed / 1024 / 1024).toFixed(1)} MB/s` : "";
+    return (
+      <div className="update-banner update-banner--downloading">
+        <span>⬇️ 正在下载新版 {updateInfo?.latestVersion}：<b>{pct}%</b> {speedTxt}</span>
+      </div>
+    );
+  }
+
+  // 最低优先级：发现新版
+  if (updateInfo && updateInfo.hasUpdate && !updateDismissed) {
+    return (
+      <div className="update-banner update-banner--available">
+        <span>
+          🎉 新版 <b>{updateInfo.latestVersion}</b> 可用
+          {updateInfo.currentVersion && (
+            <span className="muted"> （当前 {updateInfo.currentVersion}）</span>
+          )}
+        </span>
+        <button className="btn btn--sm btn--primary" onClick={onDownload}>
+          后台下载，下次重启自动应用
+        </button>
+        <button className="btn btn--sm" onClick={onOpenRelease}>
+          查看发布说明
+        </button>
+        <button className="btn btn--sm btn--ghost" onClick={() => setUpdateDismissed(true)}>
+          稍后
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// pickAssetForPlatform 根据平台名从 release assets 里挑最匹配的那个。
+// Wails 的 platform 字段是 Go GOOS 风格（"windows" / "darwin" / "linux"）。
+// asset 字段按后端 JSON tag：`name`（camelCase）。
+function pickAssetForPlatform(assets, platform) {
+  if (!Array.isArray(assets) || assets.length === 0) return null;
+  const plat = String(platform || "").toLowerCase();
+  const priorityKeywords =
+    plat === "windows" ? ["windows-amd64", "windows-arm64", "win-", ".exe"] :
+    plat === "darwin" ? ["darwin", "macos", ".dmg", "mac-"] :
+    plat === "linux" ? ["linux-amd64", "linux-arm64", ".tar.gz", ".AppImage"] :
+    [];
+  for (const kw of priorityKeywords) {
+    const match = assets.find((a) => String(a.name || "").toLowerCase().includes(kw));
+    if (match) return match;
+  }
+  return assets[0];
 }

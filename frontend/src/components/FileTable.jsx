@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { formatSize, formatConfidence, formatPath } from "../formatters";
-import { getCategoryMeta, getSourceMeta } from "../recovery-helpers";
+import { getCategoryMeta, getSourceMeta, isHighPriorityRecovery } from "../recovery-helpers";
 import { IconEye, IconForCategory, IconSearch, IconX } from "../icons";
 
 /**
@@ -203,6 +203,15 @@ function Row({ file, selected, onToggle, onPreview }) {
         </span>
       </td>
       <td className="file-name" title={file.fileName}>
+        {isHighPriorityRecovery(file) && (
+          <span
+            className="badge badge--success"
+            style={{ marginRight: 6, fontSize: 10, padding: "1px 6px" }}
+            title="来自 Windows.old 或 Users/ 子树——最可能是原主人个人数据"
+          >
+            优先
+          </span>
+        )}
         {file.fileName}
         {canPreview && (
           <button

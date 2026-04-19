@@ -13,6 +13,8 @@ import (
 
 	"data-recovery/internal/carver"
 	"data-recovery/internal/disk"
+	"data-recovery/internal/exfat"
+	"data-recovery/internal/fat"
 	"data-recovery/internal/logging"
 	"data-recovery/internal/ntfs"
 	"data-recovery/internal/signature"
@@ -75,6 +77,21 @@ type ntfsRecoverySource struct {
 	PartitionOffset int64
 }
 
+// exfatRecoverySource 保存 exFAT 文件恢复所需的一切：
+// 起始簇 / 分区偏移 / boot sector（算 cluster→byte 要）。
+type exfatRecoverySource struct {
+	Entry           exfat.DirEntry
+	Boot            *exfat.BootSector
+	PartitionOffset int64
+}
+
+// fatRecoverySource 保存 FAT12/16/32 文件恢复所需
+type fatRecoverySource struct {
+	Entry           fat.DirEntry
+	Boot            *fat.BootSector
+	PartitionOffset int64
+}
+
 // Engine 恢复引擎 — 整个系统的顶层协调器
 type Engine struct {
 	mu sync.RWMutex
@@ -88,6 +105,12 @@ type Engine struct {
 
 	// NTFS 扫描缓存，用于恢复阶段
 	ntfsSources map[string]ntfsRecoverySource
+
+	// exFAT 扫描缓存，用于恢复阶段
+	exfatSources map[string]exfatRecoverySource
+
+	// FAT12/16/32 扫描缓存，用于恢复阶段
+	fatSources map[string]fatRecoverySource
 
 	results    []*types.RecoveredFile
 	scanning   bool
@@ -136,6 +159,8 @@ func (e *Engine) Scan(
 	e.scanning = true
 	e.results = nil
 	e.ntfsSources = make(map[string]ntfsRecoverySource)
+	e.exfatSources = make(map[string]exfatRecoverySource)
+	e.fatSources = make(map[string]fatRecoverySource)
 	e.mu.Unlock()
 
 	// 扫描结束时解锁状态
@@ -224,22 +249,47 @@ func (e *Engine) Scan(
 		// 完整模式：NTFS + 深度扫描 + 验证
 		logger.Info("扫描模式", "mode", "full")
 
-		// 阶段1: NTFS 扫描 (0-15%)
+		// 阶段1: NTFS 扫描 (0-12%)
 		// 注意权重：NTFS 只读 MFT（磁盘很小一部分），对 U 盘通常几秒到十几秒就完成；
-		// 深度扫描要读全盘，耗时占大头。把 NTFS 权重从原本的 40% 降到 15%，
-		// 避免 NTFS 一跑完进度就 "突然跳到 40%" 的视觉错乱（用户反馈"一点击就 50%"的根因）。
+		// 深度扫描要读全盘，耗时占大头。把 NTFS 权重压到 12%，留 3% 给 exFAT
 		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
-			p.Percent = p.Percent * 0.15
+			p.Percent = p.Percent * 0.12
 			safeProgress(p)
 		}, safeFound)
 		if err != nil {
-			// NTFS 扫描失败不中断，记录日志继续深度扫描
-			logger.Warn("NTFS 扫描失败 (继续深度扫描)", "err", err)
+			// NTFS 扫描失败不中断（磁盘本身可能是 exFAT / 只有 exFAT 分区）
+			logger.Warn("NTFS 扫描失败 (继续 exFAT + 深度扫描)", "err", err)
 		} else {
 			allFiles = append(allFiles, ntfsFiles...)
 		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
 
-		// 检查是否已取消
+		// 阶段1.5: exFAT 扫描 (12-14%)——对 U 盘 / SD 卡 / 移动硬盘关键
+		exfatFiles, exfatErr := e.runEXFATScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 12.0 + p.Percent*0.02
+			safeProgress(p)
+		}, safeFound)
+		if exfatErr != nil {
+			logger.Warn("exFAT 扫描失败或未发现 exFAT 分区", "err", exfatErr)
+		} else {
+			allFiles = append(allFiles, exfatFiles...)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
+
+		// 阶段1.6: FAT12/16/32 扫描 (14-15%)——老 U 盘 / 老 SD 卡 / 老相机
+		fatFiles, fatErr := e.runFATScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 14.0 + p.Percent*0.01
+			safeProgress(p)
+		}, safeFound)
+		if fatErr != nil {
+			logger.Warn("FAT 扫描失败或未发现 FAT 分区", "err", fatErr)
+		} else {
+			allFiles = append(allFiles, fatFiles...)
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("扫描已取消")
 		}
@@ -306,6 +356,235 @@ func (e *Engine) Scan(
 
 	logger.Info("扫描完成", "duration_seconds", duration, "files", len(allFiles))
 	return result, nil
+}
+
+// runEXFATScan 执行 exFAT 扫描 —— 找分区 → 遍历目录（含已删除）→ 产出 RecoveredFile
+//
+// 对 U 盘 / SD 卡 / 移动硬盘这类外接存储设备关键：之前完全"看不见"，本轮新补。
+// 扫描深度：
+//   - 只遍历目录条目里的 in-use + deleted 文件，不走 FAT 链做块级数据重建
+//   - 连续存储（NoFatChain=1）的文件可完整恢复
+//   - 碎片文件被列出但标记为"需要 R-Studio"，FileSize 设为正确值供用户评估
+func (e *Engine) runEXFATScan(
+	ctx context.Context,
+	reader disk.DiskReader,
+	onProgress func(types.ScanProgress),
+	onFound func(*types.RecoveredFile),
+) ([]*types.RecoveredFile, error) {
+	logger.Info("开始 exFAT 扫描")
+
+	scanner := exfat.NewScanner(reader)
+
+	partitions, err := scanner.FindPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []*types.RecoveredFile
+	for pi, p := range partitions {
+		if ctx.Err() != nil {
+			return files, ctx.Err()
+		}
+		partitionLabel := fmt.Sprintf("exFAT 分区 %d/%d (@0x%X)", pi+1, len(partitions), p.Offset)
+		if onProgress != nil {
+			onProgress(types.ScanProgress{
+				Phase:       "exfat",
+				Percent:     float64(pi) / float64(len(partitions)) * 100,
+				CurrentFile: partitionLabel + ": 扫描目录",
+			})
+		}
+
+		perPartCount := 0
+		err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff exfat.FoundFile) {
+			file := exfatEntryToRecoveredFile(ff, p.BootSector)
+			if file == nil {
+				return
+			}
+			files = append(files, file)
+			// 缓存恢复源（供 Recover 阶段按 ID 查回簇信息）
+			e.cacheEXFATSource(file.ID, exfatRecoverySource{
+				Entry:           ff.Entry,
+				Boot:            p.BootSector,
+				PartitionOffset: p.Offset,
+			})
+			if onFound != nil {
+				onFound(file)
+			}
+			perPartCount++
+		})
+		if err != nil {
+			logger.Warn("exFAT 目录遍历失败", "partition", partitionLabel, "err", err)
+			continue
+		}
+		logger.Info("exFAT 分区扫描完成", "partition", partitionLabel, "files", perPartCount)
+	}
+
+	if onProgress != nil {
+		onProgress(types.ScanProgress{Phase: "exfat", Percent: 100, FilesFound: len(files)})
+	}
+	logger.Info("exFAT 扫描完成", "files", len(files))
+	return files, nil
+}
+
+// exfatEntryToRecoveredFile 把 exFAT 的一条目录发现翻译成统一的 RecoveredFile
+func exfatEntryToRecoveredFile(ff exfat.FoundFile, boot *exfat.BootSector) *types.RecoveredFile {
+	if ff.Entry.Name == "" || ff.Entry.IsDirectory {
+		return nil
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(ff.Entry.Name), "."))
+	category := categorizeByExtension(ext)
+
+	// 连续文件：Offset 指向 cluster heap 的字节；碎片文件：Offset 仍指向起始簇，
+	// writer 侧根据 Source=="exfat" 决定怎么读
+	var fileOffset int64 = -1
+	if ff.Entry.FirstCluster >= 2 {
+		fileOffset = boot.ClusterToByteOffset(ff.Entry.FirstCluster, ff.PartitionOff)
+	}
+
+	desc := ""
+	if ff.Entry.IsDeleted {
+		desc = "exFAT 已删除"
+	}
+	if !ff.Entry.NoFatChain {
+		if desc != "" {
+			desc += " + "
+		}
+		// 本轮新增 FAT 链遍历，碎片文件已支持恢复（但已删除文件的 FAT 链可能已回收，
+		// 那种情况 FollowFATChain 会拿到 FREE 标记并报错，上层能识别 partial）
+		desc += "碎片文件（走 FAT 链恢复）"
+	}
+
+	file := &types.RecoveredFile{
+		ID:           fmt.Sprintf("exfat_%X_%d", ff.PartitionOff, ff.Entry.DirEntryOffset),
+		Source:       "exfat",
+		FileName:     ff.Entry.Name,
+		Extension:    ext,
+		Category:     category,
+		Size:         ff.Entry.FileSize,
+		SizeHuman:    types.FormatSize(ff.Entry.FileSize),
+		Offset:       fileOffset,
+		Confidence:   0.0, // 由 validator 赋值；连续文件通常给 0.8+
+		IsDeleted:    ff.Entry.IsDeleted,
+		OriginalPath: ff.FullPath,
+		CreatedTime:  ff.Entry.CreatedTime,
+		ModifiedTime: ff.Entry.ModifiedTime,
+		Description:  desc,
+	}
+	return file
+}
+
+func (e *Engine) cacheEXFATSource(id string, src exfatRecoverySource) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.exfatSources == nil {
+		e.exfatSources = make(map[string]exfatRecoverySource)
+	}
+	e.exfatSources[id] = src
+}
+
+// runFATScan 执行 FAT12/16/32 扫描 —— U 盘 / SD 卡 / 老相机常用的文件系统。
+// 已删除文件的 FAT 链大概率被清 0，FileClusterList 会退化成"连续 cluster"启发，
+// 配合 signature validator（JPEG/PNG SOI 检测等）能救回大部分连续存储的用户照片。
+func (e *Engine) runFATScan(
+	ctx context.Context,
+	reader disk.DiskReader,
+	onProgress func(types.ScanProgress),
+	onFound func(*types.RecoveredFile),
+) ([]*types.RecoveredFile, error) {
+	logger.Info("开始 FAT 扫描")
+
+	scanner := fat.NewScanner(reader)
+	parts, err := scanner.FindPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []*types.RecoveredFile
+	for pi, p := range parts {
+		if ctx.Err() != nil {
+			return files, ctx.Err()
+		}
+		label := fmt.Sprintf("%s 分区 %d/%d (@0x%X)",
+			p.BootSector.FSType.String(), pi+1, len(parts), p.Offset)
+		if onProgress != nil {
+			onProgress(types.ScanProgress{
+				Phase:       "fat",
+				Percent:     float64(pi) / float64(len(parts)) * 100,
+				CurrentFile: label + ": 扫描目录",
+			})
+		}
+		perPart := 0
+		err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff fat.FoundFile) {
+			file := fatEntryToRecoveredFile(ff, p.BootSector)
+			if file == nil {
+				return
+			}
+			files = append(files, file)
+			e.cacheFATSource(file.ID, fatRecoverySource{
+				Entry:           ff.Entry,
+				Boot:            p.BootSector,
+				PartitionOffset: p.Offset,
+			})
+			if onFound != nil {
+				onFound(file)
+			}
+			perPart++
+		})
+		if err != nil {
+			logger.Warn("FAT 目录遍历失败", "partition", label, "err", err)
+			continue
+		}
+		logger.Info("FAT 分区扫描完成", "partition", label, "files", perPart)
+	}
+	if onProgress != nil {
+		onProgress(types.ScanProgress{Phase: "fat", Percent: 100, FilesFound: len(files)})
+	}
+	logger.Info("FAT 扫描完成", "files", len(files))
+	return files, nil
+}
+
+func fatEntryToRecoveredFile(ff fat.FoundFile, boot *fat.BootSector) *types.RecoveredFile {
+	if ff.Entry.Name == "" || ff.Entry.IsDirectory {
+		return nil
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(ff.Entry.Name), "."))
+	category := categorizeByExtension(ext)
+
+	fileOffset := int64(-1)
+	if ff.Entry.FirstCluster >= 2 {
+		fileOffset = boot.ClusterToByteOffset(ff.Entry.FirstCluster, ff.PartitionOff)
+	}
+
+	desc := boot.FSType.String()
+	if ff.Entry.IsDeleted {
+		desc += " 已删除"
+	}
+
+	return &types.RecoveredFile{
+		ID:           fmt.Sprintf("fat_%X_%s_%d", ff.PartitionOff, ff.Entry.ShortName, ff.Entry.FirstCluster),
+		Source:       "fat",
+		FileName:     ff.Entry.Name,
+		Extension:    ext,
+		Category:     category,
+		Size:         ff.Entry.FileSize,
+		SizeHuman:    types.FormatSize(ff.Entry.FileSize),
+		Offset:       fileOffset,
+		Confidence:   0.0,
+		IsDeleted:    ff.Entry.IsDeleted,
+		OriginalPath: ff.FullPath,
+		ModifiedTime: ff.Entry.ModifiedTime,
+		CreatedTime:  ff.Entry.CreatedTime,
+		Description:  desc,
+	}
+}
+
+func (e *Engine) cacheFATSource(id string, src fatRecoverySource) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.fatSources == nil {
+		e.fatSources = make(map[string]fatRecoverySource)
+	}
+	e.fatSources[id] = src
 }
 
 // runNTFSScan 执行 NTFS MFT 扫描
@@ -807,9 +1086,14 @@ func (e *Engine) RecoverWithOptions(
 		// 执行写入 —— 根据来源选择写入方式
 		var writeErr error
 
-		if file.Source == "ntfs" {
+		switch file.Source {
+		case "ntfs":
 			writeErr = e.recoverNTFSFile(file, outputPath)
-		} else {
+		case "exfat":
+			writeErr = e.recoverEXFATFile(file, outputPath)
+		case "fat":
+			writeErr = e.recoverFATFile(file, outputPath)
+		default:
 			// Carver 来源: 直接偏移读取
 			writeErr = writer.WriteFile(file, outputPath)
 		}
@@ -1076,6 +1360,66 @@ func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) e
 	}
 
 	return writer.WriteNTFSFile(file, source.Entry, source.Boot, source.PartitionOffset, outputPath)
+}
+
+// recoverEXFATFile 恢复 exFAT 来源的文件。
+//
+// 两种路径：
+//  1. 连续存储（NoFatChain=1）：cluster 号直接递增 → WriteEXFATFile
+//  2. 碎片化（NoFatChain=0）：走 FAT 链拼 cluster 列表 → WriteEXFATFile
+//
+// 两条路径都走 cluster 级恢复（不走 byte offset 的 WriteFile），因为：
+//   - 连续存储如果 FileSize 恰好 ≤ ClusterSize 的边界情况处理复杂
+//   - 统一用 cluster 列表逻辑更简单，性能损失可忽略（磁盘 page cache 兜底）
+func (e *Engine) recoverEXFATFile(file *types.RecoveredFile, outputPath string) error {
+	e.mu.RLock()
+	source, ok := e.exfatSources[file.ID]
+	writer := e.writer
+	reader := e.reader
+	e.mu.RUnlock()
+
+	if writer == nil {
+		return fmt.Errorf("写入器未初始化")
+	}
+	if !ok || source.Boot == nil {
+		return fmt.Errorf("exFAT 恢复源已丢失 (ID=%s)，请重新扫描后再恢复", file.ID)
+	}
+	if reader == nil {
+		return fmt.Errorf("磁盘 reader 未初始化")
+	}
+
+	clusters, err := exfat.FileClusterList(reader, source.Boot, source.PartitionOffset, &source.Entry)
+	if err != nil {
+		// 已删除文件的 FAT 链可能已被回收，典型错误：起始 cluster 标记为 free
+		return fmt.Errorf("构造 cluster 列表失败: %w", err)
+	}
+	return writer.WriteEXFATFile(file, clusters, source.Boot, source.PartitionOffset, outputPath)
+}
+
+// recoverFATFile 恢复 FAT12/16/32 来源的文件。
+// 与 exFAT 路径对称：构造 cluster 列表 → WriteFATFile。
+// 对已删除 FAT 文件，FAT 链经常被清 0，FileClusterList 会退化成连续启发。
+func (e *Engine) recoverFATFile(file *types.RecoveredFile, outputPath string) error {
+	e.mu.RLock()
+	source, ok := e.fatSources[file.ID]
+	writer := e.writer
+	reader := e.reader
+	e.mu.RUnlock()
+
+	if writer == nil {
+		return fmt.Errorf("写入器未初始化")
+	}
+	if !ok || source.Boot == nil {
+		return fmt.Errorf("FAT 恢复源已丢失 (ID=%s)", file.ID)
+	}
+	if reader == nil {
+		return fmt.Errorf("磁盘 reader 未初始化")
+	}
+	clusters, err := fat.FileClusterList(reader, source.Boot, source.PartitionOffset, &source.Entry)
+	if err != nil {
+		return fmt.Errorf("构造 FAT cluster 列表失败: %w", err)
+	}
+	return writer.WriteFATFile(file, clusters, source.Boot, source.PartitionOffset, outputPath)
 }
 
 // Stop 取消正在进行的扫描
@@ -1367,13 +1711,16 @@ func (e *Engine) cacheNTFSSource(fileID string, source ntfsRecoverySource) {
 // categorizeByExtension 根据文件扩展名推断分类
 func categorizeByExtension(ext string) types.FileCategory {
 	switch ext {
-	case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico", "raw", "cr2", "nef", "psd", "heic", "heif":
+	case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico",
+		"raw", "cr2", "cr3", "nef", "arw", "dng", "orf", "rw2", "raf", "pef",
+		"psd", "heic", "heif", "avif":
 		return types.CategoryImage
-	case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt", "ods", "odp", "csv", "md", "html", "htm", "xml", "json", "epub":
+	case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt", "ods", "odp",
+		"csv", "md", "html", "htm", "xml", "json", "epub", "eml", "msg":
 		return types.CategoryDocument
-	case "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ts", "vob":
+	case "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "3g2", "ts", "vob":
 		return types.CategoryVideo
-	case "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus", "aiff", "ape", "mid", "midi":
+	case "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "m4b", "opus", "aiff", "ape", "mid", "midi":
 		return types.CategoryAudio
 	case "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "cab", "zst":
 		return types.CategoryArchive

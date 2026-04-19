@@ -555,6 +555,20 @@ kbd,
 .banner--success .banner__icon,
 .banner--success .banner__title { color: var(--success); }
 
+/* 更新 banner ---------------------------------------------------- */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+.update-banner--available  { background: var(--accent-soft); }
+.update-banner--downloading { background: var(--bg-inset); }
+.update-banner--ready      { background: var(--success-soft); }
+.update-banner > span { flex: 1; }
+
 /* 图片预览 modal ---------------------------------------------------- */
 .preview-modal {
   position: fixed;

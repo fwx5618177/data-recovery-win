@@ -1598,3 +1598,101 @@ func detectICOSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 
 	return maxEnd
 }
+
+// =========================================================================
+// DjVu 文件大小检测
+// =========================================================================
+//
+// DjVu 用 IFF FORM 容器，带一个 4 字节 "AT&T" 前缀：
+//
+//	offset 0:  "AT&T"                        (4 bytes prefix)
+//	offset 4:  "FORM"                        (4 bytes IFF chunk id)
+//	offset 8:  uint32 big-endian formSize    (4 bytes, FORM 内容长度，含 subtype)
+//	offset 12: 子类型 "DJVU"/"DJVM"/"PM44"/"BM44"
+//	offset 16: FORM body (formSize - 4 bytes)
+//
+// 总文件大小 = 12 (AT&T + FORM + size field) + formSize（+1 偶对齐 padding）
+func detectDjVuSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	head, err := readBytesAt(reader, offset, 16)
+	if err != nil || len(head) < 16 {
+		return 0
+	}
+	if string(head[0:8]) != "AT&TFORM" {
+		return 0
+	}
+	formSize := int64(binary.BigEndian.Uint32(head[8:12]))
+	if formSize <= 4 || formSize > maxSize-12 {
+		return 0
+	}
+	// 子类型合理性
+	sub := string(head[12:16])
+	if sub != "DJVM" && sub != "DJVU" && sub != "PM44" && sub != "BM44" {
+		return 0
+	}
+	total := 12 + formSize
+	if total%2 == 1 {
+		total++ // IFF 偶字节对齐
+	}
+	if total > maxSize {
+		total = maxSize
+	}
+	return total
+}
+
+// =========================================================================
+// MIDI 文件大小检测
+// =========================================================================
+//
+// MIDI 用 MThd/MTrk 分块结构：
+//
+//	offset 0: "MThd"     (4 bytes)
+//	offset 4: uint32 big-endian header 数据长度（通常 6）
+//	offset 8+: header data
+//	之后若干 MTrk chunk：
+//	  offset 0: "MTrk"   (4 bytes)
+//	  offset 4: uint32 big-endian track 数据长度
+//	  offset 8+: track data
+//
+// 从 MThd 读 header length 算出第一个 MTrk 的起点，然后循环 MTrk 直到读不到 MTrk。
+func detectMIDISize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	head, err := readBytesAt(reader, offset, 8)
+	if err != nil || len(head) < 8 {
+		return 0
+	}
+	if string(head[0:4]) != "MThd" {
+		return 0
+	}
+	headerLen := int64(binary.BigEndian.Uint32(head[4:8]))
+	if headerLen < 6 || headerLen > 1024 { // 标准是 6；给点余地
+		return 0
+	}
+
+	pos := int64(8) + headerLen
+	// 合理性：一首 MIDI 曲子通常 < 100 个 track、总大小 < 10MB
+	const maxTracks = 512
+	for track := 0; track < maxTracks; track++ {
+		if pos+8 > maxSize {
+			break
+		}
+		chunkHead, err := readBytesAt(reader, offset+pos, 8)
+		if err != nil || len(chunkHead) < 8 {
+			break
+		}
+		if string(chunkHead[0:4]) != "MTrk" {
+			// 合法 MIDI 应以 MTrk 结束；遇到非 MTrk 说明到文件外
+			break
+		}
+		trackLen := int64(binary.BigEndian.Uint32(chunkHead[4:8]))
+		if trackLen < 0 || trackLen > 10*1024*1024 {
+			return 0 // 不合理的 track 大小视作误报
+		}
+		pos += 8 + trackLen
+	}
+	if pos <= 8+headerLen {
+		return 0 // 至少要有一个 MTrk
+	}
+	if pos > maxSize {
+		pos = maxSize
+	}
+	return pos
+}

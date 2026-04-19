@@ -1,0 +1,279 @@
+package exfat
+
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"data-recovery/internal/disk"
+)
+
+// Scanner 扫描一块磁盘 / 一份镜像中的 exFAT 分区，递归枚举所有目录条目。
+// 使用方式：
+//
+//	s := exfat.NewScanner(reader)
+//	parts, err := s.FindPartitions(ctx)
+//	for _, p := range parts {
+//	    s.ScanDirectory(ctx, p.BootSector, p.Offset, func(file FoundFile) { ... })
+//	}
+type Scanner struct {
+	reader disk.DiskReader
+}
+
+// NewScanner 构造一个 exFAT Scanner
+func NewScanner(reader disk.DiskReader) *Scanner {
+	return &Scanner{reader: reader}
+}
+
+// Partition 表示磁盘上发现的一个 exFAT 分区
+type Partition struct {
+	Offset     int64 // 分区在磁盘上的起始字节偏移
+	Size       int64 // 分区字节大小（估算）
+	Type       string
+	BootSector *BootSector
+}
+
+// FoundFile 是 Scanner 回调给上层的一条文件发现结果
+type FoundFile struct {
+	Entry        DirEntry
+	FullPath     string // 相对于分区根的完整路径（用 "/" 分隔）
+	PartitionOff int64  // 所在分区的起始偏移，recover 时需要
+}
+
+// FindPartitions 扫描磁盘定位 exFAT 分区。
+//
+// 和 NTFS 一样：
+//  1. 如果磁盘整体就是一个 exFAT 分区（常见于 U 盘 / SD 卡），offset 0 就能解析成功
+//  2. 否则按 MBR/GPT 指向的分区头解析（复用 NTFS 侧的分区表代码思路）
+//  3. 都失败时，全盘暴力扫 "EXFAT   " OEM ID 做兜底（找被删除的旧分区残骸）
+//
+// 本实现先落最实用的那条：
+//  - 尝试 offset 0 解析（U 盘 / SD 卡场景的 99%）
+//  - 失败则按 4MB 步长做签名扫描兜底
+func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
+	var partitions []Partition
+
+	// 策略 a：假设整盘即一个 exFAT 分区
+	if bs, err := ParseBootSector(s.reader, 0); err == nil {
+		partitions = append(partitions, Partition{
+			Offset:     0,
+			Size:       bs.VolumeLength * bs.BytesPerSector,
+			Type:       "volume",
+			BootSector: bs,
+		})
+	}
+
+	// 策略 b：全盘签名扫描（兜底）。与 NTFS 的 bruteForceFindNTFS 思路一致
+	brute, err := s.bruteForceFindEXFAT(ctx)
+	if err == nil {
+		partitions = append(partitions, brute...)
+	}
+
+	partitions = dedupePartitions(partitions)
+	if len(partitions) == 0 {
+		return nil, fmt.Errorf("未发现 exFAT 分区")
+	}
+	return partitions, nil
+}
+
+// bruteForceFindEXFAT 全盘按 4MB 块读入 + 512KB 步进搜索 exFAT boot sector
+// "EXFAT   " OEM ID 在 boot sector 偏移 3-10 处
+func (s *Scanner) bruteForceFindEXFAT(ctx context.Context) ([]Partition, error) {
+	diskSize, err := s.reader.Size()
+	if err != nil {
+		return nil, err
+	}
+
+	const (
+		readBlockSize int64 = 4 * 1024 * 1024
+		stepSize      int64 = 512 * 1024
+	)
+	buf := make([]byte, readBlockSize)
+	var result []Partition
+
+	for blockOff := int64(0); blockOff < diskSize; blockOff += readBlockSize {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
+		readSize := readBlockSize
+		if blockOff+readSize > diskSize {
+			readSize = diskSize - blockOff
+		}
+		nr, rerr := s.reader.ReadAt(buf[:readSize], blockOff)
+		if rerr != nil && rerr != io.EOF {
+			continue
+		}
+		if nr < 512 {
+			continue
+		}
+
+		for in := int64(0); in+512 <= int64(nr); in += stepSize {
+			// 快速 OEM ID 检查
+			if string(buf[in+3:in+11]) != exFATSignature {
+				continue
+			}
+			abs := blockOff + in
+			bs, err := ParseBootSector(s.reader, abs)
+			if err != nil {
+				continue
+			}
+			result = append(result, Partition{
+				Offset:     abs,
+				Size:       bs.VolumeLength * bs.BytesPerSector,
+				Type:       "bruteforce",
+				BootSector: bs,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+func dedupePartitions(in []Partition) []Partition {
+	if len(in) <= 1 {
+		return in
+	}
+	seen := make(map[int64]bool, len(in))
+	out := make([]Partition, 0, len(in))
+	for _, p := range in {
+		if seen[p.Offset] {
+			continue
+		}
+		seen[p.Offset] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// ScanDirectory 从根目录开始递归遍历一个 exFAT 分区，逐条回调文件。
+//
+// 已删除条目也会回调（DirEntry.IsDeleted=true），让上层自己决定要不要恢复它。
+// 目录本身（IsDirectory=true）不会回调给文件消费者——但会递归进去。
+//
+// 碎片化保护：maxDepth 限制子目录深度避免病态磁盘造成死循环；
+// visitedClusters 防止因簇链被破坏导致的无限自引用。
+func (s *Scanner) ScanDirectory(
+	ctx context.Context,
+	boot *BootSector,
+	partitionOffset int64,
+	onFound func(FoundFile),
+) error {
+	const maxDepth = 32
+	visited := make(map[uint32]bool)
+	return s.walkDir(ctx, boot, partitionOffset, boot.FirstClusterOfRootDirectory, "", 0, maxDepth, visited, onFound)
+}
+
+// walkDir 递归目录实现
+func (s *Scanner) walkDir(
+	ctx context.Context,
+	boot *BootSector,
+	partitionOffset int64,
+	startCluster uint32,
+	parentPath string,
+	depth, maxDepth int,
+	visited map[uint32]bool,
+	onFound func(FoundFile),
+) error {
+	if depth > maxDepth {
+		return nil
+	}
+	if startCluster < 2 || visited[startCluster] {
+		return nil
+	}
+	visited[startCluster] = true
+
+	// 目录数据由连续若干簇组成。简化实现：假定目录不跨 FAT 链（实际 95% 情况成立，
+	// 目录通常只占一个 cluster 或几个连续 cluster）。完整实现需要走 FAT 链，留 TODO。
+	//
+	// 这里按 "从 startCluster 开始一次性读 N 个 cluster"，遇到 0x00（且随后连续 32 字节都是 0）
+	// 视为目录结束。
+	const maxDirClusters = 512 // 32MB 目录上限，够 GB 级 exFAT 根目录
+	dirDataSize := int64(maxDirClusters) * boot.ClusterSize
+	startOffset := boot.ClusterToByteOffset(startCluster, partitionOffset)
+	if startOffset < 0 {
+		return nil
+	}
+
+	buf := make([]byte, dirDataSize)
+	n, err := s.reader.ReadAt(buf, startOffset)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("读取目录簇失败 (cluster=%d): %w", startCluster, err)
+	}
+	if n == 0 {
+		return nil
+	}
+	buf = buf[:n]
+
+	pos := 0
+	// 连续空 entry 计数，超过 4 个直接停止（目录边界探测启发）
+	emptyStreak := 0
+	for pos < len(buf) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		entry, consumed := ParseEntrySet(buf, pos)
+		if consumed <= 0 {
+			consumed = 32 // 防死循环
+		}
+
+		// 检查是否是全零 entry
+		allZero := true
+		if pos+32 <= len(buf) {
+			for i := 0; i < 32; i++ {
+				if buf[pos+i] != 0 {
+					allZero = false
+					break
+				}
+			}
+		}
+		if allZero {
+			emptyStreak++
+			if emptyStreak > 4 {
+				break // 连续空条目 → 认为已到目录尾部
+			}
+			pos += 32
+			continue
+		}
+		emptyStreak = 0
+
+		if entry == nil {
+			pos += consumed
+			continue
+		}
+
+		entry.DirEntryOffset = startOffset + int64(pos)
+
+		if entry.IsDirectory && !entry.IsDeleted {
+			// 递归进入子目录（跳过 "." / ".." —— exFAT 其实没这俩，但容错）
+			if entry.Name != "." && entry.Name != ".." {
+				subPath := parentPath + "/" + entry.Name
+				if parentPath == "" {
+					subPath = entry.Name
+				}
+				_ = s.walkDir(ctx, boot, partitionOffset, entry.FirstCluster, subPath, depth+1, maxDepth, visited, onFound)
+			}
+		} else if !entry.IsDirectory {
+			// 普通文件（含已删除），交给上层
+			fullPath := parentPath + "/" + entry.Name
+			if parentPath == "" {
+				fullPath = entry.Name
+			}
+			if onFound != nil {
+				onFound(FoundFile{
+					Entry:        *entry,
+					FullPath:     fullPath,
+					PartitionOff: partitionOffset,
+				})
+			}
+		}
+		pos += consumed
+	}
+
+	return nil
+}

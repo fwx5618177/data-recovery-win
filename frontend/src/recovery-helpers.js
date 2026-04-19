@@ -69,17 +69,48 @@ const SYSTEM_PATH_PREFIXES = [
  * 命中条件（任意一条即判定）：
  *   - 扩展名在 SYSTEM_FILE_EXTENSIONS 中
  *   - 原路径（NTFS 来源才有）以系统目录前缀开头
+ *
+ * 例外：Windows.old 子树下的文件**不算**系统文件。
+ * Windows 重装后，前一次系统 + 前一次的所有用户文件被整体搬到 Windows.old/，
+ * 这是被盗电脑重装后最重要的数据来源之一，不能因为路径里包含 /Windows/ 就被误杀。
  */
 export function isSystemFile(file) {
   if (!file) return false;
+  const path = String(file.originalPath || "").toLowerCase().replace(/\\/g, "/");
+
+  // Windows.old 是"旧系统备份"，里面的 Users/ 是原主人的数据，绝对不能当系统文件
+  if (path.includes("windows.old/")) return false;
+
   const ext = String(file.extension || "").toLowerCase();
   if (SYSTEM_FILE_EXTENSIONS.has(ext)) return true;
 
-  const path = String(file.originalPath || "").toLowerCase().replace(/\\/g, "/");
   for (const prefix of SYSTEM_PATH_PREFIXES) {
     if (path.startsWith(prefix) || path.includes("/" + prefix)) return true;
   }
   return false;
+}
+
+/**
+ * isHighPriorityRecovery 标记一条文件是否值得在 UI 里高亮 ——
+ * 目前的判定：位于 Windows.old/Users/ 或 /Users/ 子树下的个人数据。
+ * 这些文件是被盗电脑重装后最可能是用户真实数据的候选，优先推荐给用户挑选。
+ */
+export function isHighPriorityRecovery(file) {
+  if (!file) return false;
+  const path = String(file.originalPath || "").toLowerCase().replace(/\\/g, "/");
+  if (path.includes("windows.old/")) return true;
+  if (path.startsWith("users/") || path.includes("/users/")) return true;
+  return false;
+}
+
+/** countHighPriority 统计值得优先关注的文件数量。 */
+export function countHighPriority(files) {
+  if (!files || files.length === 0) return 0;
+  let n = 0;
+  for (let i = 0; i < files.length; i++) {
+    if (isHighPriorityRecovery(files[i])) n++;
+  }
+  return n;
 }
 
 export function buildFallbackScanResult(files = [], progress = {}) {

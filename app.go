@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -15,7 +17,19 @@ import (
 	"data-recovery/internal/recovery"
 	"data-recovery/internal/session"
 	"data-recovery/internal/types"
+	"data-recovery/internal/updater"
+	"data-recovery/internal/vss"
 )
+
+// updateRepoOwner / updateRepoName 指向本项目的 GitHub 仓库，用于版本检查。
+// TODO: 当真实发布时请改成正确的 owner/repo（或用 -ldflags 注入）
+const (
+	updateRepoOwner = "your-github-owner"
+	updateRepoName  = "data-recovery"
+)
+
+// imagingMu 序列化 DumpDisk 调用 —— 一次只允许一个 dump 任务
+var imagingMu sync.Mutex
 
 var appLogger = logging.L().With("component", "app")
 
@@ -57,7 +71,181 @@ func (a *App) startup(ctx context.Context) {
 		appLogger.Info("会话存储就绪", "path", store.Path())
 	}
 
-	appLogger.Info("应用启动完成")
+	// 启动后台版本检查。注意：故意不阻塞启动，不报错干扰用户，
+	// 仅当 HasUpdate=true 时通过事件通知前端；其余情况静默
+	go a.autoCheckForUpdate()
+
+	appLogger.Info("应用启动完成", "version", updater.Version)
+}
+
+// autoCheckForUpdate 后台检查 GitHub Releases。
+// 约束：
+//   - 扫描 / 恢复进行中**不**打扰用户（即便 release 页有新版，本次会话不推送）
+//   - 失败静默（网络问题 / GitHub 限流不影响用户操作）
+//   - 10 秒超时已在 updater.httpClient 里兜住
+func (a *App) autoCheckForUpdate() {
+	// 启动时先等 3 秒，避免与磁盘枚举等请求争资源
+	time.Sleep(3 * time.Second)
+
+	if a.engine != nil && (a.engine.IsScanning()) {
+		appLogger.Info("扫描进行中，跳过自动更新检查")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+
+	res, err := updater.CheckLatest(ctx, updateRepoOwner, updateRepoName)
+	if err != nil {
+		appLogger.Debug("版本检查失败（忽略）", "err", err)
+		return
+	}
+	if !res.HasUpdate {
+		return
+	}
+
+	appLogger.Info("发现新版本",
+		"current", res.CurrentVersion,
+		"latest", res.LatestVersion,
+		"url", res.DownloadPage)
+	wailsRuntime.EventsEmit(a.ctx, "update:available", res)
+}
+
+// CheckForUpdate 提供给前端主动触发版本检查的入口（"立刻检查更新"按钮）。
+// 返回 CheckResult —— 无论有无更新都返回，前端自己决定怎么展示。
+func (a *App) CheckForUpdate() (*updater.CheckResult, error) {
+	if a.engine != nil && a.engine.IsScanning() {
+		return nil, fmt.Errorf("正在扫描，请稍后再检查更新")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	return updater.CheckLatest(ctx, updateRepoOwner, updateRepoName)
+}
+
+// GetAppVersion 返回当前二进制的版本号，前端 footer 展示用
+func (a *App) GetAppVersion() string {
+	return updater.Version
+}
+
+// ListShadowCopies 枚举本机 Volume Shadow Copy 快照。
+// 非 Windows 平台返回 nil，让前端礼貌地隐藏 VSS 区块，不报错。
+// 失败（无权限 / 无快照）返回空切片 + nil error。
+func (a *App) ListShadowCopies() ([]vss.Shadow, error) {
+	shadows, err := vss.ListShadows(a.ctx)
+	if err != nil {
+		if err == vss.ErrNotSupported {
+			return nil, nil // 静默
+		}
+		appLogger.Info("VSS 枚举失败", "err", err)
+		return []vss.Shadow{}, nil // 容错：UI 显示"没有快照"即可
+	}
+	return shadows, nil
+}
+
+// DownloadUpdate 后台下载指定版本的安装包到 pending 目录。
+// assetURL / assetSize 通常来自 update:available 事件里 CheckResult 的 Assets[i]。
+// 下载是异步的：本函数立即返回，进度通过 "update:downloadProgress" 事件推送；
+// 完成 / 失败分别通过 "update:downloaded" / "update:downloadError" 推送。
+func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int64) error {
+	if a.engine != nil && a.engine.IsScanning() {
+		return fmt.Errorf("正在扫描，请先停止后再下载更新")
+	}
+	if version == "" || assetURL == "" || assetName == "" {
+		return fmt.Errorf("下载参数不完整")
+	}
+
+	pendingDir, err := updater.PendingDir()
+	if err != nil {
+		return err
+	}
+	// 每个版本独立子目录，避免不同版本互相覆盖
+	versionDir := filepath.Join(pendingDir, version)
+	destPath := filepath.Join(versionDir, assetName)
+
+	appLogger.Info("开始下载更新", "version", version, "asset", assetName, "dest", destPath)
+
+	go func() {
+		ctx, cancel := context.WithCancel(a.ctx)
+		defer cancel()
+
+		asset := updater.Asset{Name: assetName, DownloadURL: assetURL, Size: assetSize}
+		sha, err := updater.DownloadAsset(ctx, asset, destPath, func(p updater.DownloadProgress) {
+			wailsRuntime.EventsEmit(a.ctx, "update:downloadProgress", p)
+		})
+		if err != nil {
+			appLogger.Warn("下载更新失败", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "update:downloadError", err.Error())
+			return
+		}
+
+		info, _ := os.Stat(destPath)
+		var size int64
+		if info != nil {
+			size = info.Size()
+		}
+		pending := updater.Pending{
+			Version:    version,
+			BinaryPath: destPath,
+			SHA256:     sha,
+			SizeBytes:  size,
+			StagedAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := updater.SavePending(pending); err != nil {
+			appLogger.Warn("保存 pending manifest 失败", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "update:downloadError", err.Error())
+			return
+		}
+		appLogger.Info("更新下载完成", "version", version, "sha256", sha, "size", size)
+		wailsRuntime.EventsEmit(a.ctx, "update:downloaded", pending)
+	}()
+
+	return nil
+}
+
+// ApplyPendingUpdate 应用 pending 更新：派生 helper 进程 → 退出主程序。
+// helper 会等主程序退出后把新 exe 覆盖到当前位置，再启动新版。
+// 调用前建议前端先提示用户"应用将关闭并重启"。
+func (a *App) ApplyPendingUpdate() error {
+	if a.engine != nil && (a.engine.IsScanning()) {
+		return fmt.Errorf("扫描进行中不能应用更新，请先停止扫描")
+	}
+	pending, err := updater.LoadPending()
+	if err != nil {
+		return fmt.Errorf("读取 pending 失败: %w", err)
+	}
+	if pending == nil {
+		return fmt.Errorf("没有待应用的更新")
+	}
+
+	currentExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("无法定位当前 exe 路径: %w", err)
+	}
+
+	if err := updater.SpawnApplyHelper(currentExe, pending.BinaryPath); err != nil {
+		return fmt.Errorf("派生更新进程失败: %w", err)
+	}
+
+	appLogger.Info("已派生更新 helper，主进程即将退出",
+		"current_exe", currentExe, "pending_exe", pending.BinaryPath)
+
+	// 给 UI 一点时间显示"正在重启"再关
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		wailsRuntime.Quit(a.ctx)
+	}()
+	return nil
+}
+
+// GetPendingUpdate 检查是否有 pending 更新，前端启动时调用。
+// 返回 nil 表示没有 pending。
+func (a *App) GetPendingUpdate() (*updater.Pending, error) {
+	return updater.LoadPending()
+}
+
+// CancelPendingUpdate 取消 pending（清理下载文件）
+func (a *App) CancelPendingUpdate() error {
+	return updater.ClearPending()
 }
 
 // shutdown 是 Wails 的 shutdown hook，在应用关闭时调用
@@ -413,6 +601,90 @@ func (a *App) SelectOutputDir() (string, error) {
 		return "", fmt.Errorf("打开目录选择对话框失败: %w", err)
 	}
 	return dir, nil
+}
+
+// SelectImageSavePath 让用户选"把镜像保存到哪"的目标路径。
+// 单独一个入口，默认 .img 后缀；后端自己不该猜路径。
+func (a *App) SelectImageSavePath() (string, error) {
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "保存镜像文件",
+		DefaultFilename: "disk.img",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "磁盘镜像 (*.img)", Pattern: "*.img"},
+			{DisplayName: "原始 (*.dd / *.raw)", Pattern: "*.dd;*.raw"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("打开保存对话框失败: %w", err)
+	}
+	return path, nil
+}
+
+// DumpDisk 把源盘整盘 dump 到镜像文件，支持坏道跳过。
+// 业界 image-first 恢复工作流的核心一步：源盘只读一次、后续扫描全在镜像上。
+// srcDevicePath：源盘（`\\.\PhysicalDriveN` / `/dev/diskN` 等），不接受普通文件路径
+// dstImagePath：镜像输出文件，如果已存在会直接失败（避免误覆盖）
+// 进度通过 "imaging:progress" / "imaging:completed" / "imaging:error" 事件推送
+func (a *App) DumpDisk(srcDevicePath string, dstImagePath string) error {
+	if srcDevicePath == "" || dstImagePath == "" {
+		return fmt.Errorf("源盘或目标路径为空")
+	}
+
+	// 只允许一次 dump 并行运行
+	if !imagingMu.TryLock() {
+		return fmt.Errorf("已有镜像任务正在进行中，请等待完成或取消")
+	}
+
+	go func() {
+		defer imagingMu.Unlock()
+
+		reader := disk.NewReader(srcDevicePath)
+		if err := reader.Open(); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "imaging:error", err.Error())
+			return
+		}
+		defer reader.Close()
+
+		opts := disk.DefaultImageOptions()
+		ctx := a.ctx
+		written, err := disk.DumpDiskToImage(ctx, reader, dstImagePath, opts, func(p disk.ImageProgress) {
+			wailsRuntime.EventsEmit(a.ctx, "imaging:progress", p)
+		})
+		if err != nil {
+			appLogger.Warn("镜像 dump 出错", "err", err, "written", written)
+			wailsRuntime.EventsEmit(a.ctx, "imaging:error", err.Error())
+			return
+		}
+		appLogger.Info("镜像 dump 完成", "path", dstImagePath, "bytes", written)
+		wailsRuntime.EventsEmit(a.ctx, "imaging:completed", map[string]any{
+			"path":  dstImagePath,
+			"bytes": written,
+		})
+	}()
+
+	return nil
+}
+
+// SelectImageFile 让用户选一个磁盘镜像文件（.img/.dd/.raw/.001 等）作为扫描源。
+// 业界工作流：先用 ddrescue / HDDSuperClone / DMDE clone 把源盘整盘 dump 成镜像，
+// 然后对镜像做扫描，源盘一旦 dump 完就不再动，是最安全的方式。
+// 返回选中的文件路径；用户取消时返回空串、nil error。
+func (a *App) SelectImageFile() (string, error) {
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "选择磁盘镜像文件",
+		Filters: []wailsRuntime.FileFilter{
+			{
+				DisplayName: "磁盘镜像 (*.img, *.dd, *.raw, *.bin, *.001)",
+				Pattern:     "*.img;*.dd;*.raw;*.bin;*.001",
+			},
+			{DisplayName: "全部文件 (*.*)", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		appLogger.Warn("打开镜像文件选择对话框失败", "err", err)
+		return "", fmt.Errorf("打开文件选择对话框失败: %w", err)
+	}
+	return path, nil
 }
 
 // OpenFolder 使用系统默认文件管理器打开指定文件夹

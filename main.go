@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"data-recovery/internal/logging"
+	"data-recovery/internal/updater"
 )
 
 //go:embed all:frontend/dist
@@ -17,6 +18,19 @@ var assets embed.FS
 
 func main() {
 	bootLogger := logging.L().With("component", "boot")
+
+	// 检测"自动更新 helper 模式"：由主程序 fork 自己时带上 --apply-update，
+	// 本模式不启动 Wails UI，只负责替换 exe 然后启动新版。
+	if updater.IsApplyMode(os.Args) {
+		parentPID, oldExe, newExe := updater.ParseApplyArgs(os.Args)
+		bootLogger.Info("进入更新 helper 模式",
+			"parent_pid", parentPID, "old_exe", oldExe, "new_exe", newExe)
+		if err := updater.RunApplyHelper(parentPID, oldExe, newExe); err != nil {
+			bootLogger.Error("更新 helper 执行失败", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	relaunched, err := ensureAdminPrivileges()
 	if err != nil {

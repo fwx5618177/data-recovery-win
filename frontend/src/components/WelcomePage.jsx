@@ -19,6 +19,7 @@ export default function WelcomePage({
   selectedDrive,
   onSelectDrive,
   onStartScan,
+  onSelectImageFile,
   onRefreshDrives,
   isLoadingDrives,
   driveLoadError,
@@ -27,6 +28,8 @@ export default function WelcomePage({
   pendingSession,
   onRestoreSession,
   onDiscardSession,
+  shadows,
+  onScanShadow,
 }) {
   const needsElevation = !isAdmin;
 
@@ -40,6 +43,22 @@ export default function WelcomePage({
       </div>
 
       <div className="page__body flex-col gap-3">
+        <div className="banner banner--warning">
+          <IconAlertTriangle size={18} className="banner__icon" />
+          <div className="banner__content">
+            <div className="banner__title">重要数据请优先用成熟的行业工具</div>
+            <div className="banner__text">
+              这个工具目前支持 <b>NTFS</b> 的 MFT 解析 + 全盘签名雕刻，
+              对 <span className="mono">exFAT/FAT32</span> / Volume Shadow Copy / 碎片重组 / BitLocker / RAID 等场景
+              <b>不支持或刚起步</b>。
+              <br />
+              如果你是被盗电脑 / 重要数据恢复，建议先用 <b>PhotoRec</b>（免费）、
+              <b>DMDE Free</b>（免费）、<b>R-Studio</b>（付费试用）跑一遍，
+              再用本工具做交叉验证。这些工具经过 10+ 年真实案例打磨，可靠度是本工具没法比的。
+            </div>
+          </div>
+        </div>
+
         {needsElevation && (
           <div className="banner banner--danger">
             <IconShield size={18} className="banner__icon" />
@@ -120,6 +139,66 @@ export default function WelcomePage({
             />
           ))}
         </div>
+
+        <div className="banner banner--info">
+          <IconInfo size={18} className="banner__icon" />
+          <div className="banner__content">
+            <div className="banner__title">更安全：扫描磁盘镜像文件</div>
+            <div className="banner__text">
+              业界最佳实践：先用 <span className="mono">ddrescue</span>（Linux）、
+              HDDSuperClone、或 DMDE 的 clone 功能把源盘整盘 dump 成 <span className="mono">.img</span> 文件，
+              然后让本工具扫镜像而不是原盘 —— 源盘只读一次就放回保险箱，
+              后续无论怎么试都不会再动它。
+            </div>
+          </div>
+          <div className="banner__actions">
+            <button className="btn btn--sm" onClick={onSelectImageFile}>
+              选择镜像文件…
+            </button>
+          </div>
+        </div>
+
+        {Array.isArray(shadows) && shadows.length > 0 && (
+          <div className="banner banner--success" style={{ flexDirection: "column", alignItems: "stretch" }}>
+            <div className="flex items-center gap-2">
+              <IconInfo size={18} className="banner__icon" />
+              <div className="banner__title">
+                发现 {shadows.length} 个 Volume Shadow Copy 卷影副本
+              </div>
+            </div>
+            <div className="banner__text" style={{ marginBottom: 8 }}>
+              系统还原点 / VSS 自动快照里可能保留了**重装前**的用户数据。
+              这是 R-Studio 式"时光机"能力，对被盗 Windows 找回数据价值最高。
+              直接扫这里的快照设备，像扫原盘一样。
+            </div>
+            <div className="flex-col gap-2">
+              {shadows.map((s) => (
+                <div
+                  key={s.ID || s.DevicePath}
+                  className="card"
+                  style={{ padding: "8px 12px", display: "flex", alignItems: "center", gap: 12 }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="mono" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.DevicePath}
+                    </div>
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {s.CreatedAt ? new Date(s.CreatedAt).toLocaleString() : "创建时间未知"}
+                      {s.OriginalVolume ? ` · 来源 ${s.OriginalVolume}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    className="btn btn--sm btn--primary"
+                    onClick={() => onScanShadow?.(s)}
+                    disabled={!isAdmin}
+                  >
+                    扫描此快照
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex justify-between items-center" style={{ marginTop: 8 }}>
           <div className="muted" style={{ fontSize: 12 }}>

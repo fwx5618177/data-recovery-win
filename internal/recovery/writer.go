@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"data-recovery/internal/disk"
+	"data-recovery/internal/exfat"
+	"data-recovery/internal/fat"
 	"data-recovery/internal/ntfs"
 	"data-recovery/internal/signature"
 	"data-recovery/internal/types"
@@ -218,6 +220,12 @@ func (w *SafeWriter) WriteNTFSFile(
 		// 没有 DataRuns 也没有驻留数据 —— 无数据可恢复
 		// 不能回退到按 Offset 读取，因为 file.Offset 只指向第一段，碎片文件会导出错误数据
 		return fmt.Errorf("NTFS 文件 %q 缺少 DataRuns 且无驻留数据，无法安全恢复", file.FileName)
+	}
+
+	// NTFS 压缩文件走单独路径 —— 从 DataRuns 读到的是 LZNT1 压缩后的字节，
+	// 不解压直接复制出来用户根本打不开
+	if entry.IsCompressed && entry.CompressionUnitClusters > 0 {
+		return w.writeCompressedNTFSFile(file, entry, boot, partitionOffset, outputPath)
 	}
 
 	// 创建目标目录
@@ -438,6 +446,340 @@ func (w *SafeWriter) nextBatchNo(confBucket, cat string) int {
 	batchNo := count/carverBatchSize + 1
 	w.batchCounter[key] = count + 1
 	return batchNo
+}
+
+// WriteEXFATFile 按给定的 cluster 列表恢复 exFAT 文件。
+//
+// 调用方（engine）负责决定 cluster 列表：
+//   - 连续文件（NoFatChain=1）：直接 [firstCluster, firstCluster+1, ...]
+//   - 碎片文件（NoFatChain=0）：走 FAT 链（见 exfat.FollowFATChain）
+//
+// 写入流程和 WriteNTFSFile 对称：
+//  1. 每簇从磁盘读取，写入临时文件 + 累计 SHA256
+//  2. 最后一簇按 file.Size 裁剪
+//  3. fsync + rename + SHA256 二次校验
+//  4. 成功时回填 file.SHA256 + applyTimestamps
+func (w *SafeWriter) WriteEXFATFile(
+	file *types.RecoveredFile,
+	clusters []uint32,
+	boot *exfat.BootSector,
+	partitionOffset int64,
+	outputPath string,
+) error {
+	if file == nil || boot == nil {
+		return fmt.Errorf("参数无效: file=%v boot=%v", file != nil, boot != nil)
+	}
+	if file.Size <= 0 {
+		return fmt.Errorf("文件大小无效: %d", file.Size)
+	}
+	if len(clusters) == 0 {
+		return fmt.Errorf("cluster 列表为空")
+	}
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败 [%s]: %w", dir, err)
+	}
+
+	tmpPath := outputPath + ".tmp"
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败 [%s]: %w", tmpPath, err)
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writeHasher := sha256.New()
+	clusterBuf := make([]byte, boot.ClusterSize)
+	totalWritten := int64(0)
+	remaining := file.Size
+
+	for _, c := range clusters {
+		if remaining <= 0 {
+			break
+		}
+		absOffset := boot.ClusterToByteOffset(c, partitionOffset)
+		if absOffset < 0 {
+			return fmt.Errorf("cluster %d 越界", c)
+		}
+		readSize := int64(len(clusterBuf))
+		if readSize > remaining {
+			readSize = remaining
+		}
+
+		n, err := w.reader.ReadAt(clusterBuf[:readSize], absOffset)
+		if err != nil && n == 0 {
+			return fmt.Errorf("读取 cluster %d 失败: %w", c, err)
+		}
+		written, err := tmpFile.Write(clusterBuf[:n])
+		if err != nil {
+			return fmt.Errorf("写入临时文件失败: %w", err)
+		}
+		writeHasher.Write(clusterBuf[:n])
+		totalWritten += int64(written)
+		remaining -= int64(written)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("刷新临时文件失败: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+
+	sizeMismatch := totalWritten != file.Size
+	writeSHA := writeHasher.Sum(nil)
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return fmt.Errorf("重命名临时文件失败: %w", err)
+	}
+	cleanupTmp = false
+
+	verifySHA, err := fileSHA256(outputPath)
+	if err != nil {
+		os.Remove(outputPath)
+		return fmt.Errorf("验证文件 SHA256 失败: %w", err)
+	}
+	if !sha256Equal(writeSHA, verifySHA) {
+		os.Remove(outputPath)
+		return fmt.Errorf("exFAT 文件 SHA256 校验失败: 写入=%x, 验证=%x", writeSHA, verifySHA)
+	}
+
+	if sizeMismatch {
+		// cluster 数量不够凑够 file.Size —— 和 NTFS PartialWriteError 语义对齐，
+		// 调用方（engine）会删掉不完整文件并算作失败
+		logger.Warn("exFAT 文件部分写入",
+			"path", outputPath, "expected", file.Size, "actual", totalWritten,
+			"clusters", len(clusters))
+		return &PartialWriteError{
+			OutputPath: outputPath,
+			Expected:   file.Size,
+			Written:    totalWritten,
+		}
+	}
+
+	file.SHA256 = hex.EncodeToString(writeSHA)
+	applyTimestamps(outputPath, file)
+	logger.Info("exFAT 文件写入成功",
+		"path", outputPath,
+		"size", types.FormatSize(totalWritten),
+		"clusters", len(clusters),
+		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
+	return nil
+}
+
+// writeCompressedNTFSFile 处理带 NTFS 压缩属性的文件 —— 走 LZNT1 解压。
+//
+// NTFS 压缩文件磁盘布局：
+//   - $DATA 数据按 compression unit（默认 16 cluster = 64KB）切分
+//   - 每个 unit 里头几个 cluster 是 LZNT1 压缩字节，剩余 cluster 是 sparse（零）
+//   - DataRuns 可能把多个 unit 连在一起，混合 allocated 和 sparse 段
+//
+// 我们的简化策略：
+//  1. 按 DataRuns 把整个文件的"raw bytes"读到内存（sparse 段自动填零）
+//  2. 按 unitBytes 切块，一块一块送给 DecompressLZNT1
+//  3. 把解压结果累加到临时文件，最后按 file.Size 截断
+//
+// 为什么敢一次读进内存：NTFS 带压缩标志的文件几乎都是系统配置 / 文本，个位数 MB 居多。
+// > 100MB 的压缩文件极罕见；真遇到了再改成流式实现。
+func (w *SafeWriter) writeCompressedNTFSFile(
+	file *types.RecoveredFile,
+	entry *ntfs.MFTEntry,
+	boot *ntfs.BootSector,
+	partitionOffset int64,
+	outputPath string,
+) error {
+	bytesPerCluster := int64(boot.BytesPerSector) * int64(boot.SectorsPerCluster)
+	unitBytes := int64(entry.CompressionUnitClusters) * bytesPerCluster
+	if unitBytes <= 0 {
+		return fmt.Errorf("compression unit 大小无效")
+	}
+
+	// 1. 先把 DataRuns 全部拉成一条字节流（sparse 段用零填充）
+	var raw bytes.Buffer
+	for _, run := range entry.DataRuns {
+		runLen := run.ClusterCount * bytesPerCluster
+		if run.Sparse {
+			raw.Write(make([]byte, runLen))
+			continue
+		}
+		runOffset := partitionOffset + run.ClusterOffset*bytesPerCluster
+		segment := make([]byte, runLen)
+		n, err := w.reader.ReadAt(segment, runOffset)
+		if err != nil && n == 0 {
+			return fmt.Errorf("读压缩文件 DataRun 失败 (offset=%d): %w", runOffset, err)
+		}
+		raw.Write(segment[:n])
+	}
+
+	// 2. 按 unit 解压 + 累加
+	compressed := raw.Bytes()
+	var out bytes.Buffer
+	for pos := int64(0); pos < int64(len(compressed)); pos += unitBytes {
+		end := pos + unitBytes
+		if end > int64(len(compressed)) {
+			end = int64(len(compressed))
+		}
+		unit := compressed[pos:end]
+		dec, err := ntfs.DecompressLZNT1(unit)
+		if err != nil {
+			// 单个 unit 解压失败不中止整体（可能只是坏区）——写 unit 大小的零占位
+			logger.Warn("LZNT1 解压单元失败，以零填充",
+				"file", file.FileName, "pos", pos, "err", err)
+			out.Write(make([]byte, unitBytes))
+			continue
+		}
+		out.Write(dec)
+		if int64(out.Len()) >= file.Size {
+			break
+		}
+	}
+
+	// 3. 截断到 file.Size
+	decompressed := out.Bytes()
+	if int64(len(decompressed)) > file.Size {
+		decompressed = decompressed[:file.Size]
+	}
+
+	// 4. 原子写 + SHA256 校验（和 writeResidentFile 同样手法）
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	tmpPath := outputPath + ".tmp"
+	if err := os.WriteFile(tmpPath, decompressed, 0o644); err != nil {
+		return fmt.Errorf("写临时文件失败: %w", err)
+	}
+	writeSHA := sha256.Sum256(decompressed)
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("重命名临时文件失败: %w", err)
+	}
+	verifySHA, err := fileSHA256(outputPath)
+	if err != nil {
+		os.Remove(outputPath)
+		return fmt.Errorf("验证 SHA256 失败: %w", err)
+	}
+	if !sha256Equal(writeSHA[:], verifySHA) {
+		os.Remove(outputPath)
+		return fmt.Errorf("NTFS 压缩文件 SHA256 校验失败")
+	}
+
+	file.SHA256 = hex.EncodeToString(writeSHA[:])
+	applyTimestamps(outputPath, file)
+	logger.Info("NTFS 压缩文件解压写入成功",
+		"path", outputPath,
+		"size", types.FormatSize(int64(len(decompressed))),
+		"compression_unit_clusters", entry.CompressionUnitClusters,
+		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
+	return nil
+}
+
+// WriteFATFile 按 cluster 列表恢复 FAT12/16/32 文件。与 WriteEXFATFile 对称，
+// 差别只在 boot sector 类型和 cluster 大小换算（内部用 bs.ClusterToByteOffset 抹平）。
+func (w *SafeWriter) WriteFATFile(
+	file *types.RecoveredFile,
+	clusters []uint32,
+	bs *fat.BootSector,
+	partitionOffset int64,
+	outputPath string,
+) error {
+	if file == nil || bs == nil {
+		return fmt.Errorf("参数无效")
+	}
+	if file.Size <= 0 {
+		return fmt.Errorf("文件大小无效: %d", file.Size)
+	}
+	if len(clusters) == 0 {
+		return fmt.Errorf("cluster 列表为空")
+	}
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	tmpPath := outputPath + ".tmp"
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writeHasher := sha256.New()
+	clusterBuf := make([]byte, bs.ClusterSize)
+	totalWritten := int64(0)
+	remaining := file.Size
+
+	for _, c := range clusters {
+		if remaining <= 0 {
+			break
+		}
+		absOffset := bs.ClusterToByteOffset(c, partitionOffset)
+		if absOffset < 0 {
+			return fmt.Errorf("cluster %d 越界", c)
+		}
+		readSize := int64(len(clusterBuf))
+		if readSize > remaining {
+			readSize = remaining
+		}
+		n, err := w.reader.ReadAt(clusterBuf[:readSize], absOffset)
+		if err != nil && n == 0 {
+			return fmt.Errorf("读 cluster %d 失败: %w", c, err)
+		}
+		written, err := tmpFile.Write(clusterBuf[:n])
+		if err != nil {
+			return fmt.Errorf("写临时文件失败: %w", err)
+		}
+		writeHasher.Write(clusterBuf[:n])
+		totalWritten += int64(written)
+		remaining -= int64(written)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	sizeMismatch := totalWritten != file.Size
+	writeSHA := writeHasher.Sum(nil)
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return err
+	}
+	cleanupTmp = false
+
+	verifySHA, err := fileSHA256(outputPath)
+	if err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+	if !sha256Equal(writeSHA, verifySHA) {
+		os.Remove(outputPath)
+		return fmt.Errorf("FAT 文件 SHA256 校验失败")
+	}
+
+	if sizeMismatch {
+		return &PartialWriteError{OutputPath: outputPath, Expected: file.Size, Written: totalWritten}
+	}
+	file.SHA256 = hex.EncodeToString(writeSHA)
+	applyTimestamps(outputPath, file)
+	logger.Info("FAT 文件写入成功",
+		"path", outputPath, "size", types.FormatSize(totalWritten),
+		"clusters", len(clusters), "sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
+	return nil
 }
 
 func (w *SafeWriter) writeResidentFile(file *types.RecoveredFile, data []byte, outputPath string) error {

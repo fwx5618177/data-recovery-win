@@ -21,7 +21,17 @@ type DiskReader interface {
 	io.ReaderAt // 兼容标准库接口
 }
 
-// NewReader 创建适合当前平台的 DiskReader
+// NewReader 创建 DiskReader。
+//
+// 路径识别规则：
+//   - `\\.\PhysicalDriveN` / `\\.\C:` / `/dev/...` → 走平台原盘 reader（需要管理员权限）
+//   - 其他路径（包括绝对路径的 .img / .dd / .raw 镜像文件）→ 走 imageFileReader
+//
+// 这样前端"选源盘"和"选镜像文件"可以复用同一入口，上层代码对来源完全透明。
+// 业界最佳实践是先 ddrescue 把源盘 dump 到镜像，再对镜像做扫描（保护源盘）。
 func NewReader(devicePath string) DiskReader {
-	return newPlatformReader(devicePath)
+	if looksLikeDevicePath(devicePath) {
+		return newPlatformReader(devicePath)
+	}
+	return newImageFileReader(devicePath)
 }

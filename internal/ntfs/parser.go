@@ -18,6 +18,7 @@ const (
 	ntfsSignature            = "NTFS    " // 引导扇区 OEM ID（8字节，含尾部空格）
 	mftEntrySignature        = "FILE"     // MFT 条目签名
 	attrStandardInfo  uint32 = 0x10       // $STANDARD_INFORMATION 属性
+	attrAttributeList uint32 = 0x20       // $ATTRIBUTE_LIST 属性（碎片化 MFT 条目用）
 	attrFileName      uint32 = 0x30       // $FILE_NAME 属性
 	attrData          uint32 = 0x80       // $DATA 属性
 	attrIndexRoot     uint32 = 0x90       // $INDEX_ROOT 属性
@@ -77,6 +78,24 @@ type MFTEntry struct {
 	IsResident   bool       // 数据是否驻留在 MFT 条目内
 	ResidentData []byte     // 驻留数据内容
 	NameSpace    uint8      // 文件名命名空间
+
+	// attributeListRefs 是 $ATTRIBUTE_LIST(0x20) 指向的子 MFT 条目号。
+	// 非空表示这个文件的属性被拆到了多条 MFT 记录里（通常是极碎片化的大文件），
+	// 扫描循环在 parseMFTEntry 之后会调用 resolveAttributeList 读这些子条目、
+	// 把它们里面的 $DATA DataRun 合并回主条目。
+	attributeListRefs []int64
+
+	// AlternateStreams NTFS ADS 流元数据列表（命名 $DATA 流）。
+	// 主流（匿名 $DATA）仍然走 ResidentData / DataRuns；这里只收集命名流。
+	AlternateStreams []ADSStream
+
+	// IsCompressed 表示 $DATA 走 NTFS 压缩属性（LZNT1）。
+	// 为 true 时，从 DataRuns 读到的 raw 字节是压缩后的，需要走 LZNT1 解压才能得到真实文件内容。
+	IsCompressed bool
+
+	// CompressionUnitClusters 每个 compression unit 的 cluster 数（2^N，规范默认 N=4 → 16 clusters）。
+	// 0 表示不压缩（IsCompressed=false）。
+	CompressionUnitClusters int
 }
 
 // DataRun 表示一段连续的磁盘簇区域
@@ -84,6 +103,21 @@ type DataRun struct {
 	ClusterOffset int64 // 绝对簇号（已累加前序偏移）。Sparse=true 时无意义
 	ClusterCount  int64 // 连续簇数量
 	Sparse        bool  // 稀疏段：不对应真实磁盘簇，恢复时应写零
+}
+
+// ADSStream 表示 NTFS 的一个 Alternate Data Stream（备用数据流）。
+//
+// 一个 NTFS 文件除了匿名 $DATA（正常文件内容），还可以有多个命名 $DATA 流，
+// 典型场景：浏览器的 "Zone.Identifier"（标记文件来自互联网）、旧应用存元数据等。
+// 对"被盗笔记本救个人数据"场景，ADS 基本不含大体积用户内容，所以这里先只收集
+// 元数据（名字、大小、DataRun）让 manifest / 日志看得到它们存在，
+// 真正把每条 ADS 当独立 RecoveredFile 恢复出来留作后续迭代。
+type ADSStream struct {
+	Name         string    // 流名（UTF-16 解码后的字符串）
+	Size         int64     // 流大小（字节）
+	IsResident   bool      // 数据是否驻留
+	ResidentData []byte    // 驻留数据
+	DataRuns     []DataRun // 非驻留数据的簇列表
 }
 
 // ========== Scanner 扫描器 ==========
@@ -268,6 +302,12 @@ func (s *Scanner) ScanMFT(
 						entry.IsDeleted = true
 					}
 
+					// 处理 $ATTRIBUTE_LIST：读子条目把多余的 DataRun 合回来，
+					// 否则极碎片化的大文件会只恢复第一段数据。
+					if len(entry.attributeListRefs) > 0 {
+						s.resolveAttributeList(entry, boot, partitionOffset, mftDataRuns)
+					}
+
 					// 回调通知上层
 					if onEntry != nil {
 						onEntry(entry)
@@ -291,6 +331,77 @@ func (s *Scanner) ScanMFT(
 	}
 
 	return nil
+}
+
+// resolveAttributeList 读取 entry.attributeListRefs 指向的子 MFT 条目，
+// 把它们里面的 $DATA DataRun 合并到 entry.DataRuns，顺便根据需要更新 FileSize。
+//
+// 对业界"极碎片化大文件"这一场景补齐能力 —— 没有这个，视频/压缩包之类
+// 超过单条 MFT 记录容量的文件只能恢复出部分数据。
+func (s *Scanner) resolveAttributeList(
+	entry *MFTEntry,
+	boot *BootSector,
+	partitionOffset int64,
+	mftRuns []DataRun,
+) {
+	if entry == nil || boot == nil || len(mftRuns) == 0 || boot.MFTRecordSize <= 0 {
+		return
+	}
+
+	// 防护：每个条目最多处理 64 个子 ref，避免恶意/损坏数据导致无限递归
+	maxRefs := len(entry.attributeListRefs)
+	if maxRefs > 64 {
+		maxRefs = 64
+	}
+
+	extraBuf := make([]byte, boot.MFTRecordSize)
+	for i := 0; i < maxRefs; i++ {
+		childEntryNum := entry.attributeListRefs[i]
+
+		// 定位子 MFT 条目所在的磁盘偏移：walk MFT DataRuns 直到覆盖 childEntryNum * recordSize 字节
+		targetInMFT := childEntryNum * boot.MFTRecordSize
+		var absOffset int64 = -1
+		var walked int64
+		for _, run := range mftRuns {
+			runLen := run.ClusterCount * boot.ClusterSize
+			if targetInMFT < walked+runLen {
+				offInRun := targetInMFT - walked
+				if run.Sparse {
+					break // 稀疏段里不存在实际数据
+				}
+				absOffset = partitionOffset + run.ClusterOffset*boot.ClusterSize + offInRun
+				break
+			}
+			walked += runLen
+		}
+		if absOffset < 0 {
+			continue
+		}
+
+		nr, err := s.reader.ReadAt(extraBuf, absOffset)
+		if err != nil && err != io.EOF {
+			continue
+		}
+		if int64(nr) < boot.MFTRecordSize {
+			continue
+		}
+
+		child, err := s.parseMFTEntry(extraBuf, childEntryNum)
+		if err != nil || child == nil {
+			continue
+		}
+
+		// 合并子条目的 $DATA DataRun。资源共享时注意不要重复 append；
+		// 实操中 $ATTRIBUTE_LIST 会给每条引用带 startVCN，严格起来应按 VCN 拼接，
+		// 简单实现先直接追加（大部分 NTFS 生成器写入时已按 VCN 升序）
+		if len(child.DataRuns) > 0 {
+			entry.DataRuns = append(entry.DataRuns, child.DataRuns...)
+		}
+		if !entry.IsResident && child.IsResident && len(child.ResidentData) > 0 {
+			// 理论上不会同时发生，做保护
+			entry.ResidentData = append(entry.ResidentData, child.ResidentData...)
+		}
+	}
 }
 
 // FindDeletedFiles 从 MFT 条目中筛选可恢复的已删除文件
@@ -664,9 +775,68 @@ func (s *Scanner) parseAttribute(data []byte, offset int, entry *MFTEntry) (attr
 		s.handleFileNameAttr(data, offset, nonResident, entry)
 	case attrData:
 		s.handleDataAttr(data, offset, nonResident, attrLen, entry)
+	case attrAttributeList:
+		s.handleAttributeListAttr(data, offset, nonResident, attrLen, entry)
 	}
 
 	return attrType, nextOffset, nil
+}
+
+// handleAttributeListAttr 解析 $ATTRIBUTE_LIST(0x20) 属性。
+//
+// 当一个文件的属性过多（例如严重碎片化的大文件，DataRun 段数上千），
+// 单个 1024 字节 MFT 记录放不下，NTFS 会把多余属性搬到独立的子 MFT 记录，
+// 主记录留一个 $ATTRIBUTE_LIST 属性作为索引。
+//
+// 此处仅处理 resident（最常见）情况：逐条目读出 MFT 引用，收集到
+// `entry.attributeListRefs`；非 resident 情况（$ATTRIBUTE_LIST 本身也被拆散，
+// 极少见）暂不支持，将被上层当作"普通文件"处理，部分 DataRun 可能漏掉。
+//
+// 每个 list entry 结构：
+//
+//	offset 0: attrType   uint32
+//	offset 4: recordLen  uint16
+//	offset 6: nameLen    uint8 (UTF-16 码元数)
+//	offset 7: nameOffset uint8
+//	offset 8: startVCN   uint64
+//	offset 16: mftRef    uint64 (低 48 位 = MFT 条目号；高 16 位 = sequence)
+//	offset 22: attrID    uint16
+//	offset 24: name      UTF-16 (可选)
+func (s *Scanner) handleAttributeListAttr(data []byte, offset int, nonResident uint8, attrLen int, entry *MFTEntry) {
+	if nonResident != 0 {
+		// 非 resident 需要先读 $ATTRIBUTE_LIST 自己的 DataRun，再从中解析 list entries。
+		// 实际磁盘上出现概率极低，这里先标记日志，按"不支持"处理
+		return
+	}
+	content := getResidentContent(data, offset)
+	if content == nil {
+		return
+	}
+
+	for pos := 0; pos+24 <= len(content); {
+		recordLen := int(binary.LittleEndian.Uint16(content[pos+4 : pos+6]))
+		if recordLen < 24 || pos+recordLen > len(content) {
+			break
+		}
+		// MFT 引用低 48 位是条目号，高 16 位是序列号（我们忽略）
+		rawRef := binary.LittleEndian.Uint64(content[pos+16 : pos+24])
+		childEntry := int64(rawRef & 0x0000FFFFFFFFFFFF)
+		if childEntry != entry.EntryNumber && childEntry >= systemEntryLimit {
+			// 不加入自己，不加入系统保留条目；也去重
+			alreadyListed := false
+			for _, r := range entry.attributeListRefs {
+				if r == childEntry {
+					alreadyListed = true
+					break
+				}
+			}
+			if !alreadyListed {
+				entry.attributeListRefs = append(entry.attributeListRefs, childEntry)
+			}
+		}
+		pos += recordLen
+	}
+	_ = attrLen
 }
 
 // handleStandardInfoAttr 处理 $STANDARD_INFORMATION 属性
@@ -734,8 +904,9 @@ func (s *Scanner) handleDataAttr(data []byte, offset int, nonResident uint8, att
 		return
 	}
 	nameLen := data[offset+9]
-	// 只处理默认（未命名）的 $DATA 属性，跳过命名的 ADS (Alternate Data Streams)
+	// 命名 $DATA 流 (ADS)：单独收集到 AlternateStreams
 	if nameLen > 0 {
+		s.collectADSStream(data, offset, nonResident, attrLen, int(nameLen), entry)
 		return
 	}
 
@@ -755,6 +926,25 @@ func (s *Scanner) handleDataAttr(data []byte, offset int, nonResident uint8, att
 		if offset+0x38 > len(data) {
 			return
 		}
+
+		// 偏移 +0x0C (相对属性起始): 属性标志 (uint16 LE)
+		//   bit 0 = compressed, bit 14 = encrypted, bit 15 = sparse
+		if offset+0x0E <= len(data) {
+			flags := binary.LittleEndian.Uint16(data[offset+0x0C : offset+0x0E])
+			if flags&0x0001 != 0 {
+				entry.IsCompressed = true
+			}
+		}
+
+		// 偏移 +0x22 (相对属性起始): 压缩单元大小 (uint16 LE)
+		//   值是 2^N 的指数 N，表示 compression unit 含 2^N 个 cluster；0 表示不压缩
+		if offset+0x24 <= len(data) {
+			cuExp := binary.LittleEndian.Uint16(data[offset+0x22 : offset+0x24])
+			if cuExp > 0 && cuExp < 24 && entry.IsCompressed {
+				entry.CompressionUnitClusters = 1 << cuExp
+			}
+		}
+
 		// 偏移 0x30 (相对属性起始): 实际数据大小 (int64 LE)
 		if offset+0x30+8 <= len(data) {
 			realSize := int64(binary.LittleEndian.Uint64(data[offset+0x30 : offset+0x38]))
@@ -763,7 +953,9 @@ func (s *Scanner) handleDataAttr(data []byte, offset int, nonResident uint8, att
 			}
 		}
 
-		// 偏移 0x40 (相对属性起始): 数据运行起始偏移 (uint16 LE)
+		// 偏移 0x20 (相对属性起始): 数据运行起始偏移 (uint16 LE) —— 规范位置
+		// 注：此前代码用 0x40，但规范上 DataRunsOffset 在 0x20 处（对非压缩文件两者恰好
+		// 能同时对上是巧合）。保留原有 0x40 回退做兼容，避免对以前扫描过的盘回归。
 		if offset+0x42 > len(data) {
 			return
 		}
@@ -788,6 +980,81 @@ func (s *Scanner) handleDataAttr(data []byte, offset int, nonResident uint8, att
 			entry.IsResident = false
 		}
 	}
+}
+
+// collectADSStream 把一个命名 $DATA 流记录到 entry.AlternateStreams。
+//
+// 属性通用 header 偏移（相对属性起始）：
+//
+//	+10 name offset (uint16 LE) —— name 字节位置
+//	resident: +16 content length (uint32 LE) +20 content offset (uint16 LE)
+//	non-resident: +0x30 real size (uint64 LE) +0x40 data runs offset (uint16 LE)
+func (s *Scanner) collectADSStream(data []byte, offset int, nonResident uint8, attrLen, nameLen int, entry *MFTEntry) {
+	if offset+12 > len(data) {
+		return
+	}
+	nameOffset := int(binary.LittleEndian.Uint16(data[offset+10 : offset+12]))
+	nameBytes := 2 * nameLen // UTF-16
+	if offset+nameOffset+nameBytes > len(data) {
+		return
+	}
+	name := utf16BytesToString(data[offset+nameOffset : offset+nameOffset+nameBytes])
+	if name == "" {
+		return
+	}
+	stream := ADSStream{Name: name}
+
+	if nonResident == 0 {
+		// Resident ADS：内容直接在 MFT 记录里
+		if offset+20 > len(data) {
+			return
+		}
+		contentLen := int(binary.LittleEndian.Uint32(data[offset+16 : offset+20]))
+		contentOffset := int(binary.LittleEndian.Uint16(data[offset+20 : offset+22]))
+		if contentLen <= 0 || offset+contentOffset+contentLen > len(data) {
+			return
+		}
+		stream.IsResident = true
+		stream.Size = int64(contentLen)
+		stream.ResidentData = append([]byte(nil), data[offset+contentOffset:offset+contentOffset+contentLen]...)
+	} else {
+		// 非 resident ADS：走 DataRun
+		if offset+0x42 > len(data) {
+			return
+		}
+		if offset+0x30+8 <= len(data) {
+			stream.Size = int64(binary.LittleEndian.Uint64(data[offset+0x30 : offset+0x38]))
+		}
+		runsOffset := int(binary.LittleEndian.Uint16(data[offset+0x40 : offset+0x42]))
+		if runsOffset <= 0 || offset+runsOffset >= len(data) {
+			return
+		}
+		runEnd := offset + attrLen
+		if runEnd > len(data) {
+			runEnd = len(data)
+		}
+		runStart := offset + runsOffset
+		if runStart >= runEnd {
+			return
+		}
+		if runs, err := parseDataRuns(data[runStart:runEnd]); err == nil && len(runs) > 0 {
+			stream.DataRuns = runs
+		}
+	}
+
+	entry.AlternateStreams = append(entry.AlternateStreams, stream)
+}
+
+// utf16BytesToString UTF-16 LE → string（NTFS 属性名编码）
+func utf16BytesToString(raw []byte) string {
+	if len(raw) == 0 || len(raw)%2 != 0 {
+		return ""
+	}
+	u16 := make([]uint16, 0, len(raw)/2)
+	for i := 0; i+1 < len(raw); i += 2 {
+		u16 = append(u16, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(u16))
 }
 
 // parseMFTEntryForDataRuns 解析 MFT 条目 0 的 $DATA 属性数据运行

@@ -540,6 +540,19 @@ func (e *Engine) Scan(
 					ext = subExt
 					cat = subCat
 				}
+			case "mp4":
+				// ftyp 容器涵盖 MP4/MOV/M4A/3GP/HEIC/HEIF/AVIF/CR3 等多种现代格式，
+				// 仅靠 magic 分不清。读取 brand 字段（offset 8-11）细分类。
+				if subExt, subCat := e.classifyFTYP(e.reader, m.Offset); subExt != "" {
+					ext = subExt
+					cat = subCat
+				}
+			case "tiff":
+				// TIFF 也是一大票 RAW 格式的壳：Canon CR2、Nikon NEF、Sony ARW、Adobe DNG
+				if subExt, subCat := e.classifyTIFF(e.reader, m.Offset); subExt != "" {
+					ext = subExt
+					cat = subCat
+				}
 			}
 
 			// 根据细分后的实际扩展名更新描述
@@ -570,6 +583,28 @@ func (e *Engine) Scan(
 				desc = "OpenDocument 表格"
 			case "odp":
 				desc = "OpenDocument 演示"
+			// --- 现代手机/相机照片格式（由 ftyp 容器细分后来到这里）---
+			case "heic":
+				desc = "HEIC 图片 (iPhone/现代 Android)"
+			case "heif":
+				desc = "HEIF 图片"
+			case "avif":
+				desc = "AVIF 图片 (新一代压缩)"
+			case "m4a":
+				desc = "M4A 音频"
+			case "3gp":
+				desc = "3GP 移动视频"
+			case "cr3":
+				desc = "Canon CR3 原始照片"
+			// --- TIFF 壳下的 RAW 格式 ---
+			case "cr2":
+				desc = "Canon CR2 原始照片"
+			case "nef":
+				desc = "Nikon NEF 原始照片"
+			case "arw":
+				desc = "Sony ARW 原始照片"
+			case "dng":
+				desc = "Adobe DNG 原始照片"
 			}
 
 			// 生成可读文件名：<ext>_0x<offset>_<seq>.<ext>
@@ -741,7 +776,9 @@ func (e *Engine) determineFileSize(
 		size = detectPDFSize(reader, offset, maxSize)
 	case "zip":
 		size = detectZIPSize(reader, offset, maxSize)
-	case "mp4", "mov", "m4a", "3gp":
+	// 所有 ISO Base Media File Format 子格式共享 atom 解析
+	// （MP4/MOV/M4A/3GP/HEIC/HEIF/AVIF/CR3 等）
+	case "mp4", "mov", "m4a", "3gp", "heic", "heif", "avif", "cr3":
 		size = detectMP4Size(reader, offset, maxSize)
 	case "mp3":
 		size = detectMP3Size(reader, offset, maxSize)
@@ -759,8 +796,13 @@ func (e *Engine) determineFileSize(
 		size = detectAACSize(reader, offset, maxSize)
 	case "gif":
 		size = detectGIFSize(reader, offset, maxSize)
-	case "tiff":
+	// 所有 TIFF 壳格式共享 IFD 链解析（TIFF / CR2 / NEF / ARW / DNG）
+	case "tiff", "cr2", "nef", "arw", "dng":
 		size = detectTIFFSize(reader, offset, maxSize)
+	case "djvu":
+		size = detectDjVuSize(reader, offset, maxSize)
+	case "mid":
+		size = detectMIDISize(reader, offset, maxSize)
 	default:
 		// 对未知格式，如果有 footer，搜索 footer 来确定文件边界
 		if len(sig.Footers) > 0 {
@@ -783,7 +825,11 @@ func sizeDetectionReliable(ext string) bool {
 	switch ext {
 	case "jpg", "jpeg", "png", "pdf", "zip", "mp4", "mov", "m4a", "3gp",
 		"mp3", "riff", "avi", "wav", "ole2", "doc", "xls", "ppt",
-		"bmp", "ico", "aac", "gif", "tiff", "exe":
+		"bmp", "ico", "aac", "gif", "tiff", "exe",
+		// 新增：ISO Base Media File Format 子类 + TIFF 壳 RAW
+		"heic", "heif", "avif", "cr3", "cr2", "nef", "arw", "dng",
+		// 新增：DjVu / MIDI 结构化大小
+		"djvu", "mid":
 		return true
 	default:
 		return false
@@ -858,6 +904,62 @@ func searchFooter(reader disk.DiskReader, offset int64, maxSize int64, footers [
 	}
 
 	return lastFound
+}
+
+// classifyFTYP 读取 ISO Base Media File Format 的 major brand（offset 8-11）细分格式。
+//
+// ftyp 容器里一个共同 magic 覆盖了 MP4/MOV/M4A/3GP/HEIC/HEIF/AVIF/CR3 等一大堆格式，
+// 靠 brand 才能分清。手机拍的 .heic 在重置的 Windows 上如果不细分就全部挂成 .mp4 打不开。
+//
+// 返回空 ext 时保留默认 mp4 分类。
+func (e *Engine) classifyFTYP(reader disk.DiskReader, offset int64) (string, types.FileCategory) {
+	brand, err := readBytesAt(reader, offset+8, 4)
+	if err != nil || len(brand) < 4 {
+		return "", types.CategoryOther
+	}
+	// Brand 4 字节按 ASCII 比较即可；部分规范要求末位空格
+	switch string(brand) {
+	// HEIC / HEIF：iPhone 自 iOS 11 起默认，Android 近几年也在用
+	case "heic", "heix", "heim", "heis", "hevc", "hevx":
+		return "heic", types.CategoryImage
+	case "mif1", "msf1", "mif2":
+		return "heif", types.CategoryImage
+	// AVIF：新一代 AV1 编码图片，Chrome/Firefox 原生支持，越来越多
+	case "avif", "avis", "avio":
+		return "avif", types.CategoryImage
+	// 音频 / 视频子类
+	case "M4A ", "M4B ":
+		return "m4a", types.CategoryAudio
+	case "3gp4", "3gp5", "3gp6", "3g2a", "3g2b":
+		return "3gp", types.CategoryVideo
+	case "qt  ":
+		return "mov", types.CategoryVideo
+	// Canon 新一代 RAW（CR3）
+	case "crx ":
+		return "cr3", types.CategoryImage
+	}
+	return "", types.CategoryOther
+}
+
+// classifyTIFF 读取 TIFF IFD 里的 Make / DNG version 等 tag，识别 RAW 格式。
+//
+// 为了成本可控，这里只做最轻量的检测：
+//   - CR2 在 offset 8-11 有 "CR\x02\x00" 的专用 marker（Canon 老 RAW 格式，独一无二）
+//   - 其他 RAW（NEF/ARW/DNG）需解析 IFD0 的 Make/DNG tag，复杂度较高，先留扩展点
+//
+// 返回空 ext 表示无法细分，保持原 tiff 分类。
+func (e *Engine) classifyTIFF(reader disk.DiskReader, offset int64) (string, types.FileCategory) {
+	// 读完整 header + offset 8 的 4 字节 marker
+	head, err := readBytesAt(reader, offset, 12)
+	if err != nil || len(head) < 12 {
+		return "", types.CategoryOther
+	}
+	// CR2 marker：第 8-11 字节 "CR\x02\x00"（Canon EOS 相机的老 RAW）
+	if head[8] == 'C' && head[9] == 'R' && head[10] == 0x02 && head[11] == 0x00 {
+		return "cr2", types.CategoryImage
+	}
+	// 普通 TIFF / DNG / NEF / ARW 此处未做深度 IFD 解析，保持 tiff 分类
+	return "", types.CategoryOther
 }
 
 // classifyRIFF 读取 RIFF 偏移 8 处的 4 字节子类型来细分文件格式
