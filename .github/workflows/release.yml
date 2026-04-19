@@ -1,5 +1,6 @@
 name: Release
 
+# 业界主流做法：tag 驱动发版（语义化版本），main 推送只跑 CI 不发 Release
 on:
   push:
     tags:
@@ -9,8 +10,42 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  # =============================================================
+  # 并行构建 4 个平台产物
+  # Wails v2 的 macOS 构建必须在 macos runner 上跑（需要 Apple 工具链）；
+  # Windows / Linux 用各自的原生 runner，避免交叉编译引入的坑（webview 绑定等）。
+  # =============================================================
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            runner: windows-latest
+            platform: windows/amd64
+            artifact: DataRecovery-windows-amd64.exe
+            source: build/bin/DataRecovery.exe
+            archive: copy
+          - name: windows-arm64
+            runner: windows-latest
+            platform: windows/arm64
+            artifact: DataRecovery-windows-arm64.exe
+            source: build/bin/DataRecovery.exe
+            archive: copy
+          - name: macos-universal
+            runner: macos-latest
+            platform: darwin/universal
+            artifact: DataRecovery-macos-universal.zip
+            source: build/bin/DataRecovery.app
+            archive: zip
+          - name: linux-amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+            artifact: DataRecovery-linux-amd64.tar.gz
+            source: build/bin/DataRecovery
+            archive: tar
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,28 +65,92 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-      - name: Install frontend dependencies
+      # Linux 上 Wails 依赖 webkit2gtk + gtk 开发头文件，runner 默认没装
+      - name: Install Linux build deps
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+
+      - name: Install frontend deps
         working-directory: frontend
         run: pnpm install
 
-      - name: Build Windows exe
-        run: wails build -platform windows/amd64
+      - name: Wails build
+        run: wails build -platform ${{ matrix.platform }}
 
-      - name: Create Release
+      # ---------- 归档 / 重命名 ----------
+      # Windows exe 单文件直接重命名；macOS .app 是目录必须 zip；Linux 二进制 tar.gz 兼容 chmod
+      - name: Package (Windows exe)
+        if: matrix.archive == 'copy'
+        shell: bash
+        run: cp "${{ matrix.source }}" "${{ matrix.artifact }}"
+
+      - name: Package (macOS .app → zip)
+        if: matrix.archive == 'zip'
+        run: |
+          cd build/bin
+          zip -r -q "../../${{ matrix.artifact }}" "$(basename "${{ matrix.source }}")"
+
+      - name: Package (Linux binary → tar.gz)
+        if: matrix.archive == 'tar'
+        run: |
+          chmod +x "${{ matrix.source }}"
+          tar -czf "${{ matrix.artifact }}" -C build/bin "$(basename "${{ matrix.source }}")"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # =============================================================
+  # 汇总到 GitHub Release
+  # 单独一个 job 下载所有 artifact 再创建 Release，避免多个 build job
+  # 并发写同一个 Release 引起的竞态。
+  # =============================================================
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: 数据恢复大师 ${{ github.ref_name }}
           body: |
             ## 数据恢复大师 ${{ github.ref_name }}
 
+            ### 按平台下载
+
+            | 平台 | 架构 | 文件 |
+            | --- | --- | --- |
+            | Windows | Intel/AMD 64位 | `DataRecovery-windows-amd64.exe` |
+            | Windows | ARM64 | `DataRecovery-windows-arm64.exe` |
+            | macOS | Intel + Apple Silicon (Universal) | `DataRecovery-macos-universal.zip` |
+            | Linux | amd64 | `DataRecovery-linux-amd64.tar.gz` |
+
             ### 使用方法
-            1. 下载 `DataRecovery-windows-amd64.exe`
-            2. 拷贝到目标 Windows 电脑，双击运行（自动请求管理员权限）
-            3. 选择要恢复的源盘 → 开始扫描 → 选择恢复目录（必须在另一块磁盘） → 恢复文件
+
+            - **Windows**：双击 exe 运行（会自动请求管理员权限）
+            - **macOS**：解压 zip → 右键 → 打开（首次绕过 Gatekeeper）。读块设备需要 `sudo`
+            - **Linux**：`tar -xzf DataRecovery-linux-amd64.tar.gz && sudo ./DataRecovery`（读块设备需要 root）
 
             ### 注意事项
-            - 恢复目录必须选在与源盘不同的磁盘或 U 盘上
-            - SSD 被重置后 TRIM 可能已擦除部分数据，HDD 恢复率更高
-            - 越早执行恢复，找回数据的概率越大
-          files: build/bin/DataRecovery.exe
+
+            - 推荐把恢复目录选在**与源盘不同的磁盘**上（同盘时可勾选"我已了解风险"强制继续，但可能覆盖待恢复扇区）
+            - SSD 被重置后 TRIM 可能已擦除数据，HDD 的恢复率通常更高
+            - 越早执行恢复越好，源盘后续写入会持续覆盖旧扇区
+          files: dist/**/*
           fail_on_unmatched_files: true

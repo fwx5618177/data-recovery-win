@@ -1,5 +1,7 @@
 name: Build
 
+# main 推送 / PR 时触发的 CI：仅验证三平台都能构建，产物只作为短期 artifact 留 7 天。
+# 目的：在打 tag 之前就发现跨平台问题，别等发版时 Release job 挂掉。
 on:
   push:
     branches: [main]
@@ -7,8 +9,46 @@ on:
     branches: [main]
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # 快速的 Go 侧体检 —— 不跑 wails，只跑单元测试 + 交叉编译冒烟
+  go-check:
+    name: Go test + cross-compile smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Go vet
+        run: go vet ./...
+      - name: Go test (race)
+        run: go test -race ./...
+      - name: Cross-compile smoke (all platforms)
+        run: make verify-platforms
+
+  # 真正的 Wails 构建矩阵 —— 与 release.yml 保持一致，尽早暴露平台特有问题
+  wails-build:
+    name: Wails ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            runner: windows-latest
+            platform: windows/amd64
+            source: build/bin/DataRecovery.exe
+          - name: windows-arm64
+            runner: windows-latest
+            platform: windows/arm64
+            source: build/bin/DataRecovery.exe
+          - name: macos-universal
+            runner: macos-latest
+            platform: darwin/universal
+            source: build/bin/DataRecovery.app
+          - name: linux-amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+            source: build/bin/DataRecovery
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,15 +68,24 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-      - name: Install frontend dependencies
+      - name: Install Linux build deps
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+
+      - name: Install frontend deps
         working-directory: frontend
         run: pnpm install
 
-      - name: Build Windows exe
-        run: wails build -platform windows/amd64
+      - name: Wails build
+        run: wails build -platform ${{ matrix.platform }}
 
-      - name: Upload artifact
+      - name: Upload artifact (main only)
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: DataRecovery-windows-amd64
-          path: build/bin/DataRecovery.exe
+          name: DataRecovery-${{ matrix.name }}-ci
+          path: ${{ matrix.source }}
+          retention-days: 7
+          if-no-files-found: error
