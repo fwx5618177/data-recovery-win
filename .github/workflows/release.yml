@@ -80,10 +80,17 @@ jobs:
       - name: Wails build
         # 显式用 bash；Windows runner 的默认 shell 是 PowerShell，不认 bash 的 "\"
         # 续行，会把 -ldflags 当成独立命令报 "'-ldflags' is not recognized"。
+        #
+        # `sed '/.../d'` 过滤掉 Wails 生成 bindings 时对 time.Time 的无害提示
+        # "Not found: time.Time"；Wails 对这种类型生成 TypeScript `any` + RFC3339
+        # 字符串，前端用 new Date(str) 处理。`set -o pipefail` 让 wails 的 exit code
+        # 能穿透管道传到 step（不然 sed 成功就 mask 掉 build 失败）。
         shell: bash
         run: |
+          set -o pipefail
           wails build -platform ${{ matrix.platform }} \
-            -ldflags "-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}"
+            -ldflags "-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}" \
+            2>&1 | sed '/Not found: time\.Time/d'
 
       - name: List build output
         shell: bash
