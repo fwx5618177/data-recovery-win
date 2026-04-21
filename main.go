@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -17,6 +19,12 @@ import (
 var assets embed.FS
 
 func main() {
+	// 优先把日志切到"用户配置目录/logs/"下，方便诊断包导出时一并带上
+	if cfgDir, err := os.UserConfigDir(); err == nil {
+		_ = logging.EnableFileLogging(filepath.Join(cfgDir, "data-recovery", "logs"))
+	}
+	defer logging.Close()
+
 	bootLogger := logging.L().With("component", "boot")
 
 	// 检测"自动更新 helper 模式"：由主程序 fork 自己时带上 --apply-update，
@@ -61,6 +69,15 @@ func main() {
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+		},
+		// 启用 OS 级文件拖拽：用户把磁盘镜像 / .img / .raw 拖到窗口任意位置即可触发扫描。
+		// Wails 把 OS 报来的 native 路径推到前端 "files:dropped" 事件。
+		DragAndDrop: &options.DragAndDrop{
+			EnableFileDrop:     true,
+			DisableWebViewDrop: false,
+		},
+		OnDomReady: func(ctx context.Context) {
+			app.bindFileDrop(ctx)
 		},
 	})
 	if err != nil {

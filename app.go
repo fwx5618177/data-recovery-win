@@ -12,14 +12,32 @@ import (
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"data-recovery/internal/apfs"
+	"data-recovery/internal/bitlocker"
+	"data-recovery/internal/diag"
 	"data-recovery/internal/disk"
+	"data-recovery/internal/hfsplus"
 	"data-recovery/internal/logging"
+	"data-recovery/internal/raid"
 	"data-recovery/internal/recovery"
+	"data-recovery/internal/refs"
 	"data-recovery/internal/session"
 	"data-recovery/internal/types"
 	"data-recovery/internal/updater"
 	"data-recovery/internal/vss"
 )
+
+// EncryptedVolumeInfo 是 ScanEncryptedVolumes 给前端的统一报告类型。
+// BitLocker / FileVault 都是"加密但本工具不能解密"的同一类问题，UI 用同一区块展示。
+type EncryptedVolumeInfo struct {
+	DrivePath  string `json:"drivePath"`  // 来源磁盘路径
+	Kind       string `json:"kind"`       // "bitlocker" / "filevault" / "apfs-volume"
+	Offset     int64  `json:"offset"`
+	Name       string `json:"name"`        // 卷名（APFS 有；BitLocker 无）
+	UUID       string `json:"uuid"`
+	Encrypted  bool   `json:"encrypted"`
+	Note       string `json:"note"`        // 给用户的引导（去 dislocker / 用专门工具等）
+}
 
 // updateRepoOwner / updateRepoName 指向本项目的 GitHub 仓库，用于版本检查。
 // TODO: 当真实发布时请改成正确的 owner/repo（或用 -ldflags 注入）
@@ -125,6 +143,629 @@ func (a *App) CheckForUpdate() (*updater.CheckResult, error) {
 // GetAppVersion 返回当前二进制的版本号，前端 footer 展示用
 func (a *App) GetAppVersion() string {
 	return updater.Version
+}
+
+// UnlockBitLockerAndScan 用 recovery key 解锁 BitLocker 卷，然后启动一次完整扫描。
+//
+// 这是 Phase 2 完整链 IPC 的对外入口：
+//   recovery key → VMK → FVEK → DecryptingReader → engine.ScanWithReader → NTFS/carver
+//
+// 调用前 UI 应显示"正在派生密钥…"，因为 StretchKey 1M 次 SHA-256 在普通 CPU ~1-2s。
+// 前端事件流和普通扫描一致：bitlocker:keyDeriving / bitlocker:unlocked / scan:progress /
+// scan:fileFound / scan:completed / scan:error。
+func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mode string) error {
+	if drivePath == "" || recoveryKey == "" {
+		return fmt.Errorf("drivePath / recovery key 不能为空")
+	}
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+
+	// BitLocker 卷必然在物理盘 / 卷设备上，读 \\.\PhysicalDriveN 等原始设备
+	// 一定要管理员权限。提前告诉用户比让他们看 "Access is denied" 友好。
+	if !a.IsAdmin() {
+		return fmt.Errorf("需要管理员 / root 权限才能读原始磁盘设备解锁 BitLocker；请以管理员身份重启本工具")
+	}
+
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在执行，请先停止当前扫描")
+	}
+	a.mu.Unlock()
+
+	// 解析卷偏移（十六进制；通常 "0" 即整盘起点）
+	var volumeOffset int64
+	if _, err := fmt.Sscanf(volumeOffsetHex, "%x", &volumeOffset); err != nil {
+		return fmt.Errorf("volumeOffset 解析失败: %w", err)
+	}
+
+	underlying := disk.NewReader(drivePath)
+	if err := underlying.Open(); err != nil {
+		return fmt.Errorf("打开磁盘失败: %w", err)
+	}
+
+	// 检测 BitLocker 卷头（拿 metadata block 偏移）
+	bvolume, err := bitlocker.Detect(underlying, volumeOffset)
+	if err != nil {
+		underlying.Close()
+		return fmt.Errorf("BitLocker 检测失败: %w", err)
+	}
+	if bvolume == nil {
+		underlying.Close()
+		return fmt.Errorf("此偏移位置不是 BitLocker 卷")
+	}
+
+	appLogger.Info("BitLocker 解锁开始", "drive", drivePath, "offset", volumeOffset)
+
+	progressCb := func(done, total uint64) {
+		wailsRuntime.EventsEmit(a.ctx, "bitlocker:keyDeriving", map[string]uint64{
+			"done":  done,
+			"total": total,
+		})
+	}
+
+	result, err := bitlocker.UnlockBitLockerVolumeWithRecoveryKey(underlying, bvolume, recoveryKey, progressCb)
+	if err != nil {
+		underlying.Close()
+		appLogger.Warn("BitLocker 解锁失败", "err", err)
+		return fmt.Errorf("解锁失败: %w", err)
+	}
+
+	appLogger.Info("BitLocker 解锁成功",
+		"encryption_method", fmt.Sprintf("0x%04X", result.EncryptionMethod),
+		"volume_uuid", fmt.Sprintf("%X", result.VolumeIdentifier))
+
+	wailsRuntime.EventsEmit(a.ctx, "bitlocker:unlocked", map[string]any{
+		"encryptionMethod": fmt.Sprintf("0x%04X", result.EncryptionMethod),
+		"volumeUUID":       fmt.Sprintf("%X", result.VolumeIdentifier),
+	})
+
+	// 记录上下文 + 初始化快照（与 StartScan 对齐）
+	a.mu.Lock()
+	a.currentDrive = types.DriveInfo{Path: drivePath + " (BitLocker 已解锁)"}
+	a.currentMode = mode
+	a.mu.Unlock()
+
+	a.scanSnapshotMu.Lock()
+	a.scanProgress = types.ScanProgress{}
+	a.scanFiles = nil
+	a.scanActive = true
+	a.scanSnapshotMu.Unlock()
+
+	callbacks := recovery.ScanCallbacks{
+		OnProgress: func(p types.ScanProgress) {
+			a.scanSnapshotMu.Lock()
+			a.scanProgress = p
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+		},
+		OnFileFound: func(f *types.RecoveredFile) {
+			a.scanSnapshotMu.Lock()
+			a.scanFiles = append(a.scanFiles, f)
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+		},
+	}
+
+	stopPersist := make(chan struct{})
+	go a.persistLoop(stopPersist)
+
+	go func() {
+		defer func() {
+			// 扫描结束统一关闭 reader 链（DecryptingReader.Close 会透传到 underlying）
+			if err := result.Reader.Close(); err != nil {
+				appLogger.Warn("关闭 BitLocker DecryptingReader 失败", "err", err)
+			}
+		}()
+
+		scanResult, err := a.engine.ScanWithReader(result.Reader, types.ScanMode(mode), callbacks)
+		close(stopPersist)
+
+		a.scanSnapshotMu.Lock()
+		a.scanActive = false
+		a.scanSnapshotMu.Unlock()
+
+		if err != nil {
+			appLogger.Warn("BitLocker 卷扫描出错", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		appLogger.Info("BitLocker 卷扫描完成", "files", len(scanResult.Files))
+		a.saveSnapshot(true)
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+	}()
+
+	return nil
+}
+
+// QueryDiskHealth 给前端的"开始扫描前先看盘是不是要崩"的快捷接口。
+// 走 smartctl（用户得装 smartmontools）；没装时返回 Available=false 给 UI 友好提示。
+func (a *App) QueryDiskHealth(devicePath string) (*disk.SmartHealth, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	return disk.QuerySmart(ctx, devicePath)
+}
+
+// bindFileDrop 注册 OS-level 文件拖拽 → 前端事件 "files:dropped" 的桥。
+// 在 main.go 的 OnDomReady 里调一次。
+func (a *App) bindFileDrop(ctx context.Context) {
+	// 把拖入的所有文件路径直接转发到前端；前端按需挑第一个 .img/.raw/.dd 触发镜像扫描
+	wailsRuntime.OnFileDrop(ctx, func(x, y int, paths []string) {
+		appLogger.Info("OS 文件拖入", "count", len(paths), "paths", paths)
+		wailsRuntime.EventsEmit(ctx, "files:dropped", paths)
+	})
+}
+
+// UnlockBitLockerWithMemoryImage 用一份"内存镜像 / 休眠文件"里搜出来的 VMK 解锁
+// TPM-only / TPM+PIN 等无法跨平台直接解的 BitLocker 保护器。
+//
+// 现实路径：
+//   1. 用户从原 Windows 抓 hiberfil.sys（C:\hiberfil.sys，需要管理员）或用 winpmem
+//      / DumpIt 抓内存 dump
+//   2. 把 .raw / hiberfil.sys 路径传过来
+//   3. 我们扫一遍找出能解开 VMK datum 的 32 字节候选
+//   4. 用 VMK → FVEK → DecryptingReader → engine.ScanWithReader 完整链
+//
+// 这是 Passware / Elcomsoft 等专业取证工具用的同款"memory-based" 攻击；
+// 完全合法，只要被恢复的数据是用户自己的（被偷电脑、忘记密码、合规取证）。
+func (a *App) UnlockBitLockerWithMemoryImage(
+	drivePath, volumeOffsetHex, memImagePath, mode string,
+) error {
+	if drivePath == "" || memImagePath == "" {
+		return fmt.Errorf("drivePath / memImagePath 不能为空")
+	}
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+	if !a.IsAdmin() {
+		return fmt.Errorf("需要管理员 / root 权限才能读原始磁盘设备")
+	}
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在执行，请先停止当前扫描")
+	}
+	a.mu.Unlock()
+
+	var volumeOffset int64
+	if _, err := fmt.Sscanf(volumeOffsetHex, "%x", &volumeOffset); err != nil {
+		return fmt.Errorf("volumeOffset 解析失败: %w", err)
+	}
+
+	// 1. 打开磁盘 + 检测 BitLocker
+	underlying := disk.NewReader(drivePath)
+	if err := underlying.Open(); err != nil {
+		return fmt.Errorf("打开磁盘失败: %w", err)
+	}
+	bvolume, err := bitlocker.Detect(underlying, volumeOffset)
+	if err != nil || bvolume == nil {
+		underlying.Close()
+		return fmt.Errorf("此偏移不是 BitLocker 卷")
+	}
+
+	// 2. 打开内存镜像 reader（image file 模式即可，磁盘 reader 已经支持文件）
+	memReader := disk.NewReader(memImagePath)
+	if err := memReader.Open(); err != nil {
+		underlying.Close()
+		return fmt.Errorf("打开内存镜像失败: %w", err)
+	}
+
+	// 3. 找一个 VMK datum（任意一个能用就行；通常 TPM 保护类型 = 0x100）
+	mb, err := loadFirstFVEMetadata(underlying, bvolume)
+	if err != nil {
+		underlying.Close()
+		memReader.Close()
+		return fmt.Errorf("读 FVE metadata 失败: %w", err)
+	}
+	vmks := mb.FindVMKs()
+	if len(vmks) == 0 {
+		underlying.Close()
+		memReader.Close()
+		return fmt.Errorf("metadata 里没有 VMK 保护器")
+	}
+	// 取第一个 —— 多 VMK 的话每个都能解出同一个 VMK，所以挑哪个无所谓
+	vmkDatum := &vmks[0]
+
+	appLogger.Info("VMK 内存搜索开始", "drive", drivePath, "mem", memImagePath)
+
+	// 4. 内存搜 VMK，进度回调到前端
+	progressCb := func(scanned, total int64) {
+		wailsRuntime.EventsEmit(a.ctx, "bitlocker:memScanProgress", map[string]int64{
+			"scanned": scanned,
+			"total":   total,
+		})
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	defer cancel()
+	res, err := bitlocker.SearchVMKInMemoryImage(ctx, memReader, vmkDatum, progressCb)
+	if err != nil {
+		underlying.Close()
+		memReader.Close()
+		return fmt.Errorf("VMK 内存搜索失败: %w", err)
+	}
+	memReader.Close()
+	appLogger.Info("VMK 已从内存找到", "iter", res.Iterations, "hit_offset", res.HitOffset)
+
+	// 5. 用搜到的 VMK 提 FVEK + 构造解密 reader
+	fvek, method, err := bitlocker.ExtractFVEKFromMetadata(mb, res.VMK)
+	if err != nil {
+		underlying.Close()
+		return fmt.Errorf("FVEK 提取失败: %w", err)
+	}
+	sectorCipher, err := bitlocker.BuildSectorCipherForMethodPublic(fvek, method)
+	if err != nil {
+		underlying.Close()
+		return err
+	}
+	dec, err := bitlocker.NewDecryptingReader(underlying, sectorCipher, bvolume.OEMID)
+	if err != nil {
+		underlying.Close()
+		return err
+	}
+	dec.SetVolumeOffset(bvolume.Offset)
+	if vh := mb.FindVolumeHeaderInfo(); vh != nil && vh.PlaintextHeaderSize > 0 {
+		dec.SetPlainTextHeaderEnd(vh.PlaintextHeaderSize)
+	}
+
+	wailsRuntime.EventsEmit(a.ctx, "bitlocker:unlocked", map[string]any{
+		"encryptionMethod": fmt.Sprintf("0x%04X", method),
+		"volumeUUID":       fmt.Sprintf("%X", mb.VolumeIdentifier),
+		"unlockMode":       "memory-image",
+	})
+
+	// 6. 走和 UnlockBitLockerAndScan 完全一致的扫描启动流程
+	a.startScanWithUnlockedReader(dec, drivePath+" (BitLocker via memory image)", mode)
+	return nil
+}
+
+// loadFirstFVEMetadata 把 UnlockBitLockerVolumeWithRecoveryKey 里"试三个 metadata block"
+// 的逻辑独立出来给其他入口复用
+func loadFirstFVEMetadata(underlying disk.DiskReader, bvolume *bitlocker.Volume) (*bitlocker.FVEMetadataBlock, error) {
+	var mb *bitlocker.FVEMetadataBlock
+	var lastErr error
+	for _, off := range []int64{
+		bvolume.FVEMetaBlockOffset1,
+		bvolume.FVEMetaBlockOffset2,
+		bvolume.FVEMetaBlockOffset3,
+	} {
+		if off <= 0 {
+			continue
+		}
+		mb, lastErr = bitlocker.ParseFVEMetadataBlock(underlying, bvolume.Offset+off)
+		if mb != nil {
+			return mb, nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("三个 FVE metadata block 全部解析失败")
+}
+
+// startScanWithUnlockedReader 把 UnlockBitLockerAndScan 里的"goroutine 启动 + 事件桥"
+// 抽出来共用，给两种解锁路径（recovery key / memory image）都用同一段流程。
+func (a *App) startScanWithUnlockedReader(reader *bitlocker.DecryptingReader, driveLabel, mode string) {
+	a.mu.Lock()
+	a.currentDrive = types.DriveInfo{Path: driveLabel}
+	a.currentMode = mode
+	a.mu.Unlock()
+
+	a.scanSnapshotMu.Lock()
+	a.scanProgress = types.ScanProgress{}
+	a.scanFiles = nil
+	a.scanActive = true
+	a.scanSnapshotMu.Unlock()
+
+	callbacks := recovery.ScanCallbacks{
+		OnProgress: func(p types.ScanProgress) {
+			a.scanSnapshotMu.Lock()
+			a.scanProgress = p
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+		},
+		OnFileFound: func(f *types.RecoveredFile) {
+			a.scanSnapshotMu.Lock()
+			a.scanFiles = append(a.scanFiles, f)
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+		},
+	}
+
+	stopPersist := make(chan struct{})
+	go a.persistLoop(stopPersist)
+
+	go func() {
+		defer reader.Close()
+		scanResult, err := a.engine.ScanWithReader(reader, types.ScanMode(mode), callbacks)
+		close(stopPersist)
+		a.scanSnapshotMu.Lock()
+		a.scanActive = false
+		a.scanSnapshotMu.Unlock()
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		a.saveSnapshot(true)
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+	}()
+}
+
+// SummarizeBitLockerProtectors 暴露给前端的"该 BitLocker 卷有哪些保护器、各能不能解"
+// 的清单，让 UI 在解锁前就能告诉用户该用 recovery / password / startup-key / memory-image。
+func (a *App) SummarizeBitLockerProtectors(drivePath, volumeOffsetHex string) ([]bitlocker.ProtectorSummary, error) {
+	if drivePath == "" {
+		return nil, fmt.Errorf("drivePath 为空")
+	}
+	var volumeOffset int64
+	if _, err := fmt.Sscanf(volumeOffsetHex, "%x", &volumeOffset); err != nil {
+		return nil, fmt.Errorf("volumeOffset 解析失败: %w", err)
+	}
+	reader := disk.NewReader(drivePath)
+	if err := reader.Open(); err != nil {
+		return nil, fmt.Errorf("打开磁盘失败: %w", err)
+	}
+	defer reader.Close()
+	bvolume, err := bitlocker.Detect(reader, volumeOffset)
+	if err != nil || bvolume == nil {
+		return nil, fmt.Errorf("此偏移不是 BitLocker 卷")
+	}
+	mb, err := loadFirstFVEMetadata(reader, bvolume)
+	if err != nil {
+		return nil, err
+	}
+	return bitlocker.SummarizeProtectors(mb), nil
+}
+
+// RAIDScanRequest 是前端构造 RAID 阵列扫描时的输入。
+//
+// 字段语义：
+//   Level         "raid0" / "raid1" / "raid5"
+//   DiskPaths     按"原阵列编号顺序"排好的物理盘 / 镜像路径；缺失盘传空字符串 ""
+//   StripeBytes   条带大小（typical 65536 / 131072 / 524288）
+//   Mode          扫描模式 quick/deep/full
+type RAIDScanRequest struct {
+	Level       string   `json:"level"`
+	DiskPaths   []string `json:"diskPaths"`
+	StripeBytes int64    `json:"stripeBytes"`
+	Mode        string   `json:"mode"`
+}
+
+// StartRAIDScan 把多个物理盘 / 镜像按 RAID 规则虚拟拼成一个连续设备，
+// 然后跑标准 NTFS / carver 等扫描流程。
+//
+// 这是给"被偷电脑里硬盘是 RAID 阵列"或"NAS 拆出 4 块盘"等场景用。
+func (a *App) StartRAIDScan(req RAIDScanRequest) error {
+	if len(req.DiskPaths) < 2 {
+		return fmt.Errorf("RAID 至少 2 块盘")
+	}
+	if !a.IsAdmin() {
+		return fmt.Errorf("需要管理员 / root 权限才能读原始磁盘设备")
+	}
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在执行，请先停止当前扫描")
+	}
+	a.mu.Unlock()
+
+	if req.Mode == "" {
+		req.Mode = string(types.ScanFull)
+	}
+
+	var level raid.Level
+	switch req.Level {
+	case "raid0":
+		level = raid.Level0
+	case "raid1":
+		level = raid.Level1
+	case "raid5":
+		level = raid.Level5
+	default:
+		return fmt.Errorf("不支持的 RAID level: %q", req.Level)
+	}
+
+	// 打开每块盘（空字符串 = 缺失，传 nil）
+	disks := make([]disk.DiskReader, len(req.DiskPaths))
+	openedReaders := []disk.DiskReader{}
+	for i, p := range req.DiskPaths {
+		if p == "" {
+			disks[i] = nil
+			continue
+		}
+		dr := disk.NewReader(p)
+		if err := dr.Open(); err != nil {
+			for _, r := range openedReaders {
+				r.Close()
+			}
+			return fmt.Errorf("打开 disk[%d] %q 失败: %w", i, p, err)
+		}
+		disks[i] = dr
+		openedReaders = append(openedReaders, dr)
+	}
+
+	rdr, err := raid.NewReader(raid.Config{
+		Level:       level,
+		Disks:       disks,
+		StripeBytes: req.StripeBytes,
+	})
+	if err != nil {
+		for _, r := range openedReaders {
+			r.Close()
+		}
+		return fmt.Errorf("RAID 配置错: %w", err)
+	}
+
+	appLogger.Info("启动 RAID 扫描", "level", req.Level, "disks", len(req.DiskPaths), "stripe", req.StripeBytes)
+
+	// 走和 BitLocker 解锁后扫描相同的"goroutine + 事件桥"模板
+	a.mu.Lock()
+	a.currentDrive = types.DriveInfo{Path: fmt.Sprintf("RAID(%s, %d 盘)", req.Level, len(req.DiskPaths))}
+	a.currentMode = req.Mode
+	a.mu.Unlock()
+
+	a.scanSnapshotMu.Lock()
+	a.scanProgress = types.ScanProgress{}
+	a.scanFiles = nil
+	a.scanActive = true
+	a.scanSnapshotMu.Unlock()
+
+	callbacks := recovery.ScanCallbacks{
+		OnProgress: func(p types.ScanProgress) {
+			a.scanSnapshotMu.Lock()
+			a.scanProgress = p
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+		},
+		OnFileFound: func(f *types.RecoveredFile) {
+			a.scanSnapshotMu.Lock()
+			a.scanFiles = append(a.scanFiles, f)
+			a.scanSnapshotMu.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+		},
+	}
+
+	stopPersist := make(chan struct{})
+	go a.persistLoop(stopPersist)
+	go func() {
+		defer rdr.Close()
+		scanResult, err := a.engine.ScanWithReader(rdr, types.ScanMode(req.Mode), callbacks)
+		close(stopPersist)
+		a.scanSnapshotMu.Lock()
+		a.scanActive = false
+		a.scanSnapshotMu.Unlock()
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		a.saveSnapshot(true)
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+	}()
+	return nil
+}
+
+// ScanEncryptedVolumes 在指定盘上检测 BitLocker / APFS / FileVault 卷。
+//
+// 本工具**不解密**任何加密卷 —— 只检测它们存在让用户/取证人员知道。
+// 对于这些卷，提示用户用专门工具继续：
+//   - BitLocker: dislocker（开源）/ R-Studio / Windows 本机 RecoveryKey
+//   - FileVault: 必须有用户登录密码或 Institutional Key，专业工具如 R-Studio Mac
+//
+// 调用方典型用法：用户在 WelcomePage 选盘前，先把所有盘各扫一遍出加密卷预警。
+func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, error) {
+	if drivePath == "" {
+		return nil, fmt.Errorf("drivePath 为空")
+	}
+	reader := disk.NewReader(drivePath)
+	if err := reader.Open(); err != nil {
+		return nil, fmt.Errorf("打开磁盘失败: %w", err)
+	}
+	defer reader.Close()
+
+	var out []EncryptedVolumeInfo
+
+	// 1. BitLocker 卷扫描（Windows 加密）
+	// 用 FindVolumesFast：只检测 offset 0 + GPT/MBR 分区起始，
+	// 避免在多 TB 盘上做几分钟的全盘 brute-force（启动阶段对所有盘并行扫）。
+	blScanner := bitlocker.NewScanner(reader)
+	if vols, err := blScanner.FindVolumesFast(); err == nil {
+		for _, v := range vols {
+			out = append(out, EncryptedVolumeInfo{
+				DrivePath: drivePath,
+				Kind:      "bitlocker",
+				Offset:    v.Offset,
+				Encrypted: true,
+				Note:      "BitLocker 加密卷。本工具支持用 recovery key 解锁；也可用 dislocker / R-Studio / Windows 系统恢复",
+			})
+		}
+	}
+
+	// 2a. HFS+ / HFSX 卷（老 macOS / Time Machine 备份盘）
+	if vols, err := hfsplus.NewScanner(reader).FindVolumes(); err == nil {
+		for _, v := range vols {
+			label := "HFS+"
+			if v.IsHFSX {
+				label = "HFSX"
+			}
+			out = append(out, EncryptedVolumeInfo{
+				DrivePath: drivePath,
+				Kind:      "hfsplus",
+				Offset:    v.Offset,
+				Name:      label,
+				Encrypted: false,
+				Note:      fmt.Sprintf("%s 卷（block=%d total=%d files=%d）。本工具暂未做 Catalog B-tree 文件枚举；可用深度签名扫描", label, v.BlockSize, v.TotalBlocks, v.FileCount),
+			})
+		}
+	}
+	// 2b. ReFS 卷（Server / Win11 Pro for Workstations）
+	if vols, err := refs.NewScanner(reader).FindVolumes(); err == nil {
+		for _, v := range vols {
+			out = append(out, EncryptedVolumeInfo{
+				DrivePath: drivePath,
+				Kind:      "refs",
+				Offset:    v.Offset,
+				Name:      fmt.Sprintf("ReFS v%d.%d", v.MajorVersion, v.MinorVersion),
+				Encrypted: false,
+				Note:      "ReFS 卷。本工具暂未做 Minstore B-tree 解析（无公开规范）；可用深度签名扫描",
+			})
+		}
+	}
+
+	// 3. APFS 容器扫描（含 FileVault 检测）
+	apfsScanner := apfs.NewScanner(reader)
+	if containers, err := apfsScanner.FindContainers(); err == nil {
+		for _, c := range containers {
+			for _, v := range c.Volumes {
+				kind := "apfs-volume"
+				note := "APFS 卷。本工具暂未做 B-tree 文件枚举，建议用 macOS Disk Utility / R-Studio Mac"
+				if v.IsEncrypted {
+					kind = "filevault"
+					note = "FileVault 加密的 APFS 卷。需用户密码或 Institutional Key 才能解密 —— 用 R-Studio Mac / 苹果 Recovery 工具"
+				}
+				out = append(out, EncryptedVolumeInfo{
+					DrivePath: drivePath,
+					Kind:      kind,
+					Offset:    c.Offset,
+					Name:      v.Name,
+					UUID:      formatGUIDMixedEndian(v.UUID),
+					Encrypted: v.IsEncrypted,
+					Note:      note,
+				})
+			}
+		}
+	}
+
+	// 去重：同一 (kind, drivePath, offset) 可能被 BitLocker 扫描和 APFS 扫描各命中一次
+	return dedupeEncryptedVolumes(out), nil
+}
+
+// dedupeEncryptedVolumes 按 (kind, drivePath, offset) 键去重，保留第一个出现的条目。
+func dedupeEncryptedVolumes(in []EncryptedVolumeInfo) []EncryptedVolumeInfo {
+	seen := make(map[string]bool, len(in))
+	out := make([]EncryptedVolumeInfo, 0, len(in))
+	for _, v := range in {
+		k := v.Kind + "|" + v.DrivePath + "|" + fmt.Sprintf("%d", v.Offset)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// formatGUIDMixedEndian 把 16 字节按 Microsoft/GPT 混合字节序输出为标准 UUID 字符串：
+//
+//	前 3 段（4/2/2 字节）是 little-endian，后 2 段（2/6 字节）是 big-endian。
+//	与 Windows 磁盘管理器 / GPT 工具看到的格式一致。
+func formatGUIDMixedEndian(u [16]byte) string {
+	// LE 反转前三段
+	p1 := []byte{u[3], u[2], u[1], u[0]}
+	p2 := []byte{u[5], u[4]}
+	p3 := []byte{u[7], u[6]}
+	p4 := u[8:10]
+	p5 := u[10:16]
+	return fmt.Sprintf("%X-%X-%X-%X-%X", p1, p2, p3, p4, p5)
 }
 
 // ListShadowCopies 枚举本机 Volume Shadow Copy 快照。
@@ -484,6 +1125,45 @@ func (a *App) RetryFailedRecovery(outputDir string) error {
 // GetLastRecoveryRecords 给前端展示上一次的每文件结果。
 func (a *App) GetLastRecoveryRecords() []*recovery.FileRecoveryRecord {
 	return a.engine.GetLastRecoveryResult()
+}
+
+// ExportDiagnosticBundle 把日志 / 会话 snapshot / pending manifest 打包成 zip，
+// 用户可以直接贴到 GitHub issue。不会包含磁盘扇区 / 密钥 / 用户文件。
+//
+// destDir 为空时自动写到用户"下载目录"/"桌面"/配置目录。
+func (a *App) ExportDiagnosticBundle(destDir, extraNotes string) (string, error) {
+	if destDir == "" {
+		if d, err := os.UserHomeDir(); err == nil {
+			// 尝试 Desktop，不存在就落回 UserHomeDir
+			desk := filepath.Join(d, "Desktop")
+			if fi, err := os.Stat(desk); err == nil && fi.IsDir() {
+				destDir = desk
+			} else {
+				destDir = d
+			}
+		}
+	}
+
+	opts := diag.Options{
+		DestPath:   destDir,
+		AppVersion: updater.Version,
+		LogDir:     logging.LogDir(),
+		ExtraNotes: extraNotes,
+	}
+	if a.store != nil {
+		opts.SessionFile = a.store.Path()
+	}
+	if mp, err := updater.ManifestPath(); err == nil {
+		if _, e := os.Stat(mp); e == nil {
+			opts.PendingFile = mp
+		}
+	}
+	path, err := diag.Export(opts)
+	if err != nil {
+		return "", fmt.Errorf("导出诊断包失败: %w", err)
+	}
+	appLogger.Info("诊断包已导出", "path", path)
+	return path, nil
 }
 
 // ExportRecoveryReport 把最近一次恢复的每文件记录导出成 CSV。

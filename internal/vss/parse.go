@@ -8,38 +8,66 @@ import (
 
 // parseVssadminOutput 从 `vssadmin list shadows` 的 stdout 中解析 shadow 列表。
 //
-// 典型一段（中英文字段名都要兼容，Windows 本地化会改变字段名）：
+// 真实输出的两层结构（中英文字段名都要兼容）：
 //
-//   Contents of shadow copy set ID: {xxx}
-//      Contained 1 shadow copies at creation time: 4/19/2026 10:00:00 AM
-//      Shadow Copy ID: {GUID}
-//         Original Volume: (C:)\\?\Volume{...}\
-//         Shadow Copy Volume: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3
-//         Originating Machine: DESKTOP-ABC
-//         Service Machine: DESKTOP-ABC
-//         Provider: 'Microsoft Software Shadow Copy provider 1.0'
-//         Type: ClientAccessibleWriters
-//         Attributes: Persistent, Client-accessible, No auto release, Differential, Auto recovered
+//   Contents of shadow copy set ID: {SET-GUID}
+//      Contained N shadow copies at creation time: 4/19/2026 10:00:00 AM
+//      Shadow Copy ID: {SHADOW-GUID-1}
+//         Original Volume: ...
+//         Shadow Copy Volume: \\?\GLOBALROOT\...
+//         Originating Machine: ...
+//      Shadow Copy ID: {SHADOW-GUID-2}    <-- 一个 set 可有多个 shadow，共享 creation time
+//         ...
+//   Contents of shadow copy set ID: {SET-GUID-2}
+//      Contained 1 shadow copies at creation time: 4/20/2026 11:00:00 AM
+//      Shadow Copy ID: ...
 //
-// 我们只关心 ID / Device Path / Original Volume / CreatedAt / Machine。
-// 解析失败的单条会被跳过，不会让整个列表扑街。
+// 解析两遍：先按 "Contents of shadow copy set ID" 切 SET 块（拿到 creation time），
+// 再在每个 SET 内切 "Shadow Copy ID" 块（拿到每个 shadow 的字段）。
+// 这样确保多 set 多 shadow 时 creation time 不会串味。
 func parseVssadminOutput(raw string) []Shadow {
 	var out []Shadow
-	// 以 "Shadow Copy ID:" 为分块标记切一刀
-	blocks := splitByShadowID(raw)
-	for _, b := range blocks {
-		if sh, ok := parseShadowBlock(b); ok {
-			out = append(out, sh)
+	setBlocks := splitBySetID(raw)
+	for _, setBlock := range setBlocks {
+		setCreatedAt := parseCreationTime(setBlock)
+		shadowBlocks := splitByShadowID(setBlock)
+		for _, b := range shadowBlocks {
+			if sh, ok := parseShadowBlock(b); ok {
+				if sh.CreatedAt.IsZero() {
+					sh.CreatedAt = setCreatedAt
+				}
+				out = append(out, sh)
+			}
 		}
 	}
 	return out
 }
 
-// 兼容中英文 "Shadow Copy ID:" / "卷影复制 ID:"
-var reShadowIDHeader = regexp.MustCompile(`(?m)^\s*(?:Shadow Copy ID|卷影复制\s*ID)\s*:\s*(\{[0-9A-Fa-f\-]+\})`)
+// 兼容中英文头
+var reSetHeader = regexp.MustCompile(`(?mi)^\s*(?:Contents of shadow copy set ID|卷影复制集 ID)\s*[:：]?`)
+var reShadowIDHeader = regexp.MustCompile(`(?mi)^\s*(?:Shadow Copy ID|卷影复制\s*ID)\s*:\s*(\{[0-9A-Fa-f\-]+\})`)
+
+// splitBySetID 把 raw 按 "Contents of shadow copy set ID" 切成多个 SET 块
+func splitBySetID(raw string) []string {
+	idx := reSetHeader.FindAllStringIndex(raw, -1)
+	if len(idx) == 0 {
+		// 找不到 set 头：把整个 raw 当一个 block 让下游 splitByShadowID 处理
+		// （某些精简输出可能没 set 头）
+		return []string{raw}
+	}
+	out := make([]string, 0, len(idx))
+	for i, pair := range idx {
+		start := pair[0]
+		end := len(raw)
+		if i+1 < len(idx) {
+			end = idx[i+1][0]
+		}
+		out = append(out, raw[start:end])
+	}
+	return out
+}
 
 func splitByShadowID(raw string) []string {
-	// 找到所有 "Shadow Copy ID" 的起点，把中间内容切开。
 	idx := reShadowIDHeader.FindAllStringIndex(raw, -1)
 	if len(idx) == 0 {
 		return nil
@@ -112,9 +140,20 @@ func parseCreationTime(block string) time.Time {
 		return time.Time{}
 	}
 	candidate := strings.TrimSpace(m[1])
+	// 多行的话只取第一行（regex (?m) 已经按行；保险）
+	if nl := strings.IndexAny(candidate, "\r\n"); nl >= 0 {
+		candidate = strings.TrimSpace(candidate[:nl])
+	}
 	layouts := []string{
+		// 美式 12 小时（最常见）
 		"1/2/2006 3:04:05 PM",
+		"1/2/2006 03:04:05 PM",
 		"01/02/2006 3:04:05 PM",
+		"01/02/2006 03:04:05 PM",
+		// 美式 24 小时
+		"1/2/2006 15:04:05",
+		"01/02/2006 15:04:05",
+		// ISO / 中文系统
 		"2006/1/2 15:04:05",
 		"2006/01/02 15:04:05",
 		"2006-01-02 15:04:05",

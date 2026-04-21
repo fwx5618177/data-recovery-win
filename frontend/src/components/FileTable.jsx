@@ -12,6 +12,19 @@ import { IconEye, IconForCategory, IconSearch, IconX } from "../icons";
  *
  * 所有交互都向上冒泡：选中改变、跳页等都由父组件维护状态。
  */
+// 文件列表 > 此阈值时切到虚拟滚动（不分页，只 mount 视口内 row）。
+// 阈值是经验值：低于 1000 时分页 UI 更易用；高于时分页翻页心智成本高 + 性能也开始吃紧。
+const VIRTUAL_SCROLL_THRESHOLD = 1000;
+
+// 单 row 高度（必须与 CSS 保持一致；虚拟滚动需要预先知道）
+const ROW_HEIGHT = 36;
+
+// 虚拟视口高度（容器固定高，超出滚动）
+const VIEWPORT_HEIGHT = 600;
+
+// 视口外的 overscan：上下各多 mount 这么多 row，避免快速滚动时白屏
+const OVERSCAN = 8;
+
 export default function FileTable({
   files,
   selectedIds,
@@ -27,6 +40,7 @@ export default function FileTable({
   const [sortKey, setSortKey] = useState("size");
   const [sortDir, setSortDir] = useState("desc"); // asc | desc
   const [page, setPage] = useState(1);
+  const [scrollTop, setScrollTop] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
 
   const sorted = useMemo(() => {
@@ -41,12 +55,25 @@ export default function FileTable({
     return arr;
   }, [files, sortKey, sortDir]);
 
+  // 选择模式：≤阈值用经典分页；超过用虚拟滚动
+  const useVirtual = sorted.length > VIRTUAL_SCROLL_THRESHOLD;
+
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const safePage = Math.min(page, totalPages);
-  const pageSlice = useMemo(
-    () => sorted.slice((safePage - 1) * pageSize, safePage * pageSize),
-    [sorted, safePage, pageSize],
-  );
+
+  // 当前可见 slice：虚拟滚动 vs 分页
+  const pageSlice = useMemo(() => {
+    if (useVirtual) {
+      const visibleCount = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + OVERSCAN * 2;
+      const startIdx = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+      const endIdx = Math.min(sorted.length, startIdx + visibleCount);
+      const slice = sorted.slice(startIdx, endIdx);
+      slice._startIdx = startIdx;
+      slice._endIdx = endIdx;
+      return slice;
+    }
+    return sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
+  }, [useVirtual, scrollTop, sorted, safePage, pageSize]);
 
   // 切换全选指的是 "当前页全部"，避免误勾上万文件
   const pageAllSelected = pageSlice.length > 0 && pageSlice.every((f) => selectedIds.has(f.id));
@@ -84,7 +111,11 @@ export default function FileTable({
         {headerRight}
       </div>
 
-      <div className="file-table-scroll">
+      <div
+        className="file-table-scroll"
+        style={useVirtual ? { height: VIEWPORT_HEIGHT, overflow: "auto" } : undefined}
+        onScroll={useVirtual ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
+      >
         <table className="file-table">
           <thead>
             <tr>
@@ -109,6 +140,10 @@ export default function FileTable({
             </tr>
           </thead>
           <tbody>
+            {/* 虚拟滚动：用空 row + 高度撑出滚动条总长度（startIdx * ROW_HEIGHT 像素） */}
+            {useVirtual && pageSlice._startIdx > 0 && (
+              <tr style={{ height: pageSlice._startIdx * ROW_HEIGHT }}><td colSpan={7} /></tr>
+            )}
             {pageSlice.map((f) => (
               <Row
                 key={f.id}
@@ -118,6 +153,9 @@ export default function FileTable({
                 onPreview={onRequestPreview ? () => setPreviewFile(f) : null}
               />
             ))}
+            {useVirtual && pageSlice._endIdx < sorted.length && (
+              <tr style={{ height: (sorted.length - pageSlice._endIdx) * ROW_HEIGHT }}><td colSpan={7} /></tr>
+            )}
           </tbody>
         </table>
 
@@ -140,7 +178,13 @@ export default function FileTable({
         />
       )}
 
-      {sorted.length > pageSize && (
+      {useVirtual && (
+        <div className="muted" style={{ padding: "6px 12px", fontSize: 12 }}>
+          {sorted.length.toLocaleString()} 项 · 虚拟滚动（10 万+ 文件不卡）·
+          可见 {pageSlice._startIdx + 1}–{pageSlice._endIdx}
+        </div>
+      )}
+      {!useVirtual && sorted.length > pageSize && (
         <div className="pagination">
           <span>
             第 {((safePage - 1) * pageSize + 1).toLocaleString()} –{" "}
@@ -179,7 +223,8 @@ function Row({ file, selected, onToggle, onPreview }) {
     confidence >= 70 ? "confidence-bar--high" : confidence >= 40 ? "confidence-bar--mid" : "confidence-bar--low";
   const categoryMeta = getCategoryMeta(file.category);
   const sourceMeta = getSourceMeta(file.source);
-  const canPreview = onPreview && file.category === "image";
+  // 预览支持：image / document(pdf, txt) / video(前几秒) / archive(只列结构) — 多类型分发
+  const canPreview = onPreview && previewableCategory(file);
 
   return (
     <tr
@@ -297,9 +342,7 @@ function PreviewModal({ file, onClose, onRequestPreview }) {
               </div>
             </div>
           )}
-          {state.url && (
-            <img src={state.url} alt={file.fileName} className="preview-modal__image" />
-          )}
+          {state.url && renderPreviewByCategory(file, state.url)}
         </div>
         <div className="preview-modal__footer muted" style={{ fontSize: 11 }}>
           {formatSize(file.size)} · 偏移 0x{Number(file.offset || 0).toString(16)} ·
@@ -333,4 +376,89 @@ function valueOf(file, key) {
     case "confidence": return Number(file.confidence || 0);
     default: return 0;
   }
+}
+
+/**
+ * previewableCategory 判断文件是否可预览。
+ * 之前只支持 image，现在扩展到 document(pdf/txt) / video / audio。
+ */
+function previewableCategory(file) {
+  const cat = String(file.category || "").toLowerCase();
+  if (cat === "image") return true;
+  const ext = String(file.extension || "").toLowerCase();
+  if (cat === "document" && (ext === "pdf" || ext === "txt" || ext === "md" || ext === "json" || ext === "log" || ext === "csv")) {
+    return true;
+  }
+  if (cat === "video" && (ext === "mp4" || ext === "mov" || ext === "webm" || ext === "m4v")) {
+    return true;
+  }
+  if (cat === "audio" && (ext === "mp3" || ext === "m4a" || ext === "wav" || ext === "ogg")) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * renderPreviewByCategory 按文件类型选择正确的 HTML5 元素。
+ * 后端 ReadFilePreview 返回的是 data URL（前 N 字节 + 对应 mime）。
+ *   - image → <img>
+ *   - PDF / 视频 / 音频 → 浏览器原生 viewer
+ *   - 文本 → 解码后 <pre>
+ */
+function renderPreviewByCategory(file, dataURL) {
+  const cat = String(file.category || "").toLowerCase();
+  const ext = String(file.extension || "").toLowerCase();
+
+  if (cat === "image") {
+    return <img src={dataURL} alt={file.fileName} className="preview-modal__image" />;
+  }
+  if (ext === "pdf") {
+    // 浏览器内置 PDF.js（Chromium / Firefox / WebView2 都支持）
+    return (
+      <iframe
+        src={dataURL}
+        title={file.fileName}
+        style={{ width: "100%", height: "70vh", border: 0 }}
+      />
+    );
+  }
+  if (cat === "video") {
+    return (
+      <video controls src={dataURL} style={{ maxWidth: "100%", maxHeight: "70vh" }}>
+        浏览器不支持此视频格式
+      </video>
+    );
+  }
+  if (cat === "audio") {
+    return <audio controls src={dataURL} style={{ width: "100%" }} />;
+  }
+  // 文本：从 data URL 抽出 base64 解码后展示
+  if (cat === "document") {
+    try {
+      const m = String(dataURL).match(/^data:[^;]+;base64,(.*)$/);
+      const b64 = m ? m[1] : "";
+      const txt = b64ToText(b64);
+      return (
+        <pre style={{
+          maxWidth: "100%", maxHeight: "70vh", overflow: "auto",
+          fontSize: 12, lineHeight: 1.45,
+          background: "var(--bg-2, #1d1d1d)", color: "var(--fg-1, #ddd)",
+          padding: 12, margin: 0, borderRadius: 4,
+        }}>{txt}</pre>
+      );
+    } catch (e) {
+      return <div className="muted">无法解码为文本: {String(e?.message || e)}</div>;
+    }
+  }
+  // 未知类型：兜底当图片试一次
+  return <img src={dataURL} alt={file.fileName} className="preview-modal__image" />;
+}
+
+// b64ToText UTF-8 base64 → string
+function b64ToText(b64) {
+  const bin = globalThis.atob(b64);
+  // 把字节用 TextDecoder 解 UTF-8（兼容中文）
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }

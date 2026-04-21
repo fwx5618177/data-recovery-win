@@ -621,6 +621,21 @@ func (e *Engine) Scan(
 				baseConfidence = 0.7
 			}
 
+			// 碎片化启发检测：仅对中等以上大小文件做（小文件碎片概率低）。
+			// 检测到的"likely fragmented"不阻止恢复 —— 但写入 Description 让用户/manifest 看见。
+			if fileSize >= 64*1024 {
+				if frag := DetectFragmentation(e.reader, m.Offset, fileSize, ext); frag.LikelyFragmented {
+					if desc != "" {
+						desc += " · "
+					}
+					desc += "⚠ 可能碎片化: " + frag.Reason
+					// 碎片文件的可信度打折，让低置信度路由把它们筛到 _low_confidence/
+					if baseConfidence > 0.4 {
+						baseConfidence = 0.4
+					}
+				}
+			}
+
 			// 构建恢复文件信息
 			file := &types.RecoveredFile{
 				ID:          fmt.Sprintf("carve_%d", m.Offset),
@@ -826,10 +841,13 @@ func sizeDetectionReliable(ext string) bool {
 	case "jpg", "jpeg", "png", "pdf", "zip", "mp4", "mov", "m4a", "3gp",
 		"mp3", "riff", "avi", "wav", "ole2", "doc", "xls", "ppt",
 		"bmp", "ico", "aac", "gif", "tiff", "exe",
-		// 新增：ISO Base Media File Format 子类 + TIFF 壳 RAW
+		// ISO Base Media File Format 子类 + TIFF 壳 RAW
 		"heic", "heif", "avif", "cr3", "cr2", "nef", "arw", "dng",
-		// 新增：DjVu / MIDI 结构化大小
-		"djvu", "mid":
+		// DjVu / MIDI 结构化大小
+		"djvu", "mid",
+		// 新一轮：有 footer 或者结构能给出明确边界
+		"flv", "vcf", "ics", "evtx", "vhd", "vmdk", "qcow2", "wal",
+		"jp2", "exr", "pcap", "pcapng", "m2ts":
 		return true
 	default:
 		return false

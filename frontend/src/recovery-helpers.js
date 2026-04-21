@@ -3,6 +3,99 @@ import { formatConfidence } from "./formatters";
 export const DEFAULT_SCAN_MODE = "full";
 
 /**
+ * parseAdvancedQuery 高级搜索语法 → predicate(file)
+ *   keyword          普通文本（match fileName 或 originalPath）
+ *   size:>100MB      size 比较：>= > <= < =
+ *   type:image       category 等于
+ *   ext:jpg          extension 等于
+ *   deleted:yes      isDeleted true/false
+ *   source:ntfs      source 含
+ *   path:/Users      originalPath 含
+ */
+export function parseAdvancedQuery(query) {
+  if (!query || typeof query !== "string") return () => true;
+  const tokens = query.match(/(\S*?:[^\s]+|\S+)/g) || [];
+  const filters = [];
+  const plain = [];
+  for (const tok of tokens) {
+    const c = tok.indexOf(":");
+    if (c <= 0) { plain.push(tok.toLowerCase()); continue; }
+    const key = tok.slice(0, c).toLowerCase();
+    const val = tok.slice(c + 1).toLowerCase();
+    switch (key) {
+      case "size": filters.push(makeSizeFilter(val)); break;
+      case "type":
+      case "category": filters.push((f) => String(f.category || "").toLowerCase() === val); break;
+      case "ext":
+      case "extension": filters.push((f) => String(f.extension || "").toLowerCase() === val); break;
+      case "deleted": {
+        const want = val === "yes" || val === "true" || val === "1";
+        filters.push((f) => Boolean(f.isDeleted) === want);
+        break;
+      }
+      case "source": filters.push((f) => String(f.source || "").toLowerCase().includes(val)); break;
+      case "path": filters.push((f) => String(f.originalPath || "").toLowerCase().includes(val)); break;
+      default: plain.push(tok.toLowerCase());
+    }
+  }
+  if (plain.length > 0) {
+    filters.push((f) => {
+      const hay = (String(f.fileName || "") + " " + String(f.originalPath || "")).toLowerCase();
+      return plain.every((k) => hay.includes(k));
+    });
+  }
+  return (f) => filters.every((fn) => fn(f));
+}
+
+function makeSizeFilter(spec) {
+  const m = spec.match(/^([><=]=?|=)?\s*(\d+(?:\.\d+)?)\s*([kmgtKMGT]?b?)?$/);
+  if (!m) return () => true;
+  const op = m[1] || "=";
+  const num = parseFloat(m[2]);
+  const unit = (m[3] || "").toLowerCase();
+  const mult = { "": 1, b: 1, k: 1024, kb: 1024, m: 1024 ** 2, mb: 1024 ** 2,
+                 g: 1024 ** 3, gb: 1024 ** 3, t: 1024 ** 4, tb: 1024 ** 4 }[unit] || 1;
+  const bytes = num * mult;
+  return (f) => {
+    const s = Number(f.size || 0);
+    switch (op) {
+      case ">":  return s > bytes;
+      case ">=": return s >= bytes;
+      case "<":  return s < bytes;
+      case "<=": return s <= bytes;
+      default:   return s === bytes;
+    }
+  };
+}
+
+/**
+ * buildPathTree 把扁平 file 列表按 originalPath 组装成树（目录树视图用）
+ */
+export function buildPathTree(files) {
+  const root = { name: "/", path: "", isDir: true, files: [], children: {} };
+  for (const f of files) {
+    if (!f) continue;
+    const path = String(f.originalPath || f.fileName || "");
+    const parts = path.split(/[/\\]+/).filter(Boolean);
+    if (parts.length === 0) { root.files.push(f); continue; }
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const seg = parts[i];
+      if (!node.children[seg]) {
+        node.children[seg] = {
+          name: seg,
+          path: node.path ? node.path + "/" + seg : seg,
+          isDir: true, files: [], children: {},
+        };
+      }
+      node = node.children[seg];
+    }
+    node.files.push(f);
+  }
+  return root;
+}
+
+/**
  * 分类元数据：只保留文字标签（图标由 icons.jsx 根据分类 key 返回）。
  * 新增一个分类时在这里加一行即可。
  */

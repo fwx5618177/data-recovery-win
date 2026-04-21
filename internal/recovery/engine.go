@@ -14,6 +14,7 @@ import (
 	"data-recovery/internal/carver"
 	"data-recovery/internal/disk"
 	"data-recovery/internal/exfat"
+	"data-recovery/internal/ext4"
 	"data-recovery/internal/fat"
 	"data-recovery/internal/logging"
 	"data-recovery/internal/ntfs"
@@ -92,6 +93,13 @@ type fatRecoverySource struct {
 	PartitionOffset int64
 }
 
+// extRecoverySource 保存 ext2/3/4 文件恢复所需 —— inode + 超块 + 块组描述符
+type extRecoverySource struct {
+	Inode      *ext4.Inode
+	SuperBlock *ext4.SuperBlock
+	GroupDescs []ext4.GroupDesc
+}
+
 // Engine 恢复引擎 — 整个系统的顶层协调器
 type Engine struct {
 	mu sync.RWMutex
@@ -111,6 +119,15 @@ type Engine struct {
 
 	// FAT12/16/32 扫描缓存，用于恢复阶段
 	fatSources map[string]fatRecoverySource
+
+	// ext2/3/4 扫描缓存
+	extSources map[string]extRecoverySource
+
+	// APFS 扫描缓存（每个文件按 extent 列表恢复）
+	apfsSources map[string]apfsRecoverySource
+
+	// HFS+ 扫描缓存（每个文件按 fork extents 恢复）
+	hfsplusSources map[string]hfsplusRecoverySource
 
 	results    []*types.RecoveredFile
 	scanning   bool
@@ -150,7 +167,34 @@ func (e *Engine) Scan(
 	mode types.ScanMode,
 	callbacks ScanCallbacks,
 ) (*types.ScanResult, error) {
-	// 加锁，设置扫描状态
+	reader := disk.NewReader(drivePath)
+	if err := reader.Open(); err != nil {
+		return nil, fmt.Errorf("打开磁盘设备失败: %w", err)
+	}
+	defer func() {
+		if err := reader.Close(); err != nil {
+			logger.Warn("关闭磁盘设备失败", "err", err)
+		}
+	}()
+	return e.ScanWithReader(reader, mode, callbacks)
+}
+
+// ScanWithReader 与 Scan 相同，但 DiskReader 由调用方提供（已打开）。
+//
+// 给"需要在原始磁盘之上再套一层"的场景用，典型的是 BitLocker：
+//
+//	物理盘 → bitlocker.DecryptingReader（透明解密）→ ScanWithReader
+//
+// 调用方负责 reader 的生命周期（Open/Close 都由调用方掌控）。
+func (e *Engine) ScanWithReader(
+	reader disk.DiskReader,
+	mode types.ScanMode,
+	callbacks ScanCallbacks,
+) (*types.ScanResult, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("reader 不能为 nil")
+	}
+
 	e.mu.Lock()
 	if e.scanning {
 		e.mu.Unlock()
@@ -161,9 +205,11 @@ func (e *Engine) Scan(
 	e.ntfsSources = make(map[string]ntfsRecoverySource)
 	e.exfatSources = make(map[string]exfatRecoverySource)
 	e.fatSources = make(map[string]fatRecoverySource)
+	e.extSources = make(map[string]extRecoverySource)
+	e.apfsSources = make(map[string]apfsRecoverySource)
+	e.hfsplusSources = make(map[string]hfsplusRecoverySource)
 	e.mu.Unlock()
 
-	// 扫描结束时解锁状态
 	defer func() {
 		e.mu.Lock()
 		e.scanning = false
@@ -172,17 +218,6 @@ func (e *Engine) Scan(
 	}()
 
 	startTime := time.Now()
-
-	// 创建 DiskReader 并打开
-	reader := disk.NewReader(drivePath)
-	if err := reader.Open(); err != nil {
-		return nil, fmt.Errorf("打开磁盘设备失败: %w", err)
-	}
-	defer func() {
-		if err := reader.Close(); err != nil {
-			logger.Warn("关闭磁盘设备失败", "err", err)
-		}
-	}()
 
 	e.mu.Lock()
 	e.reader = reader
@@ -282,13 +317,55 @@ func (e *Engine) Scan(
 
 		// 阶段1.6: FAT12/16/32 扫描 (14-15%)——老 U 盘 / 老 SD 卡 / 老相机
 		fatFiles, fatErr := e.runFATScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.0 + p.Percent*0.01
+			p.Percent = 14.0 + p.Percent*0.005
 			safeProgress(p)
 		}, safeFound)
 		if fatErr != nil {
 			logger.Warn("FAT 扫描失败或未发现 FAT 分区", "err", fatErr)
 		} else {
 			allFiles = append(allFiles, fatFiles...)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
+
+		// 阶段1.7: ext2/3/4 扫描 (14.5-14.7%)——Linux/Android 设备
+		extFiles, extErr := e.runEXTScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 14.5 + p.Percent*0.002
+			safeProgress(p)
+		}, safeFound)
+		if extErr != nil {
+			logger.Warn("ext 扫描失败或未发现 ext 分区", "err", extErr)
+		} else {
+			allFiles = append(allFiles, extFiles...)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
+
+		// 阶段1.8: APFS 卷文件枚举（macOS / iOS 系统盘）
+		apfsFiles, apfsErr := e.runAPFSScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 14.7 + p.Percent*0.002
+			safeProgress(p)
+		}, safeFound)
+		if apfsErr != nil {
+			logger.Warn("APFS 扫描失败或未发现 APFS", "err", apfsErr)
+		} else {
+			allFiles = append(allFiles, apfsFiles...)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
+
+		// 阶段1.9: HFS+ 卷文件枚举（老 macOS / Time Machine）
+		hfsFiles, hfsErr := e.runHFSPlusScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 14.9 + p.Percent*0.001
+			safeProgress(p)
+		}, safeFound)
+		if hfsErr != nil {
+			logger.Warn("HFS+ 扫描失败或未发现 HFS+", "err", hfsErr)
+		} else {
+			allFiles = append(allFiles, hfsFiles...)
 		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("扫描已取消")
@@ -587,6 +664,114 @@ func (e *Engine) cacheFATSource(id string, src fatRecoverySource) {
 	e.fatSources[id] = src
 }
 
+// runEXTScan 执行 ext2/3/4 扫描 —— Linux/Android 设备的主流文件系统
+func (e *Engine) runEXTScan(
+	ctx context.Context,
+	reader disk.DiskReader,
+	onProgress func(types.ScanProgress),
+	onFound func(*types.RecoveredFile),
+) ([]*types.RecoveredFile, error) {
+	logger.Info("开始 ext2/3/4 扫描")
+
+	scanner := ext4.NewScanner(reader)
+	parts, err := scanner.FindPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []*types.RecoveredFile
+	for pi, p := range parts {
+		if ctx.Err() != nil {
+			return files, ctx.Err()
+		}
+		label := fmt.Sprintf("%s 分区 %d/%d (@0x%X)", p.SuperBlock.Variant, pi+1, len(parts), p.Offset)
+		if onProgress != nil {
+			onProgress(types.ScanProgress{
+				Phase: "ext", Percent: float64(pi) / float64(len(parts)) * 100,
+				CurrentFile: label + ": 遍历目录树",
+			})
+		}
+		perPart := 0
+		err := scanner.ScanFiles(ctx, p, func(ff ext4.FoundFile) {
+			file := extEntryToRecoveredFile(ff)
+			if file == nil {
+				return
+			}
+			files = append(files, file)
+			e.cacheEXTSource(file.ID, extRecoverySource{
+				Inode:      ff.Inode,
+				SuperBlock: ff.SuperBlock,
+				GroupDescs: ff.GroupDescs,
+			})
+			if onFound != nil {
+				onFound(file)
+			}
+			perPart++
+		})
+		if err != nil {
+			logger.Warn("ext 扫描分区失败", "partition", label, "err", err)
+			continue
+		}
+		logger.Info("ext 分区扫描完成", "partition", label, "files", perPart)
+	}
+	if onProgress != nil {
+		onProgress(types.ScanProgress{Phase: "ext", Percent: 100, FilesFound: len(files)})
+	}
+	logger.Info("ext 扫描完成", "files", len(files))
+	return files, nil
+}
+
+func extEntryToRecoveredFile(ff ext4.FoundFile) *types.RecoveredFile {
+	if ff.Inode == nil {
+		return nil
+	}
+	name := filepath.Base(ff.FullPath)
+	if name == "" || name == "/" {
+		return nil
+	}
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
+	category := categorizeByExtension(ext)
+
+	desc := ff.SuperBlock.Variant.String()
+	if ff.IsDeleted {
+		desc += " 已删除"
+	}
+
+	id := fmt.Sprintf("ext_%X_%d", ff.PartitionOff, ff.Inode.Number)
+	return &types.RecoveredFile{
+		ID:           id,
+		Source:       "ext",
+		FileName:     name,
+		Extension:    ext,
+		Category:     category,
+		Size:         ff.Inode.Size,
+		SizeHuman:    types.FormatSize(ff.Inode.Size),
+		Offset:       0, // ext 文件不是连续的，没有"起始字节偏移"概念
+		Confidence:   0.0,
+		IsDeleted:    ff.IsDeleted,
+		OriginalPath: ff.FullPath,
+		ModifiedTime: timePtrIfNonZero(ff.Inode.ModifyTime),
+		CreatedTime:  timePtrIfNonZero(ff.Inode.ChangeTime),
+		Description:  desc,
+	}
+}
+
+func timePtrIfNonZero(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+func (e *Engine) cacheEXTSource(id string, src extRecoverySource) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.extSources == nil {
+		e.extSources = make(map[string]extRecoverySource)
+	}
+	e.extSources[id] = src
+}
+
 // runNTFSScan 执行 NTFS MFT 扫描
 //
 // 使用 ntfs.Scanner 的回调式 API：
@@ -867,6 +1052,9 @@ type RecoverOptions struct {
 	// AllowSameDisk=true 时跳过"恢复目录与源盘同一物理磁盘"的安全检查。
 	// 业界标准实践是拒绝同盘恢复（可能覆盖源扇区）。仅在用户显式勾选"我已了解风险"时才启用。
 	AllowSameDisk bool
+	// ArchiveByExifDate=true 时图片按 EXIF 拍摄日期分子目录（YYYY/MM/）。
+	// 用户找回 5 万张照片后最大需求是分类。
+	ArchiveByExifDate bool
 }
 
 // Recover 恢复选中的文件到输出目录
@@ -1056,7 +1244,14 @@ func (e *Engine) RecoverWithOptions(
 		}
 
 		// 生成输出路径（新版会按置信度/批次分目录；扩展名非法时返回错误直接跳过）
-		outputPath, pathErr := writer.GenerateOutputPath(file, outputDir)
+		// 如果开了 ArchiveByExifDate + 是图片：preview 字节走 EXIF 解析 → 把 outputDir 改成 yyyy/MM 子目录
+		effectiveOutDir := outputDir
+		if opts.ArchiveByExifDate && string(file.Category) == "image" {
+			if sub := exifArchiveSubdir(e.reader, file); sub != "" {
+				effectiveOutDir = filepath.Join(outputDir, sub)
+			}
+		}
+		outputPath, pathErr := writer.GenerateOutputPath(file, effectiveOutDir)
 		if pathErr != nil {
 			failedCount++
 			appendRecord(file, RecoveryStateSkipped, "", "生成输出路径失败: "+pathErr.Error(), started)
@@ -1093,6 +1288,12 @@ func (e *Engine) RecoverWithOptions(
 			writeErr = e.recoverEXFATFile(file, outputPath)
 		case "fat":
 			writeErr = e.recoverFATFile(file, outputPath)
+		case "ext":
+			writeErr = e.recoverEXTFile(file, outputPath)
+		case "apfs":
+			writeErr = e.recoverAPFSFile(file, outputPath)
+		case "hfsplus":
+			writeErr = e.recoverHFSPlusFile(file, outputPath)
 		default:
 			// Carver 来源: 直接偏移读取
 			writeErr = writer.WriteFile(file, outputPath)
@@ -1422,6 +1623,30 @@ func (e *Engine) recoverFATFile(file *types.RecoveredFile, outputPath string) er
 	return writer.WriteFATFile(file, clusters, source.Boot, source.PartitionOffset, outputPath)
 }
 
+// recoverEXTFile 恢复 ext2/3/4 来源文件 —— 走 inode → CollectFileBlocks → 写入
+func (e *Engine) recoverEXTFile(file *types.RecoveredFile, outputPath string) error {
+	e.mu.RLock()
+	source, ok := e.extSources[file.ID]
+	writer := e.writer
+	reader := e.reader
+	e.mu.RUnlock()
+
+	if writer == nil {
+		return fmt.Errorf("写入器未初始化")
+	}
+	if !ok || source.Inode == nil || source.SuperBlock == nil {
+		return fmt.Errorf("ext 恢复源已丢失 (ID=%s)", file.ID)
+	}
+	if reader == nil {
+		return fmt.Errorf("磁盘 reader 未初始化")
+	}
+	ranges, err := ext4.CollectFileBlocks(reader, source.SuperBlock, source.Inode)
+	if err != nil {
+		return fmt.Errorf("收集 ext 文件块失败: %w", err)
+	}
+	return writer.WriteEXTFile(file, ranges, source.SuperBlock, outputPath)
+}
+
 // Stop 取消正在进行的扫描
 func (e *Engine) Stop() {
 	e.mu.RLock()
@@ -1622,6 +1847,21 @@ func (e *Engine) scanNTFSPartition(
 	})
 	scanner.RebuildDirectoryTree(allEntries)
 
+	// 用 $UsnJrnl 找出"被删除文件的原文件名"清单 —— 即使 MFT entry 已被覆盖，
+	// USN journal 里仍保留删除事件 + 原名 + 时间戳。给用户作为"参考线索"输出。
+	usnDeletedNames := map[string]ntfs.DeletedFileEvent{} // FileName → event
+	e.mu.RLock()
+	rdr := e.reader
+	e.mu.RUnlock()
+	if events, _ := ntfs.ScanDeletedFileNames(rdr, boot, allEntries, 64*1024*1024); len(events) > 0 {
+		logger.Info("USN journal 找回删除文件名", "count", len(events), "partition", partitionLabel)
+		for _, ev := range events {
+			usnDeletedNames[ev.FileName] = ev
+		}
+	}
+	// 给已知 MFT entry 的恢复条目"补"上 USN 删除时间（如果 MFT 没有更准的时间）
+	// + 把 USN 里有但 MFT 已不可恢复的文件作为"提示条目"加进结果
+
 	files := make([]*types.RecoveredFile, 0, len(deletedEntries))
 	for index, entry := range deletedEntries {
 		select {
@@ -1656,10 +1896,45 @@ func (e *Engine) scanNTFSPartition(
 		}
 	}
 
+	// 把"USN journal 里有但 MFT 已经枚举不到"的删除事件作为"线索条目"加入结果
+	mftSeenNames := make(map[string]bool, len(files))
+	for _, f := range files {
+		mftSeenNames[f.FileName] = true
+	}
+	for _, ev := range usnDeletedNames {
+		if mftSeenNames[ev.FileName] {
+			continue
+		}
+		// 这种条目无法直接恢复（没数据 run），但用户可以在 carved 文件里按"原名"找
+		// 配对（比如 carved 文件 file042.heic 大小匹配 IMG_3492.HEIC 的某次删除时间）
+		hint := &types.RecoveredFile{
+			ID:           fmt.Sprintf("usn_%d_%d", partition.Offset, ev.MFTEntry),
+			Source:       "ntfs-usn-hint",
+			FileName:     ev.FileName,
+			Extension:    strings.ToLower(strings.TrimPrefix(filepath.Ext(ev.FileName), ".")),
+			Category:     categorizeByExtension(strings.ToLower(strings.TrimPrefix(filepath.Ext(ev.FileName), "."))),
+			Size:         0,
+			SizeHuman:    "—",
+			Offset:       0,
+			Confidence:   0.0,
+			IsDeleted:    true,
+			OriginalPath: ev.FileName,
+			ModifiedTime: timePtrIfNonZero(ev.DeletedAt),
+			Description:  fmt.Sprintf("USN journal 提示：此文件曾于 %s 被删除（数据可能在 carved 列表里）", ev.DeletedAt.Format("2006-01-02 15:04:05")),
+			IsValid:      false,
+			ValidationMsg: "USN-only 提示：无 MFT 数据 run，无法直接恢复；只是告诉你曾经存在过这个文件名",
+		}
+		files = append(files, hint)
+		if onFound != nil {
+			onFound(hint)
+		}
+	}
+
 	logger.Info("分区扫描完成",
 		"partition", partitionLabel,
 		"entries", len(allEntries),
 		"deleted", len(deletedEntries),
+		"usn_hints", len(usnDeletedNames),
 		"recoverable", len(files))
 	return files, nil
 }

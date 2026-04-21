@@ -8,16 +8,22 @@
 package logging
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
-	once   sync.Once
-	logger *slog.Logger
+	once    sync.Once
+	logger  *slog.Logger
+	logDir  string     // 本次进程日志落盘目录（EnableFileLogging 设置后非空）
+	logFile *os.File   // 当前打开的日志文件
+	logMu   sync.Mutex // 保护 logDir/logFile 的并发设置
 )
 
 // L 返回全局 logger，首次调用时根据环境变量初始化。
@@ -50,5 +56,53 @@ func parseLevel(s string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// EnableFileLogging 把 logger 改为"同时写 stderr + 文件"。
+// dir 是日志目录，按日期滚动：<dir>/data-recovery-YYYY-MM-DD.log。
+// 调用失败（目录不可写）时保留 stderr-only logger，不 panic。
+func EnableFileLogging(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("log dir 为空")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建日志目录失败: %w", err)
+	}
+	name := fmt.Sprintf("data-recovery-%s.log", time.Now().Format("2006-01-02"))
+	fp := filepath.Join(dir, name)
+	f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("打开日志文件失败: %w", err)
+	}
+
+	logMu.Lock()
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+	logFile = f
+	logDir = dir
+	logMu.Unlock()
+
+	mw := io.MultiWriter(os.Stderr, f)
+	SetDefault(newLogger(mw))
+	return nil
+}
+
+// LogDir 返回当前日志目录（EnableFileLogging 成功调用过才非空）。
+// 诊断包导出会用到。
+func LogDir() string {
+	logMu.Lock()
+	defer logMu.Unlock()
+	return logDir
+}
+
+// Close 关闭文件 handle，主程序退出时调用。
+func Close() {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
 	}
 }

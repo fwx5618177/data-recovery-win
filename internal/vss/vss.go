@@ -24,14 +24,15 @@ import (
 // ErrNotSupported 非 Windows 平台调用 ListShadows 的固定返回值
 var ErrNotSupported = errors.New("VSS 枚举仅在 Windows 平台可用")
 
-// Shadow 代表一个 Volume Shadow Copy 条目
+// Shadow 代表一个 Volume Shadow Copy 条目。
+// JSON tag 与项目其它类型保持 camelCase 一致（Wails 默认输出 PascalCase，显式加 tag 保统一）。
 type Shadow struct {
-	ID                string    // GUID
-	DevicePath        string    // \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN
-	OriginatingMachine string   // 创建这个快照的机器名
-	ServiceMachine    string    // 持有这个快照的机器名
-	OriginalVolume    string    // 快照来源的卷，如 \\?\Volume{...}\ 或 C:\
-	CreatedAt         time.Time // 创建时间
+	ID                 string    `json:"id"`                 // GUID
+	DevicePath         string    `json:"devicePath"`         // \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN
+	OriginatingMachine string    `json:"originatingMachine"` // 创建这个快照的机器名
+	ServiceMachine     string    `json:"serviceMachine"`     // 持有这个快照的机器名
+	OriginalVolume     string    `json:"originalVolume"`     // 快照来源的卷，如 \\?\Volume{...}\ 或 C:\
+	CreatedAt          time.Time `json:"createdAt"`          // 创建时间
 }
 
 // ListShadows 枚举本地 Windows 的所有 VSS 快照。

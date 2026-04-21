@@ -14,6 +14,7 @@ import (
 
 	"data-recovery/internal/disk"
 	"data-recovery/internal/exfat"
+	"data-recovery/internal/ext4"
 	"data-recovery/internal/fat"
 	"data-recovery/internal/ntfs"
 	"data-recovery/internal/signature"
@@ -676,6 +677,116 @@ func (w *SafeWriter) writeCompressedNTFSFile(
 		"path", outputPath,
 		"size", types.FormatSize(int64(len(decompressed))),
 		"compression_unit_clusters", entry.CompressionUnitClusters,
+		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
+	return nil
+}
+
+// WriteEXTFile 按 ext 文件系统的 PhysicalRange 列表恢复文件
+//
+// 与 NTFS DataRuns / exFAT cluster list 同思路：把每段连续物理块读出 → 写入临时文件 →
+// SHA256 二次校验 → 原子 rename。稀疏段（PhysicalBlock=0）填零。
+func (w *SafeWriter) WriteEXTFile(
+	file *types.RecoveredFile,
+	ranges []ext4.PhysicalRange,
+	sb *ext4.SuperBlock,
+	outputPath string,
+) error {
+	if file == nil || sb == nil {
+		return fmt.Errorf("参数无效")
+	}
+	if file.Size <= 0 {
+		return fmt.Errorf("文件大小无效: %d", file.Size)
+	}
+	if len(ranges) == 0 {
+		return fmt.Errorf("ext PhysicalRange 列表为空")
+	}
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	tmpPath := outputPath + ".tmp"
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writeHasher := sha256.New()
+	totalWritten := int64(0)
+	remaining := file.Size
+
+	for _, r := range ranges {
+		if remaining <= 0 {
+			break
+		}
+		segLen := int64(r.Length) * sb.BlockSize
+		if segLen > remaining {
+			segLen = remaining
+		}
+
+		var data []byte
+		if r.PhysicalBlock == 0 {
+			data = make([]byte, segLen) // sparse → 全零
+		} else {
+			data = make([]byte, segLen)
+			n, err := w.reader.ReadAt(data, sb.BlockToByteOffset(r.PhysicalBlock))
+			if err != nil && n == 0 {
+				return fmt.Errorf("读 ext 物理块 %d 失败: %w", r.PhysicalBlock, err)
+			}
+			data = data[:n]
+		}
+
+		written, err := tmpFile.Write(data)
+		if err != nil {
+			return fmt.Errorf("写临时文件失败: %w", err)
+		}
+		writeHasher.Write(data[:written])
+		totalWritten += int64(written)
+		remaining -= int64(written)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	sizeMismatch := totalWritten != file.Size
+	writeSHA := writeHasher.Sum(nil)
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return err
+	}
+	cleanupTmp = false
+
+	verifySHA, err := fileSHA256(outputPath)
+	if err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+	if !sha256Equal(writeSHA, verifySHA) {
+		os.Remove(outputPath)
+		return fmt.Errorf("ext 文件 SHA256 校验失败")
+	}
+
+	if sizeMismatch {
+		return &PartialWriteError{OutputPath: outputPath, Expected: file.Size, Written: totalWritten}
+	}
+
+	file.SHA256 = hex.EncodeToString(writeSHA)
+	applyTimestamps(outputPath, file)
+	logger.Info("ext 文件写入成功",
+		"path", outputPath,
+		"size", types.FormatSize(totalWritten),
+		"ranges", len(ranges),
 		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
 	return nil
 }

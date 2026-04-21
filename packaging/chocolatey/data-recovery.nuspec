@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>data-recovery</id>
+    <version>VERSION_PLACEHOLDER</version>
+    <packageSourceUrl>https://github.com/your-github-owner/data-recovery</packageSourceUrl>
+    <owners>Data Recovery Team</owners>
+    <title>Data Recovery (Open Source)</title>
+    <authors>Data Recovery Team</authors>
+    <projectUrl>https://github.com/your-github-owner/data-recovery</projectUrl>
+    <licenseUrl>https://github.com/your-github-owner/data-recovery/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/your-github-owner/data-recovery</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/your-github-owner/data-recovery/issues</bugTrackerUrl>
+    <description>Open-source cross-platform data recovery tool — NTFS / APFS / HFS+ / BitLocker / RAID.</description>
+    <summary>Recover data from lost / formatted / encrypted drives.</summary>
+    <tags>data-recovery undelete forensics bitlocker ntfs apfs</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

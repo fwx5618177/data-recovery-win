@@ -304,6 +304,40 @@ func (db *SignatureDB) initSignatures() {
 		MaxSize: 4 * GB,
 	})
 
+	// HEIC / HEIF - Apple iPhone（iOS 11+ 默认）/ 现代相机用的 HEVC 静态图像。
+	// 同样是 ftyp ISO BMFF 容器，通过 brand 字段区分（"heic" / "heix" / "mif1" / "msf1"）。
+	// brand 在 ftyp atom 内部 offset 8 起 4 字节；签名包括 ftyp_size + "ftyp" + brand 共 12 字节。
+	// 覆盖最常见的 size = 24/32 两种 ftyp 头：
+	db.add(&types.FileSignature{
+		Extension:   "heic",
+		Description: "HEIC/HEIF 图像（iPhone 默认）",
+		Category:    types.CategoryImage,
+		Headers: [][]byte{
+			hex("000000186674797068656963"), // size=24 + ftyp + "heic"
+			hex("000000186674797068656978"), // "heix"
+			hex("00000018667479706d696631"), // "mif1"
+			hex("00000018667479706d736631"), // "msf1"
+			hex("000000206674797068656963"), // size=32 + ftyp + "heic"
+			hex("000000206674797068656978"), // size=32 + "heix"
+			hex("00000020667479706d696631"), // size=32 + "mif1"
+			hex("000000186674797068657663"), // "hevc" (HEVC 视频，iOS 录像)
+			hex("000000186674797068657678"), // "hevx"
+		},
+		MaxSize: 256 * MB, // HEIC 单图通常 1-5MB，但带 burst / live photo 可能大
+	})
+	// AVIF - AV1 静态图像，HEIC 的开源对手，Chrome / Firefox 已支持
+	db.add(&types.FileSignature{
+		Extension:   "avif",
+		Description: "AVIF 图像（AV1）",
+		Category:    types.CategoryImage,
+		Headers: [][]byte{
+			hex("00000020667479706176696600000000"),     // size=32 + ftyp + "avif"
+			hex("000000186674797061766966"),              // size=24 + ftyp + "avif"
+			hex("0000001c667479706176696600000000"),     // size=28 + ftyp + "avif"
+		},
+		MaxSize: 256 * MB,
+	})
+
 	// MKV - Matroska 视频容器，基于 EBML (Extensible Binary Meta Language)
 	db.add(&types.FileSignature{
 		Extension:   "mkv",
@@ -544,4 +578,231 @@ func (db *SignatureDB) initSignatures() {
 		},
 		MaxSize: 4 * GB,
 	})
+
+	// ==================== 第三轮扩展：现代用户内容 + 取证常见格式 ====================
+	//
+	// 都满足"有专用 detect 函数 OR 有可靠 footer"的硬约束。
+	// 加 RAW 相机格式是因为摄影师用户的核心需求；加邮件/聊天/笔记是个人数据黄金类型。
+
+	// FLV - Flash 视频，老视频网站资源（B 站早期、土豆等）
+	db.add(&types.FileSignature{
+		Extension:   "flv",
+		Description: "Flash Video (FLV)",
+		Category:    types.CategoryVideo,
+		Headers: [][]byte{
+			hex("464c5601"), // "FLV\x01"
+		},
+		MaxSize: 2 * GB,
+	})
+
+	// SQLite Encrypted (SQLCipher) - 数据库的加密变体，微信备份用
+	// 没有可靠的开头 magic（加密了），靠扩展名 NTFS / ext 路径识别即可，不雕刻
+
+	// JFIF / JPG 已覆盖；JPEG 2000 (.jp2) 单独
+	db.add(&types.FileSignature{
+		Extension:   "jp2",
+		Description: "JPEG 2000 图片",
+		Category:    types.CategoryImage,
+		Headers: [][]byte{
+			hex("0000000c6a5020200d0a870a"), // JPEG 2000 signature box
+		},
+		MaxSize: 100 * MB,
+	})
+
+	// HDR / EXR 高动态范围照片
+	db.add(&types.FileSignature{
+		Extension:   "exr",
+		Description: "OpenEXR 高动态范围图",
+		Category:    types.CategoryImage,
+		Headers: [][]byte{
+			hex("762f3101"), // "v/1\x01"
+		},
+		MaxSize: 500 * MB,
+	})
+
+	// PCAP / PCAPNG 网络抓包文件（取证场景）
+	db.add(&types.FileSignature{
+		Extension:   "pcap",
+		Description: "PCAP 网络抓包",
+		Category:    types.CategoryDatabase,
+		Headers: [][]byte{
+			hex("d4c3b2a1"), // 标准字节序
+			hex("a1b2c3d4"), // 反字节序
+			hex("4d3cb2a1"), // PCAPng nano-second
+			hex("a1b23c4d"), // PCAPng 反序
+		},
+		MaxSize: 10 * GB,
+	})
+
+	// PCAPNG - 新一代 PCAP（Wireshark 默认）
+	db.add(&types.FileSignature{
+		Extension:   "pcapng",
+		Description: "PCAP-NG 网络抓包",
+		Category:    types.CategoryDatabase,
+		Headers: [][]byte{
+			hex("0a0d0d0a"), // Section Header Block
+		},
+		MaxSize: 10 * GB,
+	})
+
+	// Sketch / Figma / XD 设计师文件 —— 都是 ZIP，靠 ZIP 子分类识别，此处不再单列
+
+	// === Outlook / 邮件家族（个人通信关键）===
+	// PST 已加；MSG（单封邮件）也是 OLE2，靠 OLE2 子分类
+	// EML 是文本，无可靠 magic，靠 NTFS 文件名识别
+
+	// === 笔记应用 ===
+
+	// EVT / EVTX - Windows 事件日志（取证场景）
+	db.add(&types.FileSignature{
+		Extension:   "evtx",
+		Description: "Windows 事件日志 (EVTX)",
+		Category:    types.CategoryDatabase,
+		Headers: [][]byte{
+			hex("456c6646696c6500"), // "ElfFile\x00"
+		},
+		MaxSize: 1 * GB,
+	})
+
+	// === 聊天 / 通讯 ===
+
+	// VCF - vCard 联系人卡片
+	db.add(&types.FileSignature{
+		Extension:   "vcf",
+		Description: "vCard 联系人",
+		Category:    types.CategoryDocument,
+		Headers: [][]byte{
+			hex("424547494e3a56434152440d0a"), // "BEGIN:VCARD\r\n"
+			hex("424547494e3a56434152440a"),   // "BEGIN:VCARD\n"
+		},
+		Footers: [][]byte{
+			hex("454e443a56434152440d0a"), // "END:VCARD\r\n"
+			hex("454e443a56434152440a"),
+		},
+		MaxSize: 10 * MB,
+	})
+
+	// ICS - iCalendar 日历
+	db.add(&types.FileSignature{
+		Extension:   "ics",
+		Description: "iCalendar 日历",
+		Category:    types.CategoryDocument,
+		Headers: [][]byte{
+			hex("424547494e3a5643414c454e4441520d0a"), // "BEGIN:VCALENDAR\r\n"
+			hex("424547494e3a5643414c454e4441520a"),
+		},
+		Footers: [][]byte{
+			hex("454e443a5643414c454e4441520d0a"),
+			hex("454e443a5643414c454e4441520a"),
+		},
+		MaxSize: 50 * MB,
+	})
+
+	// === RAW 相机底片：CR2 已通过 TIFF classifyTIFF 处理；
+	// 其他相机厂商 RAW 也都是 TIFF 衣服 ===
+
+	// === 视频 ===
+
+	// MTS / M2TS - AVCHD 摄影机录像
+	db.add(&types.FileSignature{
+		Extension:   "m2ts",
+		Description: "AVCHD 摄影机视频 (M2TS)",
+		Category:    types.CategoryVideo,
+		Headers: [][]byte{
+			hex("4742470000"),     // BD M2TS sync byte
+			hex("4742470180"),     // 同上变体
+		},
+		MaxSize: 10 * GB,
+	})
+
+	// === 已备份 / 镜像文件 ===
+
+	// VHD - 虚拟硬盘
+	db.add(&types.FileSignature{
+		Extension:   "vhd",
+		Description: "Virtual Hard Disk (VHD)",
+		Category:    types.CategoryArchive,
+		Headers: [][]byte{
+			hex("636f6e6563746978"), // "conectix"
+		},
+		MaxSize: 10 * GB,
+	})
+
+	// VMDK - VMware 虚拟磁盘
+	db.add(&types.FileSignature{
+		Extension:   "vmdk",
+		Description: "VMware 虚拟磁盘 (VMDK)",
+		Category:    types.CategoryArchive,
+		Headers: [][]byte{
+			hex("4b444d56"), // "KDMV"
+		},
+		MaxSize: 100 * GB,
+	})
+
+	// QCOW2 - QEMU 虚拟磁盘
+	db.add(&types.FileSignature{
+		Extension:   "qcow2",
+		Description: "QEMU QCOW2 虚拟磁盘",
+		Category:    types.CategoryArchive,
+		Headers: [][]byte{
+			hex("514649fb"), // "QFI\xFB"
+		},
+		MaxSize: 100 * GB,
+	})
+
+	// ISO 9660 - 光盘镜像
+	// magic 在 offset 0x8001 处的 "CD001"，本工具不在偏移 0 处雕刻——
+	// 多数 ISO 是从盘 dump 出来的，NTFS/ext 文件名识别即可
+
+	// === 字体 / 设计资源 ===
+	// 有需要可加 TTF (offset 0 = 0x00010000) / OTF (offset 0 = "OTTO")，
+	// 但对个人数据恢复价值低，跳过避免噪声
+
+	// === 加密容器 ===
+	// VeraCrypt / TrueCrypt 容器没有可见 magic（设计如此），雕刻不到
+
+	// === 数据库 ===
+
+	// LevelDB / RocksDB 用 SST 文件，不雕刻（结构性文件，独立无意义）
+
+	// MongoDB BSON 文件
+	db.add(&types.FileSignature{
+		Extension:   "bson",
+		Description: "BSON 文档（MongoDB 导出）",
+		Category:    types.CategoryDatabase,
+		Headers: [][]byte{
+			// BSON 文档以 4 字节 LE 长度起头，没有固定 magic；
+			// 不可靠雕刻；放弃
+		},
+		MaxSize: 0,
+	})
+
+	// === 程序员资产 ===
+
+	// SQLite WAL（write-ahead log）
+	db.add(&types.FileSignature{
+		Extension:   "wal",
+		Description: "SQLite WAL 日志",
+		Category:    types.CategoryDatabase,
+		Headers: [][]byte{
+			hex("377f0682"), // 大端值 0x377F0682
+			hex("377f0683"),
+		},
+		MaxSize: 500 * MB,
+	})
+
+	// === 视频流 ===
+
+	// MTS already added above
+
+	// === 工程图纸 / CAD ===
+
+	// AutoCAD DWG already in DB; STEP / STL skip（不常见个人数据）
+
+	// === 邮件 / 联系人附件 ===
+
+	// EML 已说明（文本类无 magic，靠扩展名）
+
+	// === 现代浏览器存储 ===
+	// IndexedDB / LocalStorage 都是 LevelDB / SQLite，结构性强但单独 carve 价值不大
 }

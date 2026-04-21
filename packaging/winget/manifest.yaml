@@ -1,0 +1,35 @@
+# winget manifest 模板（v1.6 schema）— 提交到 microsoft/winget-pkgs。
+# 三段：installer / locale / version；这里合并到一个文件做参考，实际提交需要拆。
+PackageIdentifier: YourGithubOwner.DataRecovery
+PackageVersion: VERSION_PLACEHOLDER
+PackageLocale: en-US
+Publisher: Data Recovery Open Source
+PublisherUrl: https://github.com/your-github-owner/data-recovery
+PublisherSupportUrl: https://github.com/your-github-owner/data-recovery/issues
+PackageName: Data Recovery
+PackageUrl: https://github.com/your-github-owner/data-recovery
+License: MIT
+LicenseUrl: https://github.com/your-github-owner/data-recovery/blob/main/LICENSE
+ShortDescription: Open-source cross-platform data recovery (NTFS/APFS/HFS+/BitLocker/RAID).
+Tags:
+  - data-recovery
+  - undelete
+  - bitlocker
+  - ntfs
+  - forensics
+ManifestType: singleton
+ManifestVersion: 1.6.0
+
+Installers:
+  - Architecture: x64
+    InstallerType: portable
+    InstallerUrl: https://github.com/your-github-owner/data-recovery/releases/download/vVERSION_PLACEHOLDER/DataRecovery-windows-amd64.exe
+    InstallerSha256: SHA256_PLACEHOLDER
+    Commands:
+      - data-recovery
+  - Architecture: arm64
+    InstallerType: portable
+    InstallerUrl: https://github.com/your-github-owner/data-recovery/releases/download/vVERSION_PLACEHOLDER/DataRecovery-windows-arm64.exe
+    InstallerSha256: SHA256_ARM64_PLACEHOLDER
+    Commands:
+      - data-recovery

@@ -17,6 +17,8 @@ import {
   normalizeRecoveryCompletion,
 } from "./recovery-helpers";
 import { IconAlertTriangle, IconShield } from "./icons";
+import { t, getLocale, setLocale, onLocaleChange, AVAILABLE_LOCALES } from "./i18n";
+import { getTheme, setTheme, onThemeChange, AVAILABLE_THEMES } from "./theme";
 import "./style.css";
 import "./App.css";
 
@@ -105,9 +107,16 @@ export default function App() {
   // 仅在 Windows 平台才有数据；非 Windows 一律空数组
   const [shadows, setShadows] = useState([]);
 
+  // ------------------------- 加密卷预警 -------------------------
+  // BitLocker / FileVault / APFS 卷：本工具不解密，仅提示存在
+  const [encryptedVolumes, setEncryptedVolumes] = useState([]);
+
   // ------------------------- 扫描态 -------------------------
   const [scanActive, setScanActive] = useState(false);
   const [scanProgress, setScanProgress] = useState(INITIAL_SCAN_PROGRESS);
+  // BitLocker 解锁态：派生 1M 次 SHA-256 的进度 + "已解锁"提示
+  // null 表示没在解锁；对象含 { phase: "deriving"|"unlocked"|"error", done, total, info, volume }
+  const [bitlockerState, setBitlockerState] = useState(null);
   const [files, setFiles] = useState([]);
   // 为了在 10k+ 文件规模下避免每次事件都重复 map.findIndex，用 Map 做索引
   const fileIndexRef = useRef(new Map());
@@ -174,7 +183,18 @@ export default function App() {
     setDriveLoadError("");
     try {
       const list = await wailsApp.GetDrives();
-      setDrives(Array.isArray(list) ? list : []);
+      const drives = Array.isArray(list) ? list : [];
+      setDrives(drives);
+      // 后台并行扫每块盘的加密卷预警；失败静默
+      if (wailsApp.ScanEncryptedVolumes && drives.length > 0) {
+        Promise.all(drives.map((d) =>
+          wailsApp.ScanEncryptedVolumes(d.path).catch(() => [])
+        )).then((results) => {
+          const flat = [];
+          results.forEach((r) => { if (Array.isArray(r)) flat.push(...r); });
+          setEncryptedVolumes(flat);
+        }).catch(() => {});
+      }
     } catch (err) {
       setDrives([]);
       setDriveLoadError(getFriendlyActionError("读取磁盘列表", err));
@@ -302,6 +322,52 @@ export default function App() {
       alert(getFriendlyActionError("恢复", msg));
     });
 
+    // OS 级文件拖拽：用户把磁盘镜像 / .img / .raw / .dd 拖到窗口任意位置
+    // → 后端 OnFileDrop → "files:dropped" 事件
+    const offFileDrop = wailsRuntime.EventsOn("files:dropped", (paths) => {
+      if (!Array.isArray(paths) || paths.length === 0) return;
+      const path = paths[0];
+      const lower = String(path).toLowerCase();
+      // 只接受常见镜像扩展，避免用户拖个 .docx 触发"扫描该文件"
+      const looksLikeImage = /\.(img|raw|dd|iso|dmg|vhd|vhdx|vmdk|001|e01)$/i.test(lower);
+      if (!looksLikeImage) {
+        if (typeof globalThis.alert === "function") {
+          globalThis.alert(`不支持拖入 "${path.split(/[\\/]/).pop()}"。\n` +
+            `请拖入磁盘镜像文件 (.img / .raw / .dd / .iso / .dmg / .vhd / .vmdk / .001 / .e01)`);
+        }
+        return;
+      }
+      const fakeDrive = { path, name: `镜像: ${path.split(/[\\/]/).pop()}` };
+      setSelectedDrive(fakeDrive);
+      resetScanState();
+      setScanActive(true);
+      setCurrentPage("workbench");
+      wailsApp?.StartScan?.(path, DEFAULT_SCAN_MODE).catch((err) => {
+        setScanActive(false);
+        alert(getFriendlyActionError("启动镜像扫描", err));
+        setCurrentPage("welcome");
+      });
+    });
+
+    const offBLDerive = wailsRuntime.EventsOn("bitlocker:keyDeriving", (p) => {
+      // p: { done, total } — 每 ~8k 次 iter 一条
+      setBitlockerState((prev) => ({
+        phase: "deriving",
+        done: Number(p?.done || 0),
+        total: Number(p?.total || 1048576),
+        volume: prev?.volume,
+      }));
+    });
+    const offBLUnlocked = wailsRuntime.EventsOn("bitlocker:unlocked", (info) => {
+      setBitlockerState((prev) => ({
+        phase: "unlocked",
+        done: 1048576,
+        total: 1048576,
+        info,
+        volume: prev?.volume,
+      }));
+    });
+
     const offUpdate = wailsRuntime.EventsOn("update:available", (payload) => {
       if (payload?.hasUpdate) setUpdateInfo(payload);
     });
@@ -319,11 +385,55 @@ export default function App() {
 
     return () => {
       [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
+       offFileDrop, offBLDerive, offBLUnlocked,
        offUpdate, offDownloadProg, offDownloaded, offDownloadErr]
         .filter((fn) => typeof fn === "function")
         .forEach((fn) => fn());
     };
   }, [bridgeState, wailsRuntime, wailsApp, queueFile, flushPending]);
+
+  // 全局键盘快捷键
+  // - Esc: 关弹窗 / 停扫描
+  // - Ctrl+/Cmd+F: 聚焦"搜索文件名"输入框
+  // - Ctrl+/Cmd+A: 全选当前可见文件（仅 workbench 页 + 目标不在 input/textarea 时）
+  useEffect(() => {
+    function handler(e) {
+      const inEditable = e.target instanceof HTMLElement &&
+        (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+
+      // Esc: 让任意 modal 自己消失（通过 keydown 冒泡）—— 这里仅处理"无 modal 时停扫描"
+      if (e.key === "Escape" && !inEditable && scanActive) {
+        e.preventDefault();
+        if (globalThis.confirm?.("停止当前扫描？")) {
+          stopScan();
+        }
+        return;
+      }
+
+      // Ctrl/Cmd+F：聚焦搜索框
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && currentPage === "workbench") {
+        const input = globalThis.document?.querySelector(".file-table-search input");
+        if (input) {
+          e.preventDefault();
+          input.focus();
+          if (input.select) input.select();
+        }
+        return;
+      }
+
+      // Ctrl/Cmd+A：当前页全选（仅 workbench；不打断输入框里的 select-all）
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" &&
+          currentPage === "workbench" && !inEditable) {
+        const allBtn = globalThis.document?.querySelector("[data-shortcut='select-all-visible']");
+        if (allBtn) {
+          e.preventDefault();
+          allBtn.click();
+        }
+      }
+    }
+    globalThis.addEventListener("keydown", handler);
+    return () => globalThis.removeEventListener("keydown", handler);
+  }, [scanActive, currentPage, stopScan]);
 
   // 启动后拉一次 pending 状态；如果上一次会话下载好了，进入本次直接展示"重启以应用"
   useEffect(() => {
@@ -363,16 +473,16 @@ export default function App() {
 
   // 扫描一个 VSS 快照设备 —— 后端 NewReader 已识别 \\?\GLOBALROOT\... 路径
   const scanShadow = useCallback(async (shadow) => {
-    if (!shadow?.DevicePath || !wailsApp?.StartScan) return;
+    if (!shadow?.devicePath || !wailsApp?.StartScan) return;
     setSelectedDrive({
-      path: shadow.DevicePath,
-      name: `VSS 快照 (${shadow.CreatedAt ? new Date(shadow.CreatedAt).toLocaleString() : "未知时间"})`,
+      path: shadow.devicePath,
+      name: `VSS 快照 (${shadow.createdAt ? new Date(shadow.createdAt).toLocaleString() : "未知时间"})`,
     });
     resetScanState();
     setScanActive(true);
     setCurrentPage("workbench");
     try {
-      await wailsApp.StartScan(shadow.DevicePath, DEFAULT_SCAN_MODE);
+      await wailsApp.StartScan(shadow.devicePath, DEFAULT_SCAN_MODE);
     } catch (err) {
       setScanActive(false);
       alert(getFriendlyActionError("启动 VSS 扫描", err));
@@ -410,6 +520,69 @@ export default function App() {
     if (!wailsApp?.StopScan) return;
     wailsApp.StopScan().catch(() => {});
     setScanActive(false);
+  }, [wailsApp]);
+
+  // 用 TPM 卷的内存镜像（hiberfil.sys / dump）解锁并扫描
+  const unlockBitLockerMemoryAndScan = useCallback(async (vol, memImagePath) => {
+    if (!vol || !memImagePath || !wailsApp?.UnlockBitLockerWithMemoryImage) return;
+    setSelectedDrive({
+      path: vol.drivePath,
+      name: `BitLocker (TPM via ${memImagePath.split(/[\\/]/).pop()})`,
+    });
+    setBitlockerState({ phase: "deriving", done: 0, total: 1, volume: vol });
+    resetScanState();
+    setScanActive(true);
+    setCurrentPage("workbench");
+    try {
+      await wailsApp.UnlockBitLockerWithMemoryImage(
+        vol.drivePath,
+        Number(vol.offset || 0).toString(16),
+        memImagePath,
+        DEFAULT_SCAN_MODE,
+      );
+    } catch (err) {
+      setScanActive(false);
+      setBitlockerState({ phase: "error", error: getErrorText(err) || "解锁失败", volume: vol });
+      alert(getFriendlyActionError("BitLocker 内存解锁", err));
+      setCurrentPage("welcome");
+    }
+  }, [wailsApp]);
+
+  // 解锁 BitLocker 卷并把解密 reader 喂给扫描引擎（recovery key → VMK → FVEK → NTFS）
+  // 参数 vol 来自 ScanEncryptedVolumes 的结果；key 是用户从 48 位 recovery key 对话框输入的
+  const unlockBitLockerAndScan = useCallback(async (vol, recoveryKey) => {
+    if (!vol || !recoveryKey || !wailsApp?.UnlockBitLockerAndScan) return;
+    const fakeDrive = {
+      path: vol.drivePath,
+      name: `BitLocker · ${vol.drivePath} @ 0x${Number(vol.offset || 0).toString(16)}`,
+    };
+    setSelectedDrive(fakeDrive);
+    setBitlockerState({
+      phase: "deriving",
+      done: 0,
+      total: 1048576,
+      volume: vol,
+    });
+    resetScanState();
+    setScanActive(true);
+    setCurrentPage("workbench");
+    try {
+      await wailsApp.UnlockBitLockerAndScan(
+        vol.drivePath,
+        Number(vol.offset || 0).toString(16),
+        recoveryKey,
+        DEFAULT_SCAN_MODE,
+      );
+    } catch (err) {
+      setScanActive(false);
+      setBitlockerState({
+        phase: "error",
+        error: getErrorText(err) || "解锁失败",
+        volume: vol,
+      });
+      alert(getFriendlyActionError("BitLocker 解锁 / 扫描", err));
+      setCurrentPage("welcome");
+    }
   }, [wailsApp]);
 
   /* =====================================================================
@@ -612,6 +785,17 @@ export default function App() {
             );
           })}
         </div>
+        <div className="topbar-actions no-drag" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <ThemeSwitcher />
+          <LocaleSwitcher />
+          <button
+            className="btn btn--sm btn--ghost"
+            title={t("diag.export")}
+            onClick={() => exportDiagnosticBundle(wailsApp)}
+          >
+            🛠 {t("diag.export")}
+          </button>
+        </div>
       </header>
 
       <UpdateBanner
@@ -705,6 +889,9 @@ export default function App() {
             onDiscardSession={discardSession}
             shadows={shadows}
             onScanShadow={scanShadow}
+            encryptedVolumes={encryptedVolumes}
+            onUnlockBitLocker={unlockBitLockerAndScan}
+            onUnlockBitLockerMemory={unlockBitLockerMemoryAndScan}
           />
         )}
 
@@ -713,6 +900,7 @@ export default function App() {
             selectedDrive={selectedDrive}
             scanActive={scanActive}
             scanProgress={scanProgress}
+            bitlockerState={bitlockerState}
             files={files}
             outputDir={outputDir}
             outputValidation={outputValidation}
@@ -815,6 +1003,76 @@ function UpdateBanner({
   }
 
   return null;
+}
+
+/**
+ * ThemeSwitcher —— 顶栏 light / dark / system 切换。
+ */
+function ThemeSwitcher() {
+  const [th, setTh] = React.useState(() => getTheme());
+  React.useEffect(() => onThemeChange((v) => setTh(v)), []);
+  return (
+    <select
+      value={th}
+      onChange={(e) => setTheme(e.target.value)}
+      className="btn btn--sm btn--ghost"
+      style={{ paddingLeft: 6, paddingRight: 6 }}
+      title="主题 / Theme"
+    >
+      {AVAILABLE_THEMES.map((t) => (
+        <option key={t} value={t}>
+          {t === "system" ? "🌗 跟随系统" : t === "dark" ? "🌙 深色" : "☀️ 浅色"}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/**
+ * LocaleSwitcher —— 顶栏右侧"中 / EN"切换。
+ * 切换后所有用 t() 的文案立即更新；存进 localStorage 下次启动还原。
+ */
+function LocaleSwitcher() {
+  const [loc, setLoc] = React.useState(() => getLocale());
+  React.useEffect(() => onLocaleChange((l) => setLoc(l)), []);
+  return (
+    <select
+      value={loc}
+      onChange={(e) => setLocale(e.target.value)}
+      className="btn btn--sm btn--ghost"
+      style={{ paddingLeft: 6, paddingRight: 6 }}
+      title={loc === "zh" ? "切换语言" : "Switch language"}
+    >
+      {AVAILABLE_LOCALES.map((l) => (
+        <option key={l} value={l}>{l === "zh" ? "中文" : "English"}</option>
+      ))}
+    </select>
+  );
+}
+
+/**
+ * exportDiagnosticBundle 让用户一键打包"日志 + session + pending update"成 zip。
+ * 不包含磁盘扇区 / 用户文件 / 密钥。
+ */
+async function exportDiagnosticBundle(wailsApp) {
+  if (!wailsApp?.ExportDiagnosticBundle) return;
+  let notes = "";
+  try {
+    notes = String(globalThis.prompt?.(
+      "可选：简单描述遇到的问题（会写入诊断包，不要含密码 / 个人信息）。直接 OK 跳过。",
+      "",
+    ) || "");
+  } catch {/* no-op */}
+  try {
+    const path = await wailsApp.ExportDiagnosticBundle("", notes);
+    if (typeof globalThis.alert === "function") {
+      globalThis.alert(t("diag.done", { path }));
+    }
+  } catch (err) {
+    if (typeof globalThis.alert === "function") {
+      globalThis.alert("导出诊断包失败: " + (err?.message || err));
+    }
+  }
 }
 
 // pickAssetForPlatform 根据平台名从 release assets 里挑最匹配的那个。

@@ -115,12 +115,73 @@ jobs:
           retention-days: 7
 
   # =============================================================
+  # Linux 打 .deb / .rpm —— 用 nfpm（goreleaser 用的同一个工具）
+  # 把 build job 出的 linux 二进制再打一层包
+  # =============================================================
+  linux-package:
+    name: Linux .deb / .rpm
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DataRecovery-linux-amd64.tar.gz
+          path: linux-bin
+      - name: Extract binary
+        run: |
+          mkdir -p package-staging/usr/bin
+          tar -xzf linux-bin/DataRecovery-linux-amd64.tar.gz -C package-staging/usr/bin
+          chmod +x package-staging/usr/bin/DataRecovery
+      - name: Install nfpm
+        run: |
+          curl -sLo nfpm.tar.gz https://github.com/goreleaser/nfpm/releases/download/v2.39.0/nfpm_2.39.0_Linux_x86_64.tar.gz
+          tar -xzf nfpm.tar.gz nfpm
+          chmod +x nfpm
+      - name: Generate nfpm config
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cat > nfpm.yaml <<EOF
+          name: data-recovery
+          arch: amd64
+          version: $VERSION
+          maintainer: Data Recovery Team
+          description: |
+            Open-source cross-platform data recovery tool —
+            NTFS / FAT / exFAT / ext / APFS / HFS+ / BitLocker / RAID.
+          homepage: https://github.com/${{ github.repository }}
+          license: MIT
+          contents:
+            - src: package-staging/usr/bin/DataRecovery
+              dst: /usr/bin/data-recovery
+              file_info:
+                mode: 0755
+          recommends:
+            - libgtk-3-0
+            - libwebkit2gtk-4.0-37
+          EOF
+      - name: Build .deb
+        run: ./nfpm package -p deb -t data-recovery_${GITHUB_REF_NAME#v}_amd64.deb
+      - name: Build .rpm
+        run: ./nfpm package -p rpm -t data-recovery-${GITHUB_REF_NAME#v}-1.x86_64.rpm
+      - name: Upload .deb / .rpm
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            data-recovery_*.deb
+            data-recovery-*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  # =============================================================
   # 汇总到 GitHub Release —— 单独一个 job 下载所有 artifact 再统一创建，
   # 避免多个 build job 并发写同一个 Release 的竞态。
   # =============================================================
   release:
     name: Publish Release
-    needs: build
+    needs: [build, linux-package]
     runs-on: ubuntu-22.04
     steps:
       - name: Download all artifacts

@@ -22,6 +22,7 @@ import {
   sufficiencyOf,
 } from "../recovery-helpers";
 import { formatSize, formatDuration, formatSpeed, clampPercent } from "../formatters";
+import { t, onLocaleChange } from "../i18n";
 
 const CATEGORY_KEYS = ["image", "document", "video", "audio", "archive", "database", "other"];
 const SOURCE_KEYS = ["ntfs", "carver"];
@@ -36,6 +37,7 @@ export default function Workbench({
   selectedDrive,
   scanActive,
   scanProgress,
+  bitlockerState,
   files,
   outputDir,
   outputValidation,
@@ -46,6 +48,10 @@ export default function Workbench({
   onBackToWelcome,
   onRequestPreview,
 }) {
+  // 订阅 locale 变化让 t() 调用结果重新渲染
+  const [, setLocaleVersion] = useState(0);
+  useEffect(() => onLocaleChange(() => setLocaleVersion((v) => v + 1)), []);
+
   const [keyword, setKeyword] = useState("");
   const [categories, setCategories] = useState(() => new Set()); // 空集合表示"不过滤"
   const [sources, setSources] = useState(() => new Set());
@@ -165,32 +171,32 @@ export default function Workbench({
               {scanActive ? <IconPlay size={16} className="muted" /> : <IconCheckCircle size={16} style={{ color: "var(--success)" }} />}
               <span className="progress-strip__phase-label">{phaseLabel}</span>
               <span className="muted" style={{ fontSize: 12 }}>
-                源盘：<span className="mono">{getDriveLabel(selectedDrive)}</span>
+                {t("wb.source")}：<span className="mono">{getDriveLabel(selectedDrive)}</span>
               </span>
             </div>
             <div className="progress-strip__stats">
-              <span className="progress-strip__stat"><b>{files.length.toLocaleString()}</b> 已发现</span>
+              <span className="progress-strip__stat"><b>{files.length.toLocaleString()}</b> {t("common.found")}</span>
               {highPriorityCount > 0 && (
                 <span
                   className="progress-strip__stat"
                   style={{ color: "var(--success)" }}
-                  title="来自 Windows.old 或 Users/ 的文件 —— 最可能是原主人个人数据"
+                  title="Windows.old / Users — likely the original owner's personal data"
                 >
-                  <b>{highPriorityCount.toLocaleString()}</b> 高优先级
+                  <b>{highPriorityCount.toLocaleString()}</b> {t("common.highPriority")}
                 </span>
               )}
               <span className="progress-strip__stat"><b>{formatSize(scanProgress?.bytesScanned || 0)}</b> / {formatSize(scanProgress?.totalBytes || 0)}</span>
-              <span className="progress-strip__stat"><b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
-              {scanActive && <span className="progress-strip__stat">剩余 <b>{formatDuration(scanProgress?.eta)}</b></span>}
+              <span className="progress-strip__stat">{t("wb.speed")}: <b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
+              {scanActive && <span className="progress-strip__stat">{t("wb.eta")} <b>{formatDuration(scanProgress?.eta)}</b></span>}
             </div>
             <div className="btn-group">
               {scanActive ? (
                 <button className="btn btn--danger btn--sm" onClick={onStopScan}>
-                  <IconStop size={14} /> 停止扫描
+                  <IconStop size={14} /> {t("scan.stop")}
                 </button>
               ) : (
                 <button className="btn btn--ghost btn--sm" onClick={onBackToWelcome}>
-                  <IconRefresh size={14} /> 换一块盘
+                  <IconRefresh size={14} /> {t("scan.changeDrive")}
                 </button>
               )}
             </div>
@@ -201,6 +207,41 @@ export default function Workbench({
           {scanProgress?.currentFile && (
             <div className="muted mono" style={{ fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {scanProgress.currentFile}
+            </div>
+          )}
+          {bitlockerState && bitlockerState.phase === "deriving" && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "6px 10px",
+                fontSize: 12,
+                borderRadius: "var(--radius-md)",
+                background: "var(--accent-soft)",
+                border: "1px solid var(--border-strong)",
+              }}
+            >
+              🔑 BitLocker 正在从 recovery key 派生卷主密钥（1M 次 SHA-256）：
+              {" "}
+              <b>
+                {Math.round((bitlockerState.done || 0) / Math.max(1, bitlockerState.total || 1048576) * 100)}%
+              </b>
+              {" — 派生完成后会自动进入 NTFS 扫描。"}
+            </div>
+          )}
+          {bitlockerState && bitlockerState.phase === "unlocked" && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "6px 10px",
+                fontSize: 12,
+                borderRadius: "var(--radius-md)",
+                background: "var(--success-soft, var(--accent-soft))",
+                border: "1px solid var(--border-strong)",
+              }}
+            >
+              ✅ BitLocker 已解锁
+              {bitlockerState.info?.encryptionMethod ? ` · 加密方法 ${bitlockerState.info.encryptionMethod}` : ""}
+              {" —— 解密在内存中透明完成，源盘和密钥均未落盘。"}
             </div>
           )}
           {systemFileCount > 0 && (
@@ -353,7 +394,13 @@ export default function Workbench({
           onRequestPreview={onRequestPreview}
           headerRight={
             <div className="btn-group">
-              <button className="btn btn--sm" onClick={selectAllValidVisible} disabled={filtered.length === 0}>
+              <button
+                className="btn btn--sm"
+                data-shortcut="select-all-visible"
+                onClick={selectAllValidVisible}
+                disabled={filtered.length === 0}
+                title="Ctrl/Cmd+A"
+              >
                 全选有效
               </button>
               <button className="btn btn--sm btn--ghost" onClick={clearSelection} disabled={selectedIds.size === 0}>
@@ -470,6 +517,16 @@ export default function Workbench({
 }
 
 function phaseText(phase, active) {
+  if (!active && (phase === "complete" || phase === "validating")) return t("scan.phase.complete");
+  switch (phase) {
+    case "ntfs": return t("scan.phase.ntfs");
+    case "carving": return t("scan.phase.carving");
+    case "validating": return t("scan.phase.validating");
+  }
+  return phaseTextLegacy(phase, active);
+}
+
+function phaseTextLegacy(phase, active) {
   if (!active) return "扫描已完成";
   switch (phase) {
     case "ntfs": return "NTFS MFT 扫描中";
