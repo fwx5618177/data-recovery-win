@@ -31,10 +31,12 @@ type DownloadProgress struct {
 //
 // 取消策略：ctx 取消时立即关闭 reader 并清理 .tmp 文件；下载几 GB 也可随时中断。
 //
-// 为什么不做 SHA-256 签名校验：
-//   - GitHub Release API 不直接返回 asset 的 SHA-256；需要额外维护一份 SHA256SUMS
-//   - 当前 Release 流程没产出校验文件；自动更新走 HTTPS（TLS 证书链已校验）
-//   - 留 TODO：发版流程加入 SHA256SUMS.txt 并在这里核对，提升供应链安全
+// SHA-256 供应链校验：
+//   - 发版 CI 在 Release assets 里附带一份 "SHA256SUMS.txt"（每行 "<hex>  <filename>"）
+//   - DownloadAsset 计算下载文件的 sha256 并返回给上层
+//   - 上层 (updater.ApplyPendingUpdate) 在应用更新前可调 VerifyAssetChecksum 核对
+//
+// 走 HTTPS（TLS 证书链已校验）+ sha256 双校验 = 比 GitHub 仅靠 TLS 更严。
 func DownloadAsset(
 	ctx context.Context,
 	asset Asset,
