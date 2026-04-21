@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 // isWindowsAdmin 在非 Windows 平台上始终返回 false
@@ -39,6 +38,15 @@ func ensureAdminPrivileges() (bool, error) {
 		return false, nil
 	}
 
+	// 非交互场景一律跳过 auto-sudo，否则会出现：
+	//   - Wails build 期间生成 bindings 跑临时二进制 → 我们调 syscall.Kill 杀自己 →
+	//     Wails 看到 "dead parent" → bindings 失败 → CI 红
+	//   - GitHub Actions / 任何 CI 环境弹出 GUI 密码框毫无意义
+	//   - 通过 ssh -t 之外的方式跑（cron / systemd unit / pipe 输入）也不该弹框
+	if isNonInteractiveContext() {
+		return false, nil
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return false, fmt.Errorf("无法定位本进程可执行文件: %w", err)
@@ -51,6 +59,39 @@ func ensureAdminPrivileges() (bool, error) {
 		return relaunchLinuxWithSudo(exePath)
 	}
 	return false, nil
+}
+
+// isNonInteractiveContext 判断当前进程是否处于"不该弹 GUI / 不该自动重启"的环境。
+//
+// 三个独立信号任一满足即返回 true：
+//
+//	1. 经典 CI env vars（GitHub Actions / GitLab / CircleCI / Jenkins 等）
+//	2. Wails 自身在 build 阶段跑 bindings 临时二进制时设置的环境变量
+//	3. stdin 不是 char device（被管道 / 重定向接管 = 非交互）
+func isNonInteractiveContext() bool {
+	for _, k := range []string{
+		"CI",                      // 通用 (GitHub Actions / GitLab / CircleCI 等)
+		"GITHUB_ACTIONS",          // GitHub Actions
+		"BUILDKITE",
+		"JENKINS_URL",
+		"GITLAB_CI",
+		"CIRCLECI",
+		"TF_BUILD",                // Azure Pipelines
+		"WAILS_BIND",              // Wails 内部约定（如有）
+		"WAILS_BUILD",
+		"WAILS_NO_AUTO_RUN",
+	} {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	// stdin 非 TTY → 极大概率是 Wails build / pipe / cron / systemd
+	if fi, err := os.Stdin.Stat(); err == nil {
+		if fi.Mode()&os.ModeCharDevice == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // relaunchMacWithAdmin 用 AppleScript 让 Finder 弹原生密码 / Touch ID 对话框。
@@ -103,8 +144,9 @@ func relaunchLinuxWithSudo(exePath string) (bool, error) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err == nil {
-			// 让子进程脱离父，主进程立即退出
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+			// 子进程已起，主进程让 main 收到 (true, nil) 后正常 return
+			// （绝不在这里发 SIGTERM 杀自己 — 会让父进程退出码 = 143，让 wails / CI
+			//  之类的工具误以为 build 失败）
 			return true, nil
 		}
 	}
@@ -115,7 +157,6 @@ func relaunchLinuxWithSudo(exePath string) (bool, error) {
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Start(); err == nil {
-				_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 				return true, nil
 			}
 		}
