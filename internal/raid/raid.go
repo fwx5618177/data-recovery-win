@@ -5,8 +5,8 @@
 //   ✅ RAID 0    — 条带 (stripe)，没有冗余；任一磁盘缺失就完蛋
 //   ✅ RAID 1    — 镜像；任一磁盘可用即可全文恢复
 //   ✅ RAID 5    — 单奇偶校验 (XOR)；最多容许 1 块盘缺失（用 P 重建）
-//   ❌ RAID 6    — 双奇偶 (P + Q, Reed-Solomon)；TODO
-//   ❌ RAID 10   — RAID 1 镜像的 RAID 0；可叠加用 raid.Stripe 包 raid.Mirror 实现，本包暂未提供
+//   ✅ RAID 6    — 双奇偶 (P + Q, GF(2^8) Reed-Solomon)；最多容许 2 块盘缺失，见 galois.go
+//   ✅ RAID 10   — mirror 对的 stripe；每对至少 1 盘可用
 //
 // 不做"自动检测条带大小 / 顺序"——RAID metadata 五花八门（mdadm / hardware controller /
 // LVM / Storage Spaces / Apple Software RAID），用户应自行知道：盘的顺序、stripe size、
@@ -112,17 +112,17 @@ func NewReader(cfg Config) (*Reader, error) {
 		if len(cfg.Disks) < 4 {
 			return nil, fmt.Errorf("RAID 6 至少需要 4 块盘")
 		}
-		// RAID 6 最多容 2 盘缺失（P+Q）；本实现的简化版只支持 0 / 1 缺失
-		// （单盘缺时退化到 RAID 5 模式 + 忽略 Q），双盘缺需要 GF(2^8) Reed-Solomon
-		// 完整解码 — 留 TODO，工作量另算 1 周
+		// RAID 6 支持最多 2 盘缺失：P+Q 双奇偶 + GF(2^8) Reed-Solomon。
+		// 单盘缺 → 走 RAID 5 XOR 重建（P 列）；双盘缺 → galois.go 的
+		// RAID6RecoverTwoDataDisks 解二元方程还原两块数据盘。
 		missing := 0
 		for _, d := range cfg.Disks {
 			if d == nil {
 				missing++
 			}
 		}
-		if missing > 1 {
-			return nil, fmt.Errorf("RAID 6 双盘缺失需 Reed-Solomon 重建，本实现暂不支持")
+		if missing > 2 {
+			return nil, fmt.Errorf("RAID 6 最多容 2 盘缺失，当前缺 %d", missing)
 		}
 	case Level10:
 		if cfg.StripeBytes <= 0 {
@@ -217,13 +217,245 @@ func (r *Reader) ReadAt(buf []byte, offset int64) (int, error) {
 	case Level5:
 		return r.readRAID5(buf, offset)
 	case Level6:
-		// 单盘缺时：忽略 Q 列退化为 RAID 5 + 同样的 P-XOR 重建
-		// 双盘缺时（NewReader 拒了）才需要真 Reed-Solomon —— 留 TODO
-		return r.readRAID5(buf, offset)
+		return r.readRAID6(buf, offset)
 	case Level10:
 		return r.readRAID10(buf, offset)
 	}
 	return 0, fmt.Errorf("未实现的 level")
+}
+
+// ---------------- RAID 6 ----------------
+//
+// RAID 6 left-symmetric 布局：N 盘 = (N-2) 数据 + P + Q；
+//   - P 列 = (N-1 - row%N) % N
+//   - Q 列 = (N-2 - row%N) % N
+//   - 数据列从 (Q列+1) 开始环绕
+//
+// 读路径：
+//   1. 全部在 → 直接读目标数据盘
+//   2. 单盘缺 + 缺的是数据盘 → 用 P 做 XOR 重建（galois.go 里的 XOR 等价于 RAID 5）
+//   3. 单盘缺 + 缺的是 P/Q → 直接读目标
+//   4. 双盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
+//   5. 双盘缺含 P/Q 一个 + 一个数据盘 → 用另一个校验盘重建
+func (r *Reader) readRAID6(buf []byte, offset int64) (int, error) {
+	stripe := r.cfg.StripeBytes
+	n := int64(len(r.cfg.Disks))
+	dataPerRow := n - 2
+
+	total := 0
+	for total < len(buf) {
+		logical := offset + int64(total)
+		logStripeIdx := logical / stripe
+		stripeOff := logical % stripe
+		row := logStripeIdx / dataPerRow
+		colInRow := logStripeIdx % dataPerRow
+
+		pCol := (n - 1 - row%n + n) % n
+		qCol := (n - 2 - row%n + n) % n
+		// 按 left-symmetric 生成本行的所有数据列：从 (qCol+1)%n 起环绕，
+		// 跳过 P 和 Q，直到凑齐 dataPerRow 个
+		dataCols := raid6DataCols(n, pCol, qCol)
+		diskIdx := dataCols[colInRow]
+		diskOff := row*stripe + stripeOff
+
+		want := stripe - stripeOff
+		remain := int64(len(buf) - total)
+		if want > remain {
+			want = remain
+		}
+
+		var got int
+		var err error
+		if r.cfg.Disks[diskIdx] != nil {
+			got, err = r.cfg.Disks[diskIdx].ReadAt(buf[total:total+int(want)], diskOff)
+		} else {
+			// 重建目标盘：需要 stripe 级重建
+			got, err = r.rebuildRAID6Row(buf[total:total+int(want)], row, pCol, qCol, diskIdx, int(diskOff), int(want))
+		}
+		total += got
+		if err != nil && err != io.EOF {
+			return total, err
+		}
+		if got == 0 {
+			break
+		}
+	}
+	return total, nil
+}
+
+// rebuildRAID6Row 用同行 stripe 重建缺失盘 missingCol 的字节段。
+// 情况：
+//   a) 目标缺 + 其它盘（含 P、Q）都在 → 单缺场景：优先用 P（XOR）更快
+//   b) 两盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
+//   c) 两盘缺含 P/Q 一个 + 一个数据盘 → 用另一校验盘重建
+func (r *Reader) rebuildRAID6Row(out []byte, row int64, pCol, qCol, missingCol int64, diskOff int, readLen int) (int, error) {
+	n := int64(len(r.cfg.Disks))
+	// 找所有缺失列
+	missing := []int64{}
+	for i := int64(0); i < n; i++ {
+		if r.cfg.Disks[i] == nil {
+			missing = append(missing, i)
+		}
+	}
+	// 读整行每个**可用**盘的 stripe 字节
+	stripe := r.cfg.StripeBytes
+	stripeReadOff := row * stripe
+	rowData := make([][]byte, n)
+	for i := int64(0); i < n; i++ {
+		if r.cfg.Disks[i] == nil {
+			continue
+		}
+		rowData[i] = make([]byte, stripe)
+		cn, err := r.cfg.Disks[i].ReadAt(rowData[i], stripeReadOff)
+		if err != nil && cn == 0 {
+			return 0, err
+		}
+	}
+
+	// 场景 a：只有 missingCol 缺
+	if len(missing) == 1 && missing[0] == missingCol {
+		// XOR 所有非 missing 的**数据盘** + P 列即可重建（忽略 Q）
+		rebuilt := make([]byte, stripe)
+		for i := int64(0); i < n; i++ {
+			if i == missingCol || i == qCol {
+				continue
+			}
+			for j := range rebuilt {
+				rebuilt[j] ^= rowData[i][j]
+			}
+		}
+		offInStripe := int(diskOff - int(stripeReadOff))
+		n2 := copy(out, rebuilt[offInStripe:offInStripe+readLen])
+		return n2, nil
+	}
+
+	// 场景 b + c：两盘缺。先区分两缺是哪两列
+	if len(missing) != 2 {
+		return 0, fmt.Errorf("RAID 6 缺盘数 %d 不在支持范围", len(missing))
+	}
+	m1, m2 := missing[0], missing[1]
+	// 取出 P / Q stripe 数据（如果在）
+	pData := rowData[pCol]
+	qData := rowData[qCol]
+
+	// 如果 P/Q 缺一个 → 用另一个 + 所有可读数据盘重建
+	if m1 == pCol || m2 == pCol || m1 == qCol || m2 == qCol {
+		// 用 P-only 重建非-P/Q 的那个缺失数据盘
+		// 简化：如果 missingCol 就是数据盘，只要另一个校验盘活着 + 所有其它数据盘
+		var parityAlive []byte
+		if m1 == pCol || m2 == pCol {
+			parityAlive = qData // P 缺用 Q 重建（需要 GF α^i 累加反向）
+			// Q = Σ α^i · Di → 缺失数据盘 Dx = (Q - Σ_{i≠x,其它都在} α^i·Di) / α^x
+			return rebuildSingleDataDiskFromQ(out, rowData, qData, missingCol, n, pCol, qCol, diskOff, stripeReadOff, readLen)
+		}
+		parityAlive = pData
+		_ = parityAlive
+		// P 活 + Q 缺 + 一个数据盘缺 → XOR 重建数据盘，同场景 a 算法
+		rebuilt := make([]byte, stripe)
+		for i := int64(0); i < n; i++ {
+			if i == missingCol || i == qCol || r.cfg.Disks[i] == nil {
+				continue
+			}
+			for j := range rebuilt {
+				rebuilt[j] ^= rowData[i][j]
+			}
+		}
+		offInStripe := int(diskOff - int(stripeReadOff))
+		return copy(out, rebuilt[offInStripe:offInStripe+readLen]), nil
+	}
+
+	// 场景 b：两个都是数据盘 → 调 RAID6RecoverTwoDataDisks
+	// 把 rowData 转成"数据盘视角"的 slice（按数据列顺序排，不含 P/Q）
+	dataStripes, dataColMap := dataStripesView(rowData, n, pCol, qCol)
+	// 在 dataColMap 里找 m1 / m2 对应的"数据盘索引"（Reed-Solomon 用的 0..dataCount-1）
+	x := findDataIdx(dataColMap, m1)
+	y := findDataIdx(dataColMap, m2)
+	if x < 0 || y < 0 {
+		return 0, fmt.Errorf("内部错误：双缺盘索引转换失败")
+	}
+	dx, dy, err := RAID6RecoverTwoDataDisks(dataStripes, pData, qData, x, y)
+	if err != nil {
+		return 0, err
+	}
+	// 选其中对应 missingCol 的那个返回
+	var rebuilt []byte
+	if m1 == missingCol {
+		rebuilt = dx
+	} else {
+		rebuilt = dy
+	}
+	offInStripe := int(diskOff - int(stripeReadOff))
+	return copy(out, rebuilt[offInStripe:offInStripe+readLen]), nil
+}
+
+// rebuildSingleDataDiskFromQ P 缺时用 Q 重建某个数据盘：
+//   Dx = (Q - Σ_{i≠x 的所有数据盘} α^i·Di) / α^x
+func rebuildSingleDataDiskFromQ(out []byte, rowData [][]byte, qData []byte, missingCol, n, pCol, qCol int64, diskOff int, stripeReadOff int64, readLen int) (int, error) {
+	stripe := len(qData)
+	_ = pCol
+	// 取出数据盘视角 index
+	_, dataColMap := dataStripesView(rowData, n, pCol, qCol)
+	x := findDataIdx(dataColMap, missingCol)
+	if x < 0 {
+		return 0, fmt.Errorf("missingCol=%d 不是数据列", missingCol)
+	}
+	// 累加 Σ α^i · Di (i ≠ x)
+	accum := make([]byte, stripe)
+	for di, col := range dataColMap {
+		if di == x {
+			continue
+		}
+		f := gfPow(di)
+		for j := 0; j < stripe; j++ {
+			accum[j] ^= gfMul(f, rowData[col][j])
+		}
+	}
+	// Dx = (Q XOR accum) / α^x
+	ax := gfPow(x)
+	rebuilt := make([]byte, stripe)
+	for j := 0; j < stripe; j++ {
+		rebuilt[j] = gfDiv(qData[j]^accum[j], ax)
+	}
+	offInStripe := diskOff - int(stripeReadOff)
+	return copy(out, rebuilt[offInStripe:offInStripe+readLen]), nil
+}
+
+// dataStripesView 按"数据盘顺序"摘出 rowData；返回 (dataStripes, colMap)
+// colMap[dataIdx] = 实际磁盘列号
+func dataStripesView(rowData [][]byte, n, pCol, qCol int64) ([][]byte, []int64) {
+	var out [][]byte
+	var cols []int64
+	for i := int64(0); i < n; i++ {
+		if i == pCol || i == qCol {
+			continue
+		}
+		out = append(out, rowData[i]) // 可能是 nil（缺盘）
+		cols = append(cols, i)
+	}
+	return out, cols
+}
+
+// raid6DataCols 给定 n 盘 + pCol + qCol，生成本行的数据列列表（长度 = n-2）。
+// 从 (qCol+1) % n 起环绕，跳过 P/Q 列。
+func raid6DataCols(n, pCol, qCol int64) []int64 {
+	out := make([]int64, 0, n-2)
+	c := (qCol + 1) % n
+	for int64(len(out)) < n-2 {
+		if c != pCol && c != qCol {
+			out = append(out, c)
+		}
+		c = (c + 1) % n
+	}
+	return out
+}
+
+func findDataIdx(dataColMap []int64, col int64) int {
+	for i, c := range dataColMap {
+		if c == col {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---------------- RAID 10 ----------------

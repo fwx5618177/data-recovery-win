@@ -180,6 +180,70 @@ func TestRAID0_RejectsNilDisk(t *testing.T) {
 	}
 }
 
+// RAID 6 双数据盘缺失：合成 P+Q，故意缺 2 个数据盘，读整个阵列应得原始字节
+func TestRAID6_TwoDataDisksMissingRebuild(t *testing.T) {
+	const stripe = int64(64)
+	const n = int64(5) // 5 盘 = 3 数据 + P + Q
+	const rows = int64(2)
+	const dataPerRow = int64(3)
+	logicalSize := stripe * rows * dataPerRow
+
+	original := make([]byte, logicalSize)
+	for i := range original {
+		original[i] = byte(i*13 + 7)
+	}
+
+	// 手工布置 N 个盘 的字节（模拟 left-symmetric RAID 6）
+	disks := make([][]byte, n)
+	for i := range disks {
+		disks[i] = make([]byte, rows*stripe)
+	}
+
+	for row := int64(0); row < rows; row++ {
+		pCol := (n - 1 - row%n + n) % n
+		qCol := (n - 2 - row%n + n) % n
+		dataCols := raid6DataCols(n, pCol, qCol)
+		_ = dataCols // 保持与 Reader 同算法
+		// 写入数据 + 算 P/Q
+		dataStripes := make([][]byte, dataPerRow)
+		for k := int64(0); k < dataPerRow; k++ {
+			logStripe := row*dataPerRow + k
+			src := original[logStripe*stripe : (logStripe+1)*stripe]
+			copy(disks[dataCols[k]][row*stripe:(row+1)*stripe], src)
+			dataStripes[k] = src
+		}
+		p, q := RAID6PQ(dataStripes)
+		copy(disks[pCol][row*stripe:(row+1)*stripe], p)
+		copy(disks[qCol][row*stripe:(row+1)*stripe], q)
+	}
+
+	// 缺 2 个数据盘：0 和 2（取决于 row 0 的 dataCols，这里保证它们在数据列中）
+	readers := make([]disk.DiskReader, n)
+	for i := int64(0); i < n; i++ {
+		readers[i] = testutil.NewMemReader(disks[i])
+	}
+	// 简化：让 row 0 的 qCol=3, pCol=4，dataCols=[0,1,2]；缺 0 + 2
+	readers[0] = nil
+	readers[2] = nil
+
+	r, err := NewReader(Config{
+		Level:       Level6,
+		StripeBytes: stripe,
+		Disks:       readers,
+	})
+	if err != nil {
+		t.Fatalf("NewReader RAID6: %v", err)
+	}
+	got := make([]byte, logicalSize)
+	nRead, _ := r.ReadAt(got, 0)
+	if nRead != int(logicalSize) {
+		t.Fatalf("读字节数 %d want %d", nRead, logicalSize)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("RAID 6 双缺重建不匹配\n  got  %x\n  want %x", got[:32], original[:32])
+	}
+}
+
 func TestRAID5_RejectsTwoMissing(t *testing.T) {
 	_, err := NewReader(Config{
 		Level:       Level5,
