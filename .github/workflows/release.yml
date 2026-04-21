@@ -78,6 +78,9 @@ jobs:
         run: pnpm install
 
       - name: Wails build
+        # 显式用 bash；Windows runner 的默认 shell 是 PowerShell，不认 bash 的 "\"
+        # 续行，会把 -ldflags 当成独立命令报 "'-ldflags' is not recognized"。
+        shell: bash
         run: |
           wails build -platform ${{ matrix.platform }} \
             -ldflags "-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}"
