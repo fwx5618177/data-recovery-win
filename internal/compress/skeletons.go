@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"data-recovery/internal/compress/lzx"
 )
 
 // DecmpfsHeader HFS+ com.apple.decmpfs xattr 的头部（16 字节）：
@@ -109,7 +111,74 @@ func IsLZXCompact(b []byte) bool {
 	return len(b) >= 8 && string(b[0:8]) == wimMagic
 }
 
-// DecompressLZX 完整 LZX 不实现
-func DecompressLZX(_ []byte) ([]byte, error) {
-	return nil, errors.New("LZX (Compact OS / WIM) 完整解压未实现；Windows 用户可跑 'compact /U <file>' 在原系统解压")
+// WIMHeader WIM 文件头关键字段（按 Microsoft WIM Specification v1.2）：
+//
+//	+0x00 magic "MSWIM\0\0\0" (8)
+//	+0x08 header_size  uint32  通常 208
+//	+0x0C version     uint32
+//	+0x10 flags        uint32  compression type (FLAG_COMPRESSION_XPRESS=0x20000,
+//	                                              FLAG_COMPRESSION_LZX=0x40000,
+//	                                              FLAG_COMPRESSION_LZMS=0x80000)
+//	+0x14 chunk_size   uint32  通常 0x8000 = 32KB
+//	...
+type WIMHeader struct {
+	HeaderSize      uint32
+	Version         uint32
+	Flags           uint32
+	ChunkSize       uint32
+	Compression     string // "LZX" / "XPRESS" / "LZMS" / "uncompressed"
+}
+
+// ParseWIMHeader 解前 208 字节；返回压缩类型。识别后上层可决定是否调用外部解压（compact /U）
+// 或跳过。
+func ParseWIMHeader(b []byte) (*WIMHeader, error) {
+	if !IsLZXCompact(b) {
+		return nil, errors.New("非 WIM / MSWIM magic")
+	}
+	if len(b) < 0x18 {
+		return nil, errors.New("WIM header 太短")
+	}
+	hdr := &WIMHeader{
+		HeaderSize: leU32(b[8:12]),
+		Version:    leU32(b[12:16]),
+		Flags:      leU32(b[16:20]),
+		ChunkSize:  leU32(b[20:24]),
+	}
+	switch {
+	case hdr.Flags&0x20000 != 0:
+		hdr.Compression = "XPRESS"
+	case hdr.Flags&0x40000 != 0:
+		hdr.Compression = "LZX"
+	case hdr.Flags&0x80000 != 0:
+		hdr.Compression = "LZMS"
+	default:
+		hdr.Compression = "uncompressed"
+	}
+	return hdr, nil
+}
+
+// DecompressLZX 用 internal/compress/lzx 的解压器解一个 LZX chunk。
+//
+// 输入是单个 WIM chunk 的 LZX stream（每个 WIM chunk 独立解，前 2 字节 compressed size
+// 由调用方剥掉再传进来）。windowSize 默认 32KB（WIM），CAB 可传 2^15..2^21。
+// uncompressedSize 来自 WIM chunk 表。
+func DecompressLZX(src []byte, uncompressedSize, windowSize int) ([]byte, error) {
+	if uncompressedSize <= 0 {
+		return nil, errors.New("uncompressedSize 必须 > 0")
+	}
+	if windowSize <= 0 {
+		windowSize = 32 * 1024
+	}
+	d := lzx.NewDecoder(windowSize, uncompressedSize)
+	out := make([]byte, uncompressedSize)
+	n, err := d.Decode(src, out)
+	if err != nil {
+		return out[:n], err
+	}
+	return out[:n], nil
+}
+
+// leU32 little-endian uint32（避免引 encoding/binary 只为此）
+func leU32(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
