@@ -78,7 +78,9 @@ jobs:
         run: pnpm install
 
       - name: Wails build
-        run: wails build -platform ${{ matrix.platform }}
+        run: |
+          wails build -platform ${{ matrix.platform }} \
+            -ldflags "-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}"
 
       - name: List build output
         shell: bash

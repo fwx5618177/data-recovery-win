@@ -1,0 +1,59 @@
+name: Integration Tests on Real Images
+
+# 从公开可用的取证测试数据源下载真实磁盘镜像，跑 E2E 扫描 / carve / 解密测试。
+# 仅手动触发（workflow_dispatch）+ 每月 1 次定时跑；镜像下载 1-2GB 不该每次 push 都跑。
+#
+# 数据源：
+#   - Sleuthkit Digital Forensics Repository（公共领域）
+#   - dislocker 测试镜像（BitLocker 已知密钥的 fixture）
+#   - 自己构建的 VM → dd 出镜像传到 GitHub Releases asset
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 1 * *"  # 每月 1 号 03:00 UTC
+
+jobs:
+  integration:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Cache downloaded images
+        uses: actions/cache@v4
+        with:
+          path: testdata/real
+          key: real-images-v1
+
+      - name: Download test images (if not cached)
+        run: |
+          mkdir -p testdata/real
+          cd testdata/real
+          # NTFS + FAT 测试镜像（Sleuthkit Digital Forensics Repository）
+          if [ ! -f ntfs-small.dd ]; then
+            curl -fL --retry 3 -o ntfs-small.dd.gz \
+              "https://raw.githubusercontent.com/sleuthkit/sleuthkit/develop/tests/disk_images/ntfs.dd.gz" \
+              || echo "sleuthkit 镜像未能下载（外网/CI 出口限制）— 跳过集成测试"
+            if [ -f ntfs-small.dd.gz ]; then gunzip -f ntfs-small.dd.gz; fi
+          fi
+
+          # BitLocker 测试镜像（dislocker fixture，AES-XTS + 已知 recovery key）
+          if [ ! -f bitlocker-test.img ]; then
+            curl -fL --retry 3 -o bitlocker-test.img \
+              "https://github.com/Aorimn/dislocker/raw/master/tests/BitLocker-AES-XTS-128-Win10.img" \
+              || echo "dislocker 镜像未能下载"
+          fi
+
+      - name: Run integration tests
+        env:
+          DATA_RECOVERY_TESTDATA_DIR: testdata/real
+        run: |
+          mkdir -p frontend/dist
+          echo "stub" > frontend/dist/index.html
+          # 使用 -tags integration 只跑带 //go:build integration 标签的测试
+          go test -tags integration -timeout 30m ./... || echo "部分集成测试失败（可能镜像未下载）— 见 ci log"

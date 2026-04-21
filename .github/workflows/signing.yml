@@ -1,0 +1,125 @@
+name: Code Signing Templates
+
+# 这是 **模板 workflow** —— 只有项目方在 GitHub Secrets 里配齐证书后才会生效。
+# 配置前：整个 workflow 会被 condition `secrets.WINDOWS_SIGN_CERT` 跳过。
+#
+# 配置清单（GitHub Settings → Secrets and variables → Actions）：
+#
+#   Windows:
+#     WINDOWS_SIGN_CERT      base64 的 .pfx 文件内容
+#     WINDOWS_SIGN_PASSWORD  .pfx 密码
+#
+#   macOS:
+#     APPLE_DEVELOPER_ID      "Developer ID Application: Your Name (XXXXXXXXXX)"
+#     APPLE_CERT              base64 的 Developer ID 证书 (.p12)
+#     APPLE_CERT_PASSWORD     .p12 密码
+#     APPLE_NOTARY_USER       Apple ID（App-specific password 对应的账号）
+#     APPLE_NOTARY_PASSWORD   App-specific password
+#     APPLE_NOTARY_TEAM_ID    10 字符 Team ID
+#
+# 本 workflow 触发时机：release 流程的下一步，收到 build artifact 后签名 + 重新上传。
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+jobs:
+  # ===============================================================
+  # Windows 代码签名：用 signtool + EV 证书
+  # ===============================================================
+  windows-sign:
+    if: ${{ secrets.WINDOWS_SIGN_CERT != '' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DataRecovery-windows-amd64.exe
+
+      - name: Decode cert
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx",
+            [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGN_CERT }}"))
+
+      - name: Sign
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" `
+            sign /v /f cert.pfx /p "${{ secrets.WINDOWS_SIGN_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "DataRecovery-windows-amd64.exe"
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DataRecovery-windows-amd64-signed.exe
+          path: DataRecovery-windows-amd64.exe
+
+  # ===============================================================
+  # macOS 代码签名 + Notarization
+  # ===============================================================
+  macos-sign-notarize:
+    if: ${{ secrets.APPLE_CERT != '' }}
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DataRecovery-darwin-${{ matrix.arch }}.tar.gz
+
+      - name: Extract .app
+        run: tar -xzf DataRecovery-darwin-${{ matrix.arch }}.tar.gz
+
+      - name: Import signing cert
+        env:
+          CERT: ${{ secrets.APPLE_CERT }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          echo "$CERT" | base64 -d > cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k actions build.keychain
+
+      - name: Sign .app
+        env:
+          DEV_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: |
+          codesign --deep --force --options runtime --timestamp \
+            --sign "$DEV_ID" \
+            $(find . -name "*.app" -maxdepth 2 | head -1)
+
+      - name: Notarize
+        env:
+          NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          APP=$(find . -name "*.app" -maxdepth 2 | head -1)
+          ditto -c -k --keepParent "$APP" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --apple-id "$NOTARY_USER" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP"
+
+      - name: Repack + Upload
+        run: |
+          APP=$(find . -name "*.app" -maxdepth 2 | head -1)
+          tar -czf DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz "$APP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz
+          path: DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz
