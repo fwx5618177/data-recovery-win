@@ -28,7 +28,8 @@ import (
 //
 // 对于大多数 Win10+ BitLocker 卷，第一个 sector 的明文是合法 NTFS boot sector
 // （BitLocker 把它"复制保留"了一份），所以即便不解密第一个扇区，NTFS scanner 也能用。
-// 这种"前若干扇区不加密"的特殊处理对正确性影响很小，留 TODO 待真实磁盘测试时再调。
+// "前若干扇区不加密"的特殊处理由 SetPlainTextHeaderEnd 接口支持；
+// unlock_e2e.go 会从 metadata 的 Volume Header Block datum 推算后自动设置。
 // SectorCipher 抽象"按扇区独立解密"的能力。
 // 实现方有 XTSCipher（Win10+ AES-XTS）和 CBCDiffuserCipher（Vista AES-CBC + diffuser）。
 type SectorCipher interface {

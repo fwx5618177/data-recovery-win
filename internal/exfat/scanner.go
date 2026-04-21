@@ -185,27 +185,28 @@ func (s *Scanner) walkDir(
 	}
 	visited[startCluster] = true
 
-	// 目录数据由连续若干簇组成。简化实现：假定目录不跨 FAT 链（实际 95% 情况成立，
-	// 目录通常只占一个 cluster 或几个连续 cluster）。完整实现需要走 FAT 链，留 TODO。
+	// 先定义 helper（本文件最末，不污染这里的可读性）。
 	//
-	// 这里按 "从 startCluster 开始一次性读 N 个 cluster"，遇到 0x00（且随后连续 32 字节都是 0）
-	// 视为目录结束。
-	const maxDirClusters = 512 // 32MB 目录上限，够 GB 级 exFAT 根目录
-	dirDataSize := int64(maxDirClusters) * boot.ClusterSize
+	// 读目录数据：优先走 FAT 链拼连（完整场景），遇到 FAT 读失败退化为"从 startCluster
+	// 连续读 N 簇"的启发（老版本行为）。
+	const maxDirClusters = 512 // 32MB 目录上限
 	startOffset := boot.ClusterToByteOffset(startCluster, partitionOffset)
 	if startOffset < 0 {
 		return nil
 	}
-
-	buf := make([]byte, dirDataSize)
-	n, err := s.reader.ReadAt(buf, startOffset)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("读取目录簇失败 (cluster=%d): %w", startCluster, err)
+	buf, err := s.readDirFollowingFAT(boot, partitionOffset, startCluster, maxDirClusters)
+	if err != nil || len(buf) == 0 {
+		dirDataSize := int64(maxDirClusters) * boot.ClusterSize
+		buf = make([]byte, dirDataSize)
+		n, rerr := s.reader.ReadAt(buf, startOffset)
+		if rerr != nil && rerr != io.EOF {
+			return fmt.Errorf("读取目录簇失败 (cluster=%d): %w", startCluster, rerr)
+		}
+		if n == 0 {
+			return nil
+		}
+		buf = buf[:n]
 	}
-	if n == 0 {
-		return nil
-	}
-	buf = buf[:n]
 
 	pos := 0
 	// 连续空 entry 计数，超过 4 个直接停止（目录边界探测启发）
@@ -276,4 +277,32 @@ func (s *Scanner) walkDir(
 	}
 
 	return nil
+}
+
+// readDirFollowingFAT 顺着 FAT 链把整个目录数据拼起来。
+// 比 "连续读 N 簇" 的旧启发更准 — 能正确读跨 FAT 链的目录（目录极大 / 文件系统高度碎片化时
+// 的真实布局）。
+//
+// 返回 nil/error 时调用方应 fallback 到老启发。
+func (s *Scanner) readDirFollowingFAT(boot *BootSector, partitionOffset int64, firstCluster uint32, maxClusters int) ([]byte, error) {
+	chain, err := FollowFATChain(s.reader, boot, partitionOffset, firstCluster)
+	if err != nil || len(chain) == 0 {
+		return nil, err
+	}
+	if len(chain) > maxClusters {
+		chain = chain[:maxClusters]
+	}
+	total := int64(len(chain)) * boot.ClusterSize
+	out := make([]byte, total)
+	for i, c := range chain {
+		off := boot.ClusterToByteOffset(c, partitionOffset)
+		if off < 0 {
+			return nil, nil
+		}
+		n, rerr := s.reader.ReadAt(out[int64(i)*boot.ClusterSize:int64(i+1)*boot.ClusterSize], off)
+		if rerr != nil && n == 0 {
+			return nil, rerr
+		}
+	}
+	return out, nil
 }

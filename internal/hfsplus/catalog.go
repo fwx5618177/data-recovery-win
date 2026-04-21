@@ -185,6 +185,9 @@ type CatalogNode struct {
 // kind=Leaf 时 Folder/File 会被填上对应字段；index/header/map 节点的 Folder/File 都为 nil。
 type CatalogRecord struct {
 	Key    CatalogKey
+	// RawKey 是 key 区域原始字节（含 2 byte keyLength 头）；
+	// 给 extents overflow / attributes B-tree 等**非** catalog 用途的 key 解析用。
+	RawKey []byte
 	RawVal []byte
 	Folder *CatalogFolder
 	File   *CatalogFile
@@ -234,7 +237,9 @@ func ParseCatalogNode(buf []byte) (*CatalogNode, error) {
 		}
 		val := rec[keyBytes:]
 
-		cr := CatalogRecord{Key: key, RawVal: val}
+		rawKey := make([]byte, keyBytes)
+		copy(rawKey, rec[:keyBytes])
+		cr := CatalogRecord{Key: key, RawKey: rawKey, RawVal: val}
 		if n.Kind == BTNodeKindLeaf && len(val) >= 2 {
 			rt := int16(binary.BigEndian.Uint16(val[0:2]))
 			switch rt {

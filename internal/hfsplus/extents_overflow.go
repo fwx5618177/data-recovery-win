@@ -100,6 +100,9 @@ func (r *ExtentsOverflowReader) LookupExtents(fileID uint32, fork uint8) ([]Fork
 			}
 			node, err := ParseCatalogNode(buf[:n])
 			if err != nil || node.Kind != BTNodeKindLeaf {
+				// ParseCatalogNode 按 catalog key 格式解，extents overflow key
+				// 格式不同可能被丢；fallback 走 raw bytes scan
+				out = append(out, scanLeafForExtentsOverflow(buf[:n], fileID, fork)...)
 				continue
 			}
 			for _, rec := range node.Records {
@@ -116,22 +119,44 @@ func (r *ExtentsOverflowReader) LookupExtents(fileID uint32, fork uint8) ([]Fork
 	return out, nil
 }
 
-// parseExtentsOverflowRecord 复用 CatalogRecord 的 raw key + raw val 字段（不依赖 Folder/File）。
+// parseExtentsOverflowRecord 从 CatalogRecord 的 RawKey + RawVal 解 extents overflow。
 //
-// 这里把 Catalog parser 的 record 直接当字节流处理 —— 因为 ParseCatalogKey 是按
-// "前 2 字节 keyLength + ParentID + nameLen + name" 解的，对 extents overflow key 不适用。
-// 我们直接从 RawVal 之前的字节里抽 forkType + fileID + startBlock。
+// extents overflow key（10 字节 + 长度头）：
 //
-// 由于 ParseCatalogNode 把 Key 解为 CatalogKey 时只用了 key 头 2 字节判断长度，
-// 实际 raw 字节没暴露出来，我们这里只能从 record 的 ParentID/Name 字段推断不出 extents
-// overflow record。改为：在本实现里不复用 CatalogRecord，专门读节点字节，找 extents
-// overflow leaf record。
+//	+0x00 keyLength uint16 BE  = 10
+//	+0x02 forkType  uint8
+//	+0x03 reserved  uint8
+//	+0x04 fileID    uint32 BE
+//	+0x08 startBlock uint32 BE
 //
-// **TODO**：理想做法是把 ParseCatalogNode 改成"返回 raw record bytes"，让这里复用。
-// 当前先不动那个接口，本函数始终返回 nil（即不读到溢出 extent）。完整实现见下面的
-// rescanLeafForExtentsOverflow。
-func parseExtentsOverflowRecord(_ CatalogRecord, _ uint32, _ uint8) ([]ForkExtent, bool) {
-	return nil, false
+// value 是 8 个连续 ForkExtent（64 字节）。
+func parseExtentsOverflowRecord(rec CatalogRecord, wantFileID uint32, wantFork uint8) ([]ForkExtent, bool) {
+	key := rec.RawKey
+	val := rec.RawVal
+	if len(key) < 12 || len(val) < 8 {
+		return nil, false
+	}
+	if binary.BigEndian.Uint16(key[0:2]) != 10 {
+		return nil, false // 不是 extents overflow key
+	}
+	if key[2] != wantFork {
+		return nil, false
+	}
+	if binary.BigEndian.Uint32(key[4:8]) != wantFileID {
+		return nil, false
+	}
+	var out []ForkExtent
+	for i := 0; i < 8 && i*8+8 <= len(val); i++ {
+		ex := ForkExtent{
+			StartBlock: binary.BigEndian.Uint32(val[i*8 : i*8+4]),
+			BlockCount: binary.BigEndian.Uint32(val[i*8+4 : i*8+8]),
+		}
+		if ex.BlockCount == 0 {
+			break
+		}
+		out = append(out, ex)
+	}
+	return out, len(out) > 0
 }
 
 // sortForkExtents 简单插入排序，extent 数通常很少
