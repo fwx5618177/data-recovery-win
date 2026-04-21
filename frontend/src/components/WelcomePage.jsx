@@ -274,6 +274,7 @@ export default function WelcomePage({
       {unlockingVolume && (
         <BitLockerUnlockModal
           volume={unlockingVolume}
+          wailsApp={typeof window !== "undefined" ? window.go?.main?.App : null}
           onCancel={() => setUnlockingVolume(null)}
           onSubmit={(submitMode, value) => {
             const v = unlockingVolume;
@@ -302,13 +303,36 @@ export default function WelcomePage({
  *   mode="recovery"  value=key
  *   mode="memory"    value=memImagePath
  */
-function BitLockerUnlockModal({ volume, onCancel, onSubmit }) {
-  const [mode, setMode] = React.useState("recovery"); // "recovery" | "memory"
+function BitLockerUnlockModal({ volume, wailsApp, onCancel, onSubmit }) {
+  const [mode, setMode] = React.useState("recovery");
   const [key, setKey] = React.useState("");
   const [memPath, setMemPath] = React.useState("");
+  const [protectors, setProtectors] = React.useState(null); // null=loading, []=loaded
   const digits = key.replace(/\D/g, "");
   const recoveryValid = digits.length === 48;
   const memoryValid = memPath.trim() !== "";
+
+  // open 时拉取 protector 清单让用户知道"这卷能不能解 / 该用哪种"
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (typeof window !== "undefined" && window.go?.main?.App?.SummarizeBitLockerProtectors) {
+          const list = await window.go.main.App.SummarizeBitLockerProtectors(
+            volume.drivePath,
+            Number(volume.offset || 0).toString(16),
+          );
+          if (!cancelled) setProtectors(Array.isArray(list) ? list : []);
+        } else {
+          setProtectors([]);
+        }
+      } catch {
+        if (!cancelled) setProtectors([]);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [volume.drivePath, volume.offset]);
 
   const tabBtn = (active) => ({
     padding: "6px 12px",
@@ -345,6 +369,23 @@ function BitLockerUnlockModal({ volume, onCancel, onSubmit }) {
           @ 0x{Number(volume.offset || 0).toString(16)}
           {volume.uuid ? ` · UUID ${volume.uuid}` : ""}
         </div>
+
+        {protectors === null && (
+          <div className="muted" style={{ fontSize: 11 }}>正在读保护器清单…</div>
+        )}
+        {Array.isArray(protectors) && protectors.length > 0 && (
+          <div style={{
+            padding: "8px 12px", background: "var(--bg-surface-2)",
+            border: "1px solid var(--border)", borderRadius: 4, fontSize: 12,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>卷上配置的保护器：</div>
+            {protectors.map((p, i) => (
+              <div key={i} style={{ marginTop: 2 }}>
+                {p.solvable ? "✅" : "⚠️"} <b>{p.kind}</b> — <span className="muted">{p.hint}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {mode === "recovery" && (
           <>

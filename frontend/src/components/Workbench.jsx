@@ -58,6 +58,8 @@ export default function Workbench({
   const [validity, setValidity] = useState("all");
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [allowSameDisk, setAllowSameDisk] = useState(false);
+  // 按 EXIF 拍摄日期（YYYY/MM）分子目录恢复 — 5 万张照片场景必需
+  const [archiveByExifDate, setArchiveByExifDate] = useState(false);
   // 默认隐藏系统文件（.exe/.dll/.ico/.sys 等 + /Windows 子树），让真正的照片文档浮上来
   const [hideSystemFiles, setHideSystemFiles] = useState(true);
 
@@ -439,7 +441,7 @@ export default function Workbench({
 
         <button
           className="btn btn--primary btn--lg"
-          onClick={() => onStartRecovery?.(Array.from(selectedIds), { allowSameDisk: isSameDiskBlock && allowSameDisk })}
+          onClick={() => onStartRecovery?.(Array.from(selectedIds), { allowSameDisk: isSameDiskBlock && allowSameDisk, archiveByExifDate })}
           disabled={!canRecover}
         >
           <IconDownload size={16} />
@@ -488,6 +490,16 @@ export default function Workbench({
               </label>
             </div>
           </div>
+        )}
+        {outputDir && (
+          <label className="checkbox" style={{ flexBasis: "100%", marginTop: 4, fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={archiveByExifDate}
+              onChange={(e) => setArchiveByExifDate(e.target.checked)}
+            />
+            <span>📸 图片按 EXIF 拍摄日期（YYYY/MM）分子目录归档</span>
+          </label>
         )}
         {!outputValidation && outputDir && sufficiency === "short" && (
           <div className="banner banner--danger" style={{ flexBasis: "100%" }}>

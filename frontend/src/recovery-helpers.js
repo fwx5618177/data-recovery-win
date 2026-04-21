@@ -325,9 +325,15 @@ export function filterFiles(files, filter) {
     if (validityMode === "valid" && !f.isValid) continue;
     if (validityMode === "invalid" && f.isValid) continue;
     if (keyword) {
-      const name = (f.fileName || "").toLowerCase();
-      const path = (f.originalPath || "").toLowerCase();
-      if (!name.includes(keyword) && !path.includes(keyword)) continue;
+      // 含 ":" 用高级语法（size:>100MB type:image deleted:yes path:/Users）
+      if (keyword.indexOf(":") >= 0) {
+        const pred = parseAdvancedQuery(keyword);
+        if (!pred(f)) continue;
+      } else {
+        const name = (f.fileName || "").toLowerCase();
+        const path = (f.originalPath || "").toLowerCase();
+        if (!name.includes(keyword) && !path.includes(keyword)) continue;
+      }
     }
     out.push(f);
   }

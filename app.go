@@ -7,23 +7,33 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"data-recovery/internal/apfs"
+	"data-recovery/internal/backup"
 	"data-recovery/internal/bitlocker"
+	"data-recovery/internal/dedup"
 	"data-recovery/internal/diag"
 	"data-recovery/internal/disk"
+	"data-recovery/internal/forensics"
+	"data-recovery/internal/gpt"
 	"data-recovery/internal/hfsplus"
 	"data-recovery/internal/logging"
+	"data-recovery/internal/netfs"
+	"data-recovery/internal/ocr"
+	"data-recovery/internal/parallel"
 	"data-recovery/internal/raid"
 	"data-recovery/internal/recovery"
 	"data-recovery/internal/refs"
+	"data-recovery/internal/sed"
 	"data-recovery/internal/session"
 	"data-recovery/internal/types"
 	"data-recovery/internal/updater"
+	"data-recovery/internal/volmgr"
 	"data-recovery/internal/vss"
 )
 
@@ -40,10 +50,17 @@ type EncryptedVolumeInfo struct {
 }
 
 // updateRepoOwner / updateRepoName 指向本项目的 GitHub 仓库，用于版本检查。
-// TODO: 当真实发布时请改成正确的 owner/repo（或用 -ldflags 注入）
-const (
-	updateRepoOwner = "your-github-owner"
-	updateRepoName  = "data-recovery"
+//
+// 发版时通过 -ldflags 在 CI 里注入真实值，避免源码里把 fork 写死：
+//
+//	go build -ldflags "-X main.updateRepoOwner=MyOrg -X main.updateRepoName=data-recovery"
+//
+// 源码里保留占位值，fork 的开发者不需要改任何代码即可跑；只有正式发版时才注入真仓库。
+// 占位值用 "" 比"your-github-owner"更诚实 — 让 updater.CheckLatest 在没注入时直接跳过
+// 远程检查，不会发出误导性的 HTTP 请求。
+var (
+	updateRepoOwner = ""
+	updateRepoName  = ""
 )
 
 // imagingMu 序列化 DumpDisk 调用 —— 一次只允许一个 dump 任务
@@ -69,6 +86,9 @@ type App struct {
 	scanProgress   types.ScanProgress
 	scanFiles      []*types.RecoveredFile
 	scanActive     bool
+
+	// 可选载入的 NSRL 良性 hash 库（取证场景用）
+	nsrlDB *forensics.NSRLDB
 }
 
 // NewApp 创建一个新的 App 实例
@@ -102,6 +122,10 @@ func (a *App) startup(ctx context.Context) {
 //   - 失败静默（网络问题 / GitHub 限流不影响用户操作）
 //   - 10 秒超时已在 updater.httpClient 里兜住
 func (a *App) autoCheckForUpdate() {
+	// 发版时 -ldflags 未注入仓库名 → 不发 HTTP 请求（fork 开发者 / CI 构建都跳过）
+	if updateRepoOwner == "" || updateRepoName == "" {
+		return
+	}
 	// 启动时先等 3 秒，避免与磁盘枚举等请求争资源
 	time.Sleep(3 * time.Second)
 
@@ -132,6 +156,9 @@ func (a *App) autoCheckForUpdate() {
 // CheckForUpdate 提供给前端主动触发版本检查的入口（"立刻检查更新"按钮）。
 // 返回 CheckResult —— 无论有无更新都返回，前端自己决定怎么展示。
 func (a *App) CheckForUpdate() (*updater.CheckResult, error) {
+	if updateRepoOwner == "" || updateRepoName == "" {
+		return nil, fmt.Errorf("未配置发布仓库（build 时 -ldflags 注入 main.updateRepoOwner / main.updateRepoName）")
+	}
 	if a.engine != nil && a.engine.IsScanning() {
 		return nil, fmt.Errorf("正在扫描，请稍后再检查更新")
 	}
@@ -735,6 +762,19 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 		}
 	}
 
+	// 4. 卷管理器成员识别（mdadm / LVM2 / Storage Spaces）— 不是加密卷，但同样会让
+	//    普通扫描"扫不出文件"，给用户同样的预警
+	for _, m := range volmgr.DetectAll(reader) {
+		out = append(out, EncryptedVolumeInfo{
+			DrivePath: drivePath,
+			Kind:      m.Type,
+			Offset:    0,
+			Name:      m.Type,
+			Encrypted: false,
+			Note:      m.Hint,
+		})
+	}
+
 	// 去重：同一 (kind, drivePath, offset) 可能被 BitLocker 扫描和 APFS 扫描各命中一次
 	return dedupeEncryptedVolumes(out), nil
 }
@@ -1068,10 +1108,19 @@ func (a *App) StartRecovery(fileIDs []string, outputDir string) error {
 	return a.StartRecoveryEx(fileIDs, outputDir, false)
 }
 
+// StartRecoveryWithOptions 带完整选项（allowSameDisk + archiveByExifDate）的恢复入口。
+func (a *App) StartRecoveryWithOptions(fileIDs []string, outputDir string, allowSameDisk, archiveByExifDate bool) error {
+	return a.startRecoveryInternal(fileIDs, outputDir, allowSameDisk, archiveByExifDate)
+}
+
 // StartRecoveryEx 是 StartRecovery 的扩展版本，多一个 allowSameDisk 参数。
 // allowSameDisk=true 时跳过"恢复目录不能与源盘同一块物理磁盘"的安全检查——
 // 仅当用户在前端明确勾选"我已了解风险（可能覆盖源数据）"后才应传 true。
 func (a *App) StartRecoveryEx(fileIDs []string, outputDir string, allowSameDisk bool) error {
+	return a.startRecoveryInternal(fileIDs, outputDir, allowSameDisk, false)
+}
+
+func (a *App) startRecoveryInternal(fileIDs []string, outputDir string, allowSameDisk, archiveByExifDate bool) error {
 	if len(fileIDs) == 0 {
 		return fmt.Errorf("未选择任何文件进行恢复")
 	}
@@ -1096,7 +1145,7 @@ func (a *App) StartRecoveryEx(fileIDs []string, outputDir string, allowSameDisk 
 		},
 	}
 
-	opts := recovery.RecoverOptions{AllowSameDisk: allowSameDisk}
+	opts := recovery.RecoverOptions{AllowSameDisk: allowSameDisk, ArchiveByExifDate: archiveByExifDate}
 
 	go func() {
 		result, err := a.engine.RecoverWithOptions(fileIDs, outputDir, opts, callbacks)
@@ -1106,6 +1155,21 @@ func (a *App) StartRecoveryEx(fileIDs []string, outputDir string, allowSameDisk 
 			return
 		}
 		appLogger.Info("恢复结果已发送", "success", result.Succeeded, "failed", result.Failed)
+
+		// 恢复成功后自动生成保管链 manifest.json（取证场景友好；
+		// 普通用户即便看不懂也无害 — 就一个多出来的 JSON 文件）
+		if result.Succeeded > 0 {
+			custody := forensics.Custody{
+				ToolName:     "DataRecovery",
+				ToolVersion:  updater.Version,
+				StartedAt:    time.Now().UTC(),
+				SourceDevice: a.currentDrive.Path,
+			}
+			if mp, err := forensics.BuildAndWrite(outputDir, custody); err == nil {
+				appLogger.Info("保管链已自动生成", "path", mp)
+			}
+		}
+
 		wailsRuntime.EventsEmit(a.ctx, "recovery:completed", result)
 	}()
 
@@ -1389,4 +1453,429 @@ func (a *App) OpenFolder(path string) error {
 	}
 
 	return nil
+}
+
+// ============================================================
+// "接通 orphaned 包"IPC 批次 —— backup / dedup / forensics / gpt /
+// netfs / ocr / parallel / sed 的对外方法
+// ============================================================
+
+// ScheduleBackup 把恢复目录加到系统定时备份（cron / schtasks）。
+// 用户场景：数据找回后想把它定期同步到另一块盘。
+func (a *App) ScheduleBackup(sourceDir, destDir string, hourOfDay int) error {
+	s := backup.Schedule{
+		SourceDir: sourceDir,
+		DestDir:   destDir,
+		HourOfDay: hourOfDay,
+		Frequency: "daily",
+	}
+	return s.Install()
+}
+
+// UnscheduleBackup 取消定时备份
+func (a *App) UnscheduleBackup() error {
+	return backup.Schedule{}.Uninstall()
+}
+
+// BackupInstallCommand 仅给用户看"将要执行的命令"，方便审核
+func (a *App) BackupInstallCommand(sourceDir, destDir string, hourOfDay int) (string, error) {
+	return backup.Schedule{
+		SourceDir: sourceDir, DestDir: destDir, HourOfDay: hourOfDay, Frequency: "daily",
+	}.GenerateInstallCommand()
+}
+
+// FindDuplicateImages 用 aHash 在 outputDir 里找视觉上相似的图片组。
+// 返回每个组里的文件路径列表。
+func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, error) {
+	if outputDir == "" {
+		return nil, fmt.Errorf("outputDir 为空")
+	}
+	if threshold <= 0 {
+		threshold = 5
+	}
+	// 收集 outputDir 下所有图片文件
+	var paths []string
+	var hashes []dedup.AverageHash
+	err := filepath.Walk(outputDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(p))
+		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".gif" {
+			return nil
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		h, err := dedup.ComputeAverageHash(f)
+		if err != nil {
+			return nil // 解码失败跳过，不阻塞整体
+		}
+		paths = append(paths, p)
+		hashes = append(hashes, h)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	groups := dedup.SimilarityGroup(hashes, threshold)
+	out := make([][]string, 0, len(groups))
+	for _, g := range groups {
+		row := make([]string, 0, len(g))
+		for _, idx := range g {
+			row = append(row, paths[idx])
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+// ExportTimeline 时间线 mactime/JSON 输出
+func (a *App) ExportTimeline(outputDir, format string) (string, error) {
+	files := a.engine.GetLastRecoveryResult()
+	if len(files) == 0 {
+		return "", fmt.Errorf("尚无可导出的恢复记录")
+	}
+	scanFiles := a.scanFiles
+	if len(scanFiles) > 0 {
+		// 用扫描到的文件（更完整），否则退化到最近恢复记录
+		events := forensics.BuildTimeline(scanFiles)
+		return writeTimelineFile(outputDir, format, events)
+	}
+	// 从 recovery records 构造最简 event list
+	var rfs []*types.RecoveredFile
+	for _, r := range files {
+		rfs = append(rfs, &types.RecoveredFile{FileName: r.FileName, Size: r.Size})
+	}
+	events := forensics.BuildTimeline(rfs)
+	return writeTimelineFile(outputDir, format, events)
+}
+
+func writeTimelineFile(outputDir, format string, events []forensics.TimelineEvent) (string, error) {
+	if outputDir == "" {
+		if home, _ := os.UserHomeDir(); home != "" {
+			outputDir = home
+		} else {
+			outputDir = "."
+		}
+	}
+	var ext, filename string
+	switch format {
+	case "json":
+		ext = ".ndjson"
+	default:
+		format = "mactime"
+		ext = ".body"
+	}
+	filename = filepath.Join(outputDir, "timeline-"+time.Now().Format("20060102-150405")+ext)
+	f, err := os.Create(filename)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	switch format {
+	case "json":
+		if err := forensics.WriteTimelineJSON(f, events); err != nil {
+			return "", err
+		}
+	default:
+		if err := forensics.WriteTimelineMACTime(f, events); err != nil {
+			return "", err
+		}
+	}
+	return filename, nil
+}
+
+// ExportDFXML 取证标准 XML 报告
+func (a *App) ExportDFXML(outputDir string) (string, error) {
+	files := a.scanFiles
+	if len(files) == 0 {
+		return "", fmt.Errorf("尚无扫描结果可导出")
+	}
+	if outputDir == "" {
+		if home, _ := os.UserHomeDir(); home != "" {
+			outputDir = home
+		} else {
+			outputDir = "."
+		}
+	}
+	path := filepath.Join(outputDir, "dfxml-"+time.Now().Format("20060102-150405")+".xml")
+	f, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return path, forensics.WriteDFXML(f, "DataRecovery", updater.Version, files)
+}
+
+// BuildCustody 把 outputDir 下的所有恢复文件打保管链 manifest.json
+func (a *App) BuildCustody(outputDir, sourceDevice, operator string) (string, error) {
+	c := forensics.Custody{
+		ToolName:     "DataRecovery",
+		ToolVersion:  updater.Version,
+		SourceDevice: sourceDevice,
+		OperatorUser: operator,
+		StartedAt:    time.Now().UTC(),
+	}
+	return forensics.BuildAndWrite(outputDir, c)
+}
+
+// VerifyCustody 校验保管链
+func (a *App) VerifyCustody(outputDir string) ([]string, error) {
+	problems, err := forensics.VerifyCustody(outputDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(problems))
+	for _, p := range problems {
+		out = append(out, p.Error())
+	}
+	return out, nil
+}
+
+// LookupVirusTotal 用户自带 API key 查 hash
+func (a *App) LookupVirusTotal(sha256Hex, apiKey string) (*forensics.VTReport, error) {
+	c := forensics.NewVTClient(apiKey)
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	return c.LookupHash(ctx, sha256Hex)
+}
+
+// RecoverGPTPartitions 从盘尾备份 GPT 恢复丢失的分区表
+func (a *App) RecoverGPTPartitions(drivePath string) ([]gpt.Partition, error) {
+	if drivePath == "" {
+		return nil, fmt.Errorf("drivePath 为空")
+	}
+	r := disk.NewReader(drivePath)
+	if err := r.Open(); err != nil {
+		return nil, fmt.Errorf("打开磁盘: %w", err)
+	}
+	defer r.Close()
+	// 先试主表
+	if h, err := gpt.ReadPrimaryHeader(r); err == nil && h.IsValidCRC {
+		return gpt.ReadPartitions(r, h)
+	}
+	_, parts, err := gpt.RecoverFromBackup(r)
+	return parts, err
+}
+
+// SuggestNetworkMount 给定 smb:// / nfs:// / iscsi:// URL 返回挂载步骤
+func (a *App) SuggestNetworkMount(url string) []netfs.MountAdvice {
+	return netfs.SuggestMount(url)
+}
+
+// FindMountedRemoteImages 扫 /Volumes / /mnt 找已挂载远程盘里的镜像
+func (a *App) FindMountedRemoteImages() []string {
+	return netfs.FindMountedRemoteImages()
+}
+
+// OCRImage 对一张图做 OCR（需本机有 tesseract）
+func (a *App) OCRImage(imagePath string, langs []string) (string, error) {
+	return ocr.Recognize(imagePath, langs)
+}
+
+// OCRSearch 在一批图片里找含 keyword 文字的
+func (a *App) OCRSearch(imagePaths []string, keyword string, langs []string) []string {
+	return ocr.SearchInImages(imagePaths, keyword, langs)
+}
+
+// QueryDiskHealth 读 SMART（早已实现，上次漏挂 binding — 本轮同步补绑定）
+// 已存在，不再重复定义
+
+// QuerySEDStatus TCG OPAL 自加密硬盘锁定检测
+func (a *App) QuerySEDStatus(drivePath string) (*sed.SEDStatus, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	return sed.QueryStatus(ctx, drivePath)
+}
+
+// ParallelScanDrives 多盘并行扫描。
+//
+// jobs 里每项是 {drivePath, mode}；最多 maxParallel 个同时跑。
+// 结果通过"parallel:diskStart / parallel:diskProgress / parallel:fileFound / parallel:diskDone"
+// 事件流推到前端。
+func (a *App) ParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) []parallel.JobResult {
+	cb := parallel.ScanCallback{
+		OnDiskStart: func(j parallel.DiskJob) {
+			wailsRuntime.EventsEmit(a.ctx, "parallel:diskStart", j)
+		},
+		OnDiskProgress: func(j parallel.DiskJob, p types.ScanProgress) {
+			wailsRuntime.EventsEmit(a.ctx, "parallel:diskProgress", map[string]any{
+				"drive": j.DrivePath, "progress": p,
+			})
+		},
+		OnFileFound: func(j parallel.DiskJob, f *types.RecoveredFile) {
+			wailsRuntime.EventsEmit(a.ctx, "parallel:fileFound", map[string]any{
+				"drive": j.DrivePath, "file": f,
+			})
+		},
+		OnDiskDone: func(res parallel.JobResult) {
+			wailsRuntime.EventsEmit(a.ctx, "parallel:diskDone", res)
+		},
+	}
+	return parallel.ScanMultiple(a.ctx, jobs, maxParallel, cb)
+}
+
+// LoadNSRLDatabase 载入 NSRL 良性 hash 列表
+func (a *App) LoadNSRLDatabase(path string) (int, error) {
+	db, err := forensics.LoadNSRLFromFile(path)
+	if err != nil {
+		return 0, err
+	}
+	a.mu.Lock()
+	a.nsrlDB = db
+	a.mu.Unlock()
+	return db.Size(), nil
+}
+
+// UnlockFileVaultVolume 用用户输入的 password 解 FileVault 卷的 keybag → VEK → 注入 engine。
+//
+// 输入：
+//   drivePath     磁盘路径（或镜像）
+//   volumeUUID    目标卷的 APFS volume UUID（32 hex char 或 UUID 标准格式）
+//   password      用户密码
+//   salt          来自 PreBoot plist（用户可手动提供；macOS 上也可从 diskutil 拿）
+//   iter          PBKDF2 迭代数（典型 ~100000，来自 PreBoot plist）
+//
+// 成功后，engine.APFS 扫描路径会自动对该 UUID 卷启用透明解密 reader。
+func (a *App) UnlockFileVaultVolume(drivePath, volumeUUID, password string, salt []byte, iter int) error {
+	if drivePath == "" || password == "" {
+		return fmt.Errorf("drivePath / password 不能为空")
+	}
+	uuid, err := parseHexUUID(volumeUUID)
+	if err != nil {
+		return fmt.Errorf("volumeUUID 解析失败: %w", err)
+	}
+	r := disk.NewReader(drivePath)
+	if err := r.Open(); err != nil {
+		return err
+	}
+	defer r.Close()
+
+	containers, err := apfs.NewScanner(r).FindContainers()
+	if err != nil || len(containers) == 0 {
+		return fmt.Errorf("未在 %s 找到 APFS 容器", drivePath)
+	}
+
+	var targetCont *apfs.Container
+	var targetVol *apfs.Volume
+	for _, c := range containers {
+		for i := range c.Volumes {
+			if c.Volumes[i].UUID == uuid {
+				targetCont = c
+				targetVol = &c.Volumes[i]
+				break
+			}
+		}
+		if targetVol != nil {
+			break
+		}
+	}
+	if targetVol == nil {
+		return fmt.Errorf("未找到 UUID 为 %X 的卷", uuid)
+	}
+	if !targetVol.IsEncrypted {
+		return fmt.Errorf("卷未加密，无需解锁")
+	}
+
+	// 读卷级 keybag
+	kb, err := apfs.ReadKeyBagFromVolume(r, targetCont, targetVol)
+	if err != nil {
+		return fmt.Errorf("读 keybag: %w", err)
+	}
+	// 在 keybag 里找 wrapped VEK + wrapped KEK
+	wv := kb.FindEntry(uuid, apfs.KeyBagTagWrappedVEK)
+	wk := kb.FindEntry(uuid, apfs.KeyBagTagWrappedKEK)
+	if wv == nil || wk == nil {
+		return fmt.Errorf("keybag 缺 wrappedVEK 或 wrappedKEK entry")
+	}
+	if iter <= 0 {
+		iter = 100000
+	}
+	derived := apfs.DeriveKeyFromPassword(password, salt, iter, 32)
+	vek, err := apfs.UnwrapVEKWithDerivedKey(derived, wk.KeyData, wv.KeyData)
+	if err != nil {
+		return fmt.Errorf("解 VEK: %w", err)
+	}
+	a.engine.SetAPFSVEK(uuid, vek)
+	appLogger.Info("FileVault VEK 已注入", "volume", fmt.Sprintf("%X", uuid))
+	return nil
+}
+
+// parseHexUUID 接受 "XXXXXXXX-XXXX-..." 或 32 hex char 的 UUID 字符串
+func parseHexUUID(s string) ([16]byte, error) {
+	var out [16]byte
+	clean := strings.ReplaceAll(s, "-", "")
+	if len(clean) != 32 {
+		return out, fmt.Errorf("UUID 长度 %d != 32 hex chars", len(clean))
+	}
+	for i := 0; i < 16; i++ {
+		var b byte
+		if _, err := fmt.Sscanf(clean[i*2:i*2+2], "%02x", &b); err != nil {
+			return out, err
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+// ListAPFSSnapshots 枚举磁盘上所有 APFS 容器里的 snapshot
+type APFSSnapshotInfo struct {
+	DrivePath     string         `json:"drivePath"`
+	ContainerOffset int64        `json:"containerOffset"`
+	Snapshots     []apfs.Snapshot `json:"snapshots"`
+}
+
+func (a *App) ListAPFSSnapshots(drivePath string) ([]APFSSnapshotInfo, error) {
+	r := disk.NewReader(drivePath)
+	if err := r.Open(); err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	containers, err := apfs.NewScanner(r).FindContainers()
+	if err != nil {
+		return nil, err
+	}
+	var out []APFSSnapshotInfo
+	for _, c := range containers {
+		omap, err := apfs.LoadOmap(r, c.Offset, c.BlockSize, c.OmapOID)
+		if err != nil {
+			continue
+		}
+		for _, v := range c.Volumes {
+			if v.RootTreeOID == 0 {
+				continue
+			}
+			snaps, err := apfs.EnumerateSnapshots(r, c.Offset, c.BlockSize, omap, v.RootTreeOID)
+			if err != nil || len(snaps) == 0 {
+				continue
+			}
+			out = append(out, APFSSnapshotInfo{
+				DrivePath:       drivePath,
+				ContainerOffset: c.Offset,
+				Snapshots:       snaps,
+			})
+		}
+	}
+	return out, nil
+}
+
+// GetBadSectors 返回最近一次扫描中 ResilientReader 跳过的坏扇区列表。
+// 当前 engine 不直接用 ResilientReader；此接口预留给未来 engine 包装时用。
+// 现在没有数据时返回空数组，让前端可以"总是显示'0 坏扇区'指示灯"。
+func (a *App) GetBadSectors() []disk.BadSector {
+	return []disk.BadSector{}
+}
+
+// IsKnownBenign 已载入的 NSRL 库里 hash 是否为已知良性
+func (a *App) IsKnownBenign(sha256Hex string) bool {
+	a.mu.Lock()
+	db := a.nsrlDB
+	a.mu.Unlock()
+	if db == nil {
+		return false
+	}
+	return db.IsKnownBenign(sha256Hex)
 }
