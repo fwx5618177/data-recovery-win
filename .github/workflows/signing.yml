@@ -1,0 +1,181 @@
+name: Code Signing (reusable)
+
+# 这是 reusable workflow —— 当前只被将来的 release.yml 通过 workflow_call 引用；
+# 现在没被任何 workflow call，它不会自动跑。未来想启用时在 release.yml 加：
+#
+#   sign:
+#     needs: build
+#     uses: ./.github/workflows/signing.yml
+#     with:
+#       version: ${{ github.ref_name }}
+#     secrets: inherit
+#
+# ============================================================
+# 语法约束：GitHub Actions 不允许 job-level `if: secrets.X != ''`。
+# 解决：每个 job 第一步是 gate，检查 secret 是否配置；没配 → 输出 skip=true，
+# 后续 step 都 `if: steps.gate.outputs.skip != 'true'` 跳过。
+#
+# 效果：
+#   - 没配 secrets：job 启动，第一步打印"跳过"，其余 step 不跑 → 几秒结束，绿
+#   - 配了 secrets：正常签名 → 上传签名后的 artifact
+# ============================================================
+#
+# 需要配的 GitHub Secrets（Settings → Secrets and variables → Actions）：
+#
+#   Windows (避免 SmartScreen 警告):
+#     WINDOWS_SIGN_CERT      base64 编码的 .pfx 文件内容
+#     WINDOWS_SIGN_PASSWORD  .pfx 密码
+#
+#   macOS (避免 Gatekeeper 警告):
+#     APPLE_DEVELOPER_ID      "Developer ID Application: Your Name (XXXXXXXXXX)"
+#     APPLE_CERT              base64 编码的 Developer ID 证书 .p12
+#     APPLE_CERT_PASSWORD     .p12 密码
+#     APPLE_NOTARY_USER       Apple ID (用于 App-specific password)
+#     APPLE_NOTARY_PASSWORD   App-specific password
+#     APPLE_NOTARY_TEAM_ID    10 字符 Team ID
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+jobs:
+  # ===============================================================
+  # Windows 代码签名：signtool + EV 证书
+  # ===============================================================
+  windows-sign:
+    runs-on: windows-latest
+    steps:
+      - name: Gate — check if Windows cert is configured
+        id: gate
+        shell: bash
+        env:
+          CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "WINDOWS_SIGN_CERT 未配置 → 跳过 Windows 代码签名"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download build artifact
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: DataRecovery-windows-amd64.exe
+
+      - name: Decode cert
+        if: steps.gate.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_SIGN_CERT }}
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx",
+            [Convert]::FromBase64String($env:CERT_B64))
+
+      - name: Sign
+        if: steps.gate.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        run: |
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" `
+            sign /v /f cert.pfx /p $env:CERT_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "DataRecovery-windows-amd64.exe"
+
+      - name: Upload signed artifact
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DataRecovery-windows-amd64-signed.exe
+          path: DataRecovery-windows-amd64.exe
+
+  # ===============================================================
+  # macOS 代码签名 + Notarization
+  # ===============================================================
+  macos-sign-notarize:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - name: Gate — check if Apple cert is configured
+        id: gate
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERT }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "APPLE_CERT 未配置 → 跳过 macOS 签名 + 公证"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download build artifact
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: DataRecovery-darwin-${{ matrix.arch }}.tar.gz
+
+      - name: Extract .app
+        if: steps.gate.outputs.skip != 'true'
+        run: tar -xzf DataRecovery-darwin-${{ matrix.arch }}.tar.gz
+
+      - name: Import signing cert
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERT }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          echo "$CERT" | base64 -d > cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k actions build.keychain
+
+      - name: Sign .app
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          DEV_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: |
+          APP=$(find . -name "*.app" -maxdepth 2 | head -1)
+          codesign --deep --force --options runtime --timestamp \
+            --sign "$DEV_ID" "$APP"
+
+      - name: Notarize
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          APP=$(find . -name "*.app" -maxdepth 2 | head -1)
+          ditto -c -k --keepParent "$APP" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --apple-id "$NOTARY_USER" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP"
+
+      - name: Repack signed bundle
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          APP=$(find . -name "*.app" -maxdepth 2 | head -1)
+          tar -czf DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz "$APP"
+
+      - name: Upload signed artifact
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz
+          path: DataRecovery-darwin-${{ matrix.arch }}-signed.tar.gz

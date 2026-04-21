@@ -164,9 +164,9 @@ jobs:
             - libwebkit2gtk-4.0-37
           EOF
       - name: Build .deb
-        run: ./nfpm package -p deb -t data-recovery_${GITHUB_REF_NAME#v}_amd64.deb
+        run: ./nfpm package -p deb -t "data-recovery_${GITHUB_REF_NAME#v}_amd64.deb"
       - name: Build .rpm
-        run: ./nfpm package -p rpm -t data-recovery-${GITHUB_REF_NAME#v}-1.x86_64.rpm
+        run: ./nfpm package -p rpm -t "data-recovery-${GITHUB_REF_NAME#v}-1.x86_64.rpm"
       - name: Upload .deb / .rpm
         uses: actions/upload-artifact@v4
         with:
