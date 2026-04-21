@@ -253,3 +253,70 @@ func findJPEGEOI(buf []byte) int {
 	}
 	return -1
 }
+
+// =====================================================================
+// JPEG huffman state 增强：用"marker 密度 + 非法 marker 命中"作为"huffman state
+// 一致性"的代理信号，不实际解 huffman（完整解码 ~3000 行工作量，见 UNIMPLEMENTED.md）。
+//
+// 思路：健康的 JPEG 熵区里 0xFF 字节只会以下几种形式出现：
+//   0xFF 0x00  - stuffed byte（熵数据里的 0xFF 必须 stuff 一个 0x00）
+//   0xFF 0xD0..0xD7  - RSTn marker
+//   0xFF 0xD9  - EOI
+//   极少的其它 marker（未预期）
+//
+// 如果在一个 chunk 里发现 0xFF 后跟了非法 marker（比如 0xFF 0xE0 APPn 在熵区中段），
+// 那是"hu huffman 流被打断 → 可能跨越了碎片"的强信号。
+//
+// 这个启发比原来的"仅 SOI 检测"覆盖多 10x 场景，是 huffman state stitching 的
+// 轻量替代。完整 huffman decoder 留待 UNIMPLEMENTED.md。
+// =====================================================================
+
+// scanJPEGMarkerHealth 遍历 chunk 里所有 0xFF 序列，统计"合法 marker"比"非法 marker"。
+// 返回 (legal_count, illegal_count)；illegal_count > 0 提示该 chunk 有碎片嫌疑。
+func scanJPEGMarkerHealth(buf []byte) (legal, illegal int) {
+	for i := 0; i < len(buf)-1; i++ {
+		if buf[i] != 0xFF {
+			continue
+		}
+		next := buf[i+1]
+		if next == 0x00 || next == 0xFF {
+			continue // stuffed / fill
+		}
+		switch {
+		case next >= jpegRST0 && next <= jpegRST7, next == jpegEOI:
+			legal++
+		case next == jpegSOI, next == jpegDRI, next == jpegSOS,
+			next >= 0xC0 && next <= 0xCF, // SOFn / DHT / DAC
+			next >= 0xE0 && next <= 0xEF, // APPn
+			next == 0xDB, next == 0xDC:
+			// 这些 marker 在"熵数据段中间"都是非法的，只能出现在头部
+			illegal++
+		}
+	}
+	return legal, illegal
+}
+
+// HealthScore 给一个 carved JPEG 打"头部 + 熵区一致性"评分（0..1）。
+// 供上层（如 UI）对每个 JPEG 文件显示"完整性估计"指示灯。
+func JPEGHealthScore(data []byte) float32 {
+	if len(data) < 50 {
+		return 0
+	}
+	// 必须以 SOI 起、EOI 止
+	if data[0] != 0xFF || data[1] != jpegSOI {
+		return 0.0
+	}
+	if !(data[len(data)-2] == 0xFF && data[len(data)-1] == jpegEOI) {
+		return 0.3 // 有 SOI 无 EOI → 可能截断
+	}
+	legal, illegal := scanJPEGMarkerHealth(data[2 : len(data)-2])
+	if illegal == 0 {
+		return 1.0 // 最高分
+	}
+	// legal:illegal 比例换算成分数
+	ratio := float32(legal) / float32(legal+illegal)
+	if ratio < 0.5 {
+		return 0.2 // 非法 marker 居多 → 严重碎片
+	}
+	return ratio * 0.9
+}

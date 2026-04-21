@@ -8,7 +8,7 @@
 //
 // 不依赖 image/jpeg：只解 APP1 segment 里的 TIFF/EXIF 子结构，规模 ~150 行。
 //
-// HEIC / HEIF 也用 EXIF 但藏在 ISO BMFF box 里 — 当前不支持，留 TODO。
+// HEIC / HEIF 也用 EXIF 但藏在 ISO BMFF box 里 — 由 ExtractDateTimeHEIC 支持。
 package exif
 
 import (

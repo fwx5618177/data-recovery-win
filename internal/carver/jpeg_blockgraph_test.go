@@ -131,6 +131,38 @@ func TestJPEGCarver_StitchesAcrossGarbage(t *testing.T) {
 	}
 }
 
+// JPEG health score：健康 + 碎片 + 截断 三态
+func TestJPEGHealthScore(t *testing.T) {
+	// 健康：SOI + 一些 RST + EOI，无非法 marker
+	good := []byte{0xFF, jpegSOI}
+	for i := 0; i < 8; i++ {
+		good = append(good, 0x10, 0x20, 0xFF, 0x00, 0x30, 0xFF, jpegRST0+byte(i%8))
+	}
+	good = append(good, 0xFF, jpegEOI)
+	if s := JPEGHealthScore(good); s < 0.9 {
+		t.Errorf("健康 JPEG score %f 应 ≥0.9", s)
+	}
+
+	// 碎片：中段插入 APP0 (非法)
+	bad := append([]byte{}, good[:len(good)-2]...)
+	bad = append(bad, 0xFF, 0xE0, 0x00, 0x10) // 非法 APP0 marker
+	bad = append(bad, 0xFF, jpegEOI)
+	if s := JPEGHealthScore(bad); s >= JPEGHealthScore(good) {
+		t.Errorf("碎片 JPEG score %f 应 < 健康 score", s)
+	}
+
+	// 截断：无 EOI
+	trunc := good[:len(good)-2]
+	if s := JPEGHealthScore(trunc); s >= 0.5 {
+		t.Errorf("截断 JPEG score %f 应 <0.5", s)
+	}
+
+	// 非 JPEG
+	if JPEGHealthScore([]byte{0x00, 0x01}) != 0 {
+		t.Error("非 JPEG 应 0 分")
+	}
+}
+
 // findJPEGEOI 单元测试
 func TestFindJPEGEOI(t *testing.T) {
 	if findJPEGEOI([]byte{0x10, 0xFF, 0xD9, 0x20}) != 1 {
