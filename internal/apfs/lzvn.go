@@ -89,6 +89,81 @@ func DecompressLZVN(src []byte, dst []byte) (int, error) {
 			srcPos += litLen
 			continue
 		}
+		// small literal + match (0x00..0x5F)
+		//   op byte = LLMMMMMM  (L = literal len - 0..3, M = match len)
+		//   跟随: 1-3 字节 literals + 2 字节 distance (LE) + match
+		// 实际 LZVN op 0x00..0x5F 的解法（从 Apple lzfse 源码反推简化版）：
+		//   bits 7-6 (2 bits) = L (literal count 0..3)
+		//   bits 5-0 (6 bits) = M - 3 (match length 3..66)
+		if op <= 0x5F {
+			L := int(op>>6) & 0x03
+			M := int(op&0x3F) + 3
+			srcPos++
+			if srcPos+L+2 > len(src) {
+				return dstPos, fmt.Errorf("small op 越界")
+			}
+			// literals
+			if L > 0 {
+				if dstPos+L > dstCap {
+					return dstPos, fmt.Errorf("dst 越界")
+				}
+				copy(dst[dstPos:dstPos+L], src[srcPos:srcPos+L])
+				dstPos += L
+				srcPos += L
+			}
+			// distance: 2 字节 LE
+			dist := int(src[srcPos]) | int(src[srcPos+1])<<8
+			srcPos += 2
+			if dist == 0 || dist > dstPos {
+				return dstPos, fmt.Errorf("invalid back-ref distance %d at pos %d", dist, dstPos)
+			}
+			// match：从 dst[dstPos-dist] 拷 M 字节（可能重叠 = 字节级 RLE 行为）
+			if dstPos+M > dstCap {
+				M = dstCap - dstPos
+				if M <= 0 {
+					return dstPos, nil
+				}
+			}
+			for k := 0; k < M; k++ {
+				dst[dstPos+k] = dst[dstPos-dist+k]
+			}
+			dstPos += M
+			continue
+		}
+		// 0x70..0x7F："medium literal + medium match"，下面 1 字节 = L（0..15）
+		if op>>4 == 0x07 {
+			if srcPos+1 >= len(src) {
+				return dstPos, fmt.Errorf("medium op 长度字节越界")
+			}
+			L := int(op&0x0F) + 1
+			M := 3 + int(src[srcPos+1])
+			srcPos += 2
+			if srcPos+L+2 > len(src) {
+				return dstPos, fmt.Errorf("medium op literals 越界")
+			}
+			// literals
+			if dstPos+L > dstCap {
+				return dstPos, fmt.Errorf("dst 越界")
+			}
+			copy(dst[dstPos:dstPos+L], src[srcPos:srcPos+L])
+			dstPos += L
+			srcPos += L
+			// distance
+			dist := int(src[srcPos]) | int(src[srcPos+1])<<8
+			srcPos += 2
+			if dist == 0 || dist > dstPos {
+				return dstPos, fmt.Errorf("medium op bad dist %d", dist)
+			}
+			if dstPos+M > dstCap {
+				M = dstCap - dstPos
+			}
+			for k := 0; k < M; k++ {
+				dst[dstPos+k] = dst[dstPos-dist+k]
+			}
+			dstPos += M
+			continue
+		}
+
 		// 不识别的 op：返回 *LZVNOpUnsupportedError 让上层判断
 		return dstPos, &LZVNOpUnsupportedError{Op: op, Pos: srcPos}
 	}

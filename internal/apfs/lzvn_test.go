@@ -51,6 +51,32 @@ func TestDecompressLZVN_UnsupportedOpReturnsPartial(t *testing.T) {
 	}
 }
 
+// small op (op ≤ 0x5F): L=bits7-6, M=(op&0x3F)+3
+//   op=0x42  = 01 000010 → L=1, M=5
+// 先用 0xE2 "ABC" 累积 3 字节，再用 0x42 做 1 literal "D" + distance=3 match 5
+func TestDecompressLZVN_SmallOpMatch(t *testing.T) {
+	src := []byte{
+		0xE2, 'A', 'B', 'C', // 3 literals
+		0x42, 'D', 0x04, 0x00, // 1 literal "D" + distance=4 + match 5 bytes
+		0x06, // EOS
+	}
+	dst := make([]byte, 32)
+	n, err := DecompressLZVN(src, dst)
+	if err != nil {
+		t.Fatalf("DecompressLZVN: %v", err)
+	}
+	// dst[0..3] = "ABCD"，dstPos=4；distance=4 → 从 dst[0]='A' 起 5 字节（含重叠）= "ABCDA"
+	want := []byte("ABCDABCDA")
+	if n != len(want) {
+		t.Fatalf("n=%d want %d; got=%q", n, len(want), dst[:n])
+	}
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Fatalf("byte %d = %q want %q (full got=%q)", i, dst[i], want[i], dst[:n])
+		}
+	}
+}
+
 func TestIsLZFSEMagic(t *testing.T) {
 	for _, m := range []string{"bvxn", "bvx2", "bvx-", "bvx$"} {
 		if !IsLZFSEMagic([]byte(m)) {

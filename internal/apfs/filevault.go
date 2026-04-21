@@ -24,10 +24,16 @@ import (
 //
 // 派生 VEK 的辅助：DeriveKEKFromPassword（PBKDF2-HMAC-SHA256 + UTF-16LE 编码 password），
 // 模拟 macOS Recovery 模式输入用户密码后的派生路径。完整 KEK → VEK 解 wrap 还需要从 keybag
-// 解出 wrapped key + AES-KeyWrap（RFC 3394）；本实现暂提供 PBKDF2 这一步 + 一个 stub 注释。
+// 解出 wrapped key + AES-KeyWrap（RFC 3394）。
 //
-// 调用方：当用户能从 Apple Recovery / 取证工具拿到明文 VEK 时，本骨架可直接解扇区。
-// 完整流程（用户密码 → keybag → KEK → VEK）需要 keybag parser，单独 PR。
+// 完整流程已就绪：
+//   - PBKDF2 （DeriveKeyFromPassword）
+//   - keybag 解析（keybag.go：ParseKeyBag / ReadKeyBagFromContainer / ReadKeyBagFromVolume）
+//   - AES-KeyUnwrap RFC 3394（keywrap.go）
+//   - UnwrapVEKWithDerivedKey 把链路串起来
+//   - FileVaultXTSCipher 解扇区 + apfs.EncryptedReader 接到 fs tree
+//
+// App.UnlockFileVaultVolume 把这些都串起来暴露给用户。
 
 // FileVaultXTSCipher 实现 SectorCipher 风格接口（不直接 import bitlocker.SectorCipher
 // 是为了避免循环依赖；签名一致即可）
