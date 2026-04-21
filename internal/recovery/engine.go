@@ -126,6 +126,9 @@ type Engine struct {
 	// APFS 扫描缓存（每个文件按 extent 列表恢复）
 	apfsSources map[string]apfsRecoverySource
 
+	// FileVault VEK：volume UUID → VEK 字节，用户 unlock 后注入让 FileVault 卷也能枚举
+	apfsVEKs map[[16]byte][]byte
+
 	// HFS+ 扫描缓存（每个文件按 fork extents 恢复）
 	hfsplusSources map[string]hfsplusRecoverySource
 
@@ -145,6 +148,24 @@ func NewEngine() *Engine {
 	return &Engine{
 		sigDB: signature.NewSignatureDB(),
 	}
+}
+
+// SetAPFSVEK 注入 FileVault 卷的 VEK；volumeUUID 是 apfs_superblock.uuid（大端 GUID 字节）。
+// 调用时机：用户在 UI 输入密码后、App 用 keybag 解出 VEK → 调这个方法把 VEK 挂到 engine，
+// 随后 engine 的 APFS scan 路径自动对该 UUID 卷启用 EncryptedReader。
+func (e *Engine) SetAPFSVEK(volumeUUID [16]byte, vek []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.apfsVEKs == nil {
+		e.apfsVEKs = make(map[[16]byte][]byte)
+	}
+	e.apfsVEKs[volumeUUID] = vek
+}
+
+func (e *Engine) getAPFSVEK(volumeUUID [16]byte) []byte {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.apfsVEKs[volumeUUID]
 }
 
 // IsScanning 返回当前是否正在扫描

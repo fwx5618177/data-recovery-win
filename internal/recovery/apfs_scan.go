@@ -65,8 +65,48 @@ func (e *Engine) runAPFSScan(
 		c := c // pin loop var; FindContainers 返回 []*Container
 		for _, v := range c.Volumes {
 			if v.IsEncrypted {
-				logger.Info("APFS 卷加密（FileVault），fs tree 不可读，跳过",
-					"name", v.Name, "uuid", fmt.Sprintf("%X", v.UUID))
+				// FileVault 加密卷：检查 engine 是否已通过 SetAPFSVEK 注入 VEK
+				vek := e.getAPFSVEK(v.UUID)
+				if vek == nil {
+					logger.Info("APFS 卷加密（FileVault）— 未提供 VEK，fs tree 不可读，跳过",
+						"name", v.Name, "uuid", fmt.Sprintf("%X", v.UUID))
+					continue
+				}
+				// 有 VEK：包一层透明解密 reader，fs tree 就能按普通路径遍历
+				encReader, err := apfs.NewEncryptedReader(reader, vek, c.BlockSize, c.Offset)
+				if err != nil {
+					logger.Warn("FileVault EncryptedReader 构造失败", "vol", v.Name, "err", err)
+					continue
+				}
+				if v.RootTreeOID == 0 {
+					continue
+				}
+				crawler := apfs.NewFSTreeCrawler(encReader, c.Offset, c.BlockSize, omap)
+				if err := crawler.Crawl(v.RootTreeOID); err != nil {
+					logger.Warn("FileVault fs tree 遍历失败", "vol", v.Name, "err", err)
+					continue
+				}
+				entries := crawler.EnumerateFiles()
+				vCopy := v
+				for _, ent := range entries {
+					if ent.IsDir {
+						continue
+					}
+					rf := apfsEntryToRecoveredFile(ent, c, &vCopy)
+					if rf == nil {
+						continue
+					}
+					rf.Description += " (FileVault 解密后)"
+					files = append(files, rf)
+					e.cacheAPFSSource(rf.ID, apfsRecoverySource{
+						ContainerOffset: c.Offset,
+						BlockSize:       c.BlockSize,
+						Extents:         ent.Extents,
+					})
+					if onFound != nil {
+						onFound(rf)
+					}
+				}
 				continue
 			}
 			if v.RootTreeOID == 0 {
