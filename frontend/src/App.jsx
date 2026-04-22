@@ -392,49 +392,6 @@ export default function App() {
     };
   }, [bridgeState, wailsRuntime, wailsApp, queueFile, flushPending]);
 
-  // 全局键盘快捷键
-  // - Esc: 关弹窗 / 停扫描
-  // - Ctrl+/Cmd+F: 聚焦"搜索文件名"输入框
-  // - Ctrl+/Cmd+A: 全选当前可见文件（仅 workbench 页 + 目标不在 input/textarea 时）
-  useEffect(() => {
-    function handler(e) {
-      const inEditable = e.target instanceof HTMLElement &&
-        (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
-
-      // Esc: 让任意 modal 自己消失（通过 keydown 冒泡）—— 这里仅处理"无 modal 时停扫描"
-      if (e.key === "Escape" && !inEditable && scanActive) {
-        e.preventDefault();
-        if (globalThis.confirm?.("停止当前扫描？")) {
-          stopScan();
-        }
-        return;
-      }
-
-      // Ctrl/Cmd+F：聚焦搜索框
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && currentPage === "workbench") {
-        const input = globalThis.document?.querySelector(".file-table-search input");
-        if (input) {
-          e.preventDefault();
-          input.focus();
-          if (input.select) input.select();
-        }
-        return;
-      }
-
-      // Ctrl/Cmd+A：当前页全选（仅 workbench；不打断输入框里的 select-all）
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" &&
-          currentPage === "workbench" && !inEditable) {
-        const allBtn = globalThis.document?.querySelector("[data-shortcut='select-all-visible']");
-        if (allBtn) {
-          e.preventDefault();
-          allBtn.click();
-        }
-      }
-    }
-    globalThis.addEventListener("keydown", handler);
-    return () => globalThis.removeEventListener("keydown", handler);
-  }, [scanActive, currentPage, stopScan]);
-
   // 启动后拉一次 pending 状态；如果上一次会话下载好了，进入本次直接展示"重启以应用"
   useEffect(() => {
     if (bridgeState !== "ready" || !wailsApp?.GetPendingUpdate) return;
@@ -521,6 +478,46 @@ export default function App() {
     wailsApp.StopScan().catch(() => {});
     setScanActive(false);
   }, [wailsApp]);
+
+  // 全局键盘快捷键（必须在 stopScan 声明之后，否则 TDZ 报错）
+  // - Esc: 关弹窗 / 停扫描
+  // - Ctrl+/Cmd+F: 聚焦"搜索文件名"输入框
+  // - Ctrl+/Cmd+A: 全选当前可见文件（仅 workbench 页 + 目标不在 input/textarea 时）
+  useEffect(() => {
+    function handler(e) {
+      const inEditable = e.target instanceof HTMLElement &&
+        (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+
+      if (e.key === "Escape" && !inEditable && scanActive) {
+        e.preventDefault();
+        if (globalThis.confirm?.("停止当前扫描？")) {
+          stopScan();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && currentPage === "workbench") {
+        const input = globalThis.document?.querySelector(".file-table-search input");
+        if (input) {
+          e.preventDefault();
+          input.focus();
+          if (input.select) input.select();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" &&
+          currentPage === "workbench" && !inEditable) {
+        const allBtn = globalThis.document?.querySelector("[data-shortcut='select-all-visible']");
+        if (allBtn) {
+          e.preventDefault();
+          allBtn.click();
+        }
+      }
+    }
+    globalThis.addEventListener("keydown", handler);
+    return () => globalThis.removeEventListener("keydown", handler);
+  }, [scanActive, currentPage, stopScan]);
 
   // 用 TPM 卷的内存镜像（hiberfil.sys / dump）解锁并扫描
   const unlockBitLockerMemoryAndScan = useCallback(async (vol, memImagePath) => {

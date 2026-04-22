@@ -125,6 +125,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 所有 36 个 Go 包通过 `go vet -race -count=1 -short`
 
 ### Fixed
+- **Windows 启动白屏** —— 两处修复
+  - `vite.config.js`：`base: "./"` 改相对路径（WebView2 对 `/assets/` 绝对路径解析不稳），`inlineDynamicImports: true` 把 dynamic import 内联到单 bundle，避免 chunk fetch 失败
+  - `App.jsx` 键盘快捷键 `useEffect` 依赖数组里引用了在下方才声明的 `stopScan`（const TDZ）→ render 阶段 `ReferenceError` → React 挂载失败 → 白屏；把这段 `useEffect` 移到 `stopScan` 声明之后
 - `admin_unix.go` `syscall.Kill(getpid(), SIGTERM)` 导致 Wails bindings 生成阶段父进程异常退出 → CI "dead parents" —— 改为 `return true, nil` 让 main 正常退出 + 非交互环境跳过
 - `ScanEncryptedVolumes` 多扫描路径重复命中去重
 - `DecryptingReader` 原来只支持卷 offset=0；加 `volumeOffset` 让物理盘上任意位置的 BitLocker 卷都能解
