@@ -1668,15 +1668,24 @@ func (e *Engine) recoverEXTFile(file *types.RecoveredFile, outputPath string) er
 	return writer.WriteEXTFile(file, ranges, source.SuperBlock, outputPath)
 }
 
-// Stop 取消正在进行的扫描
+// Stop 取消正在进行的扫描。
+//
+// 两步终止：
+//  1. cancel context — 让所有循环里检查 ctx.Done() 的 goroutine 自然退出
+//  2. 调 reader.Cancel() — 强制中断卡在内核 ReadAt syscall 上的 goroutine
+//     （ctx.Cancel 无法穿透 syscall；不调 Cancel 则大块读会让 Stop 看似无反应）
 func (e *Engine) Stop() {
 	e.mu.RLock()
 	cancel := e.scanCancel
+	reader := e.reader
 	e.mu.RUnlock()
 
 	if cancel != nil {
 		logger.Info("正在取消扫描")
 		cancel()
+	}
+	if c, ok := reader.(disk.Canceller); ok {
+		_ = c.Cancel()
 	}
 }
 

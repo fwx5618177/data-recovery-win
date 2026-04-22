@@ -46,7 +46,18 @@ func getAlignedBuf(size int64) ([]byte, func()) {
 var (
 	modkernel32          = windows.NewLazySystemDLL("kernel32.dll")
 	procSetFilePointerEx = modkernel32.NewProc("SetFilePointerEx")
+	procCancelIoEx       = modkernel32.NewProc("CancelIoEx")
 )
+
+// cancelIoEx 取消 handle 上所有 pending IO，让阻塞中的 ReadFile 立刻返回错误。
+// lpOverlapped 传 NULL 表示取消同步 IO 也即所有 pending IO。
+func cancelIoEx(handle windows.Handle) error {
+	r1, _, e1 := procCancelIoEx.Call(uintptr(handle), 0)
+	if r1 == 0 {
+		return e1
+	}
+	return nil
+}
 
 // setFilePointerEx wraps the Windows SetFilePointerEx API which is not
 // directly exported by golang.org/x/sys/windows.
@@ -304,4 +315,18 @@ func (r *windowsReader) SectorSize() int {
 // DevicePath 返回设备路径
 func (r *windowsReader) DevicePath() string {
 	return r.path
+}
+
+// Cancel 取消所有 pending IO，强制让正在阻塞的 ReadAt 立即返回错误。
+// 用途：StopScan 时让卡在内核 ReadFile 上的 goroutine 立刻醒来，避免 stop
+// 半天没反应。不关 handle —— 后续 ReadAt 仍可继续；如要彻底释放，调 Close。
+//
+// 注意：Cancel 不持锁，因为 ReadAt 已经持有 mu —— 持锁等不到 ReadAt 释放就死锁。
+// handle 在 Open / Close 之外只读 + windows 句柄一旦获得后用法是线程安全的。
+func (r *windowsReader) Cancel() error {
+	h := r.handle
+	if h == windows.InvalidHandle {
+		return nil
+	}
+	return cancelIoEx(h)
 }

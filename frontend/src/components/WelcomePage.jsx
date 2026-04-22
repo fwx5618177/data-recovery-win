@@ -88,13 +88,19 @@ export default function WelcomePage({
                 {pendingSession.completed ? " 已完成" : " 被中断"}，
                 目前已收集 {(pendingSession.files?.length || 0).toLocaleString()} 个文件（
                 {formatSize(pendingSession.progress?.bytesScanned || 0)} 已扫描）。
-                直接恢复可以跳过重新扫描。
+                <br />
+                <span style={{ opacity: 0.8 }}>
+                  ⚠️ 如果上次因卡死被强关，请先 <b>丢弃</b> 旧会话后再重新扫描；
+                  恢复旧会话只会加载旧文件列表，不会重新扫描。
+                </span>
               </div>
             </div>
             <div className="banner__actions">
-              <button className="btn btn--sm" onClick={onDiscardSession}>丢弃</button>
-              <button className="btn btn--primary btn--sm" onClick={onRestoreSession}>
-                继续上次扫描结果
+              <button className="btn btn--primary btn--sm" onClick={onDiscardSession}>
+                丢弃旧会话
+              </button>
+              <button className="btn btn--sm" onClick={onRestoreSession}>
+                恢复旧文件列表
               </button>
             </div>
           </div>

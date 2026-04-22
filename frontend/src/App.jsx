@@ -185,16 +185,9 @@ export default function App() {
       const list = await wailsApp.GetDrives();
       const drives = Array.isArray(list) ? list : [];
       setDrives(drives);
-      // 后台并行扫每块盘的加密卷预警；失败静默
-      if (wailsApp.ScanEncryptedVolumes && drives.length > 0) {
-        Promise.all(drives.map((d) =>
-          wailsApp.ScanEncryptedVolumes(d.path).catch(() => [])
-        )).then((results) => {
-          const flat = [];
-          results.forEach((r) => { if (Array.isArray(r)) flat.push(...r); });
-          setEncryptedVolumes(flat);
-        }).catch(() => {});
-      }
+      // 注意：不再在启动时并发对每块盘跑 ScanEncryptedVolumes —— 那是真实 IO，
+      // 一块 dirty U 盘（系统层 chkdsk 中）可能让 CreateFile hang，连带卡 wails IPC
+      // 队列。改为：用户选中某块盘后才单盘触发（loadEncryptedVolumesForDrive）。
     } catch (err) {
       setDrives([]);
       setDriveLoadError(getFriendlyActionError("读取磁盘列表", err));
@@ -202,6 +195,21 @@ export default function App() {
       setIsLoadingDrives(false);
     }
   }, [bridgeState, wailsApp]);
+
+  // 用户选中一块盘后才扫这块盘的加密卷；后端已加 5s Open 超时
+  const loadEncryptedVolumesForDrive = useCallback(async (drivePath) => {
+    if (!wailsApp?.ScanEncryptedVolumes || !drivePath) return;
+    try {
+      const list = await wailsApp.ScanEncryptedVolumes(drivePath);
+      if (Array.isArray(list)) {
+        // 合并：保留其他盘已扫出的，替换/追加当前盘的
+        setEncryptedVolumes((prev) => {
+          const others = prev.filter((v) => v.drivePath !== drivePath);
+          return [...others, ...list];
+        });
+      }
+    } catch { /* 单盘失败静默：用户体验上等同"没加密卷" */ }
+  }, [wailsApp]);
 
   useEffect(() => {
     if (bridgeState !== "ready" || !wailsApp) return;
@@ -232,6 +240,23 @@ export default function App() {
     if (!match) setSelectedDrive(null);
     else if (match !== selectedDrive) setSelectedDrive(match);
   }, [drives, selectedDrive]);
+
+  // 用户选中真实盘后再扫该盘的加密卷预警（启动时不并发跑，避免 dirty U 盘 hang）
+  useEffect(() => {
+    if (!selectedDrive?.path) return;
+    if (selectedDrive.path.startsWith("__")) return; // 跳过 image-file 之类伪 drive
+    loadEncryptedVolumesForDrive(selectedDrive.path);
+  }, [selectedDrive, loadEncryptedVolumesForDrive]);
+
+  // U 盘拔插轻量轮询：在 welcome / 非扫描状态下每 30s 刷一次盘列表
+  // 没做原生 WM_DEVICECHANGE 监听的简易替代；扫描中暂停以免打扰
+  useEffect(() => {
+    if (bridgeState !== "ready") return;
+    if (scanActive || recoveryActive) return;
+    if (currentPage !== "welcome") return;
+    const id = setInterval(() => { loadDrives(); }, 30_000);
+    return () => clearInterval(id);
+  }, [bridgeState, scanActive, recoveryActive, currentPage, loadDrives]);
 
   /* =====================================================================
      3. 扫描事件订阅（节流合并到 state）

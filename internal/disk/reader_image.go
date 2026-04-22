@@ -96,6 +96,18 @@ func (r *imageFileReader) SectorSize() int { return 512 }
 
 func (r *imageFileReader) DevicePath() string { return r.path }
 
+// Cancel 关闭镜像 file，让阻塞中的 ReadAt 立刻返回错误。
+// 镜像文件本身不会真 hang（本地文件 IO 一般立即返回），主要为了接口一致性。
+func (r *imageFileReader) Cancel() error {
+	r.mu.Lock()
+	f := r.file
+	r.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}
+
 // looksLikeDevicePath 粗略判断一个路径"像不像"操作系统的原盘设备：
 //   - Windows 原盘:          `\\.\PhysicalDriveN` / `\\.\C:` / `\\.\X:`
 //   - Windows 卷影副本 (VSS): `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN`

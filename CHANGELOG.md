@@ -128,6 +128,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Windows 启动白屏** —— 两处修复
   - `vite.config.js`：`base: "./"` 改相对路径（WebView2 对 `/assets/` 绝对路径解析不稳），`inlineDynamicImports: true` 把 dynamic import 内联到单 bundle，避免 chunk fetch 失败
   - `App.jsx` 键盘快捷键 `useEffect` 依赖数组里引用了在下方才声明的 `stopScan`（const TDZ）→ render 阶段 `ReferenceError` → React 挂载失败 → 白屏；把这段 `useEffect` 移到 `stopScan` 声明之后
+- **扫描卡死 / 停不下来 / 插盘卡死**（一组关联根因）
+  - `disk.OpenWithTimeout` 5s 超时包装 `Open()`，避免 dirty U 盘 / 系统级 chkdsk 中的设备让 `CreateFile` hang，连带阻塞整个 wails IPC 队列
+  - `ScanEncryptedVolumes` 启动时不再对每块盘并发触发 —— 改为用户在 WelcomePage 选中具体盘后才单盘扫描；启动只列盘，不做真实块读
+  - `Engine.Stop` 除了 cancel ctx，还调用新增的 `disk.Canceller.Cancel()` —— Windows 用 `CancelIoEx` 中断 pending IO，Unix 用 close handle —— 让卡在内核 `ReadAt` syscall 上的扫描 goroutine 立即返回，"停止扫描"按钮真的能停
+  - WelcomePage 未完成会话 banner：把"丢弃"改为主操作按钮 + 加引导文案，让被卡循环困住的用户能一键逃出
+  - 前端 30s 轻量轮询 `GetDrives` 检测 U 盘插拔（仅 welcome 页 + 非扫描状态），无原生 `WM_DEVICECHANGE` 监听的简易替代
 - `admin_unix.go` `syscall.Kill(getpid(), SIGTERM)` 导致 Wails bindings 生成阶段父进程异常退出 → CI "dead parents" —— 改为 `return true, nil` 让 main 正常退出 + 非交互环境跳过
 - `ScanEncryptedVolumes` 多扫描路径重复命中去重
 - `DecryptingReader` 原来只支持卷 offset=0；加 `volumeOffset` 让物理盘上任意位置的 BitLocker 卷都能解

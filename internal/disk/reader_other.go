@@ -132,3 +132,15 @@ func (r *unixReader) SectorSize() int {
 func (r *unixReader) DevicePath() string {
 	return r.path
 }
+
+// Cancel 关闭 file handle，让阻塞中的 ReadAt syscall 立刻返回 EBADF/closed file。
+// 等价于 Close，但语义上表达"中断"而非"释放"—— 配合上层 Stop。
+//
+// 不持 mu：ReadAt 持锁时若死等，Cancel 拿不到锁就会等 ReadAt 完成 → 防御失效。
+func (r *unixReader) Cancel() error {
+	f := r.file
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}

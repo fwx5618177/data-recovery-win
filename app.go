@@ -684,7 +684,9 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 		return nil, fmt.Errorf("drivePath 为空")
 	}
 	reader := disk.NewReader(drivePath)
-	if err := reader.Open(); err != nil {
+	// Open 加 5s 超时：dirty U 盘 / 系统级 chkdsk 中的盘 CreateFile 可能 hang
+	// 这里宁可放弃这块盘的加密卷预警，也不能让整个启动流程被卡住
+	if err := disk.OpenWithTimeout(reader, 5*time.Second); err != nil {
 		return nil, fmt.Errorf("打开磁盘失败: %w", err)
 	}
 	defer reader.Close()
