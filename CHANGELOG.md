@@ -4,6 +4,44 @@
 
 ---
 
+## v2.0.2 (2026-04-24)
+
+核心差异化 wedge 兑现 + CI race 修复。
+
+### Added
+- **Best Chance First 默认视图** (`frontend/src/components/BestChanceFirst.jsx`)
+  - 扫描完成后不再一上来扔给用户 10000+ 行裸表格，改为 6 桶苹果级分类卡片：
+    Windows.old / 桌面 / 我的照片 / 我的文档 / 最近修改 / 其他
+  - 每桶显示数量 + 总大小 + Top 3-4 条预览（照片桶懒加载真实缩略图）
+  - 两个 CTA："恢复此类全部 (N)" / "查看列表"
+  - 底部出口"查看全部文件（高级模式）"保留给深度用户
+  - 动机：设计文档锁死 wedge "Apple 级预览 + 一键导出"中「一键」那一半此前未落地，
+    用户观感和 R-Studio 相差无几；v2.0.2 兑现承诺
+
+- **ConfidenceBadge 4 档可视徽章** (`frontend/src/components/ConfidenceBadge.jsx`)
+  - 替代 FileTable 之前那条 "87%" 百分比条
+  - 高可靠（绿） / 可能可靠（黄） / 部分（橙） / 低可靠（灰）
+  - 用户读不懂浮点数，读"高可靠 ✓"能立刻做判断
+
+- **recovery-helpers.js**：新增 `bucketFiles()` 按优先级分桶（系统文件排除），
+  `confidenceTier()` 做 4 档映射，`BUCKETS` 元数据导出
+
+### Fixed
+- **CI DATA RACE** (`internal/updater/download.go`)
+  - 根因：watchdog goroutine 里读全局 `stallCheckInterval`，与另一测试写该全局
+    之间没有 happens-before 边；`close(stallDone)` 同步的是退出路径，但之前的
+    读已经发生
+  - 修复：在 `DownloadAsset` 主 goroutine 里把 `stallCheckInterval` 捕获到 local
+    `interval`，闭包只引用 local。全局读全部发生在调用方主 goroutine，跨测试
+    的写有 testing 框架的顺序保证
+  - 验证：`go test -race -count=3 ./internal/updater/` 绿
+
+### Test Infrastructure
+- `pnpm build` 绿（46 模块，240KB 主包）
+- `go vet ./...` / `go build ./...` 绿
+
+---
+
 ## v2.0.1 (2026-04-24)
 
 两个**用户可见的生产级 bug** 修复 —— 都是"防护机制注释有写、代码没落地"的同类架构漏洞。
