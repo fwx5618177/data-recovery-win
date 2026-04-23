@@ -29,6 +29,7 @@ export default function WelcomePage({
   pendingSession,
   onRestoreSession,
   onDiscardSession,
+  onResumeScan,
   shadows,
   onScanShadow,
   encryptedVolumes,
@@ -102,6 +103,11 @@ export default function WelcomePage({
               <button className="btn btn--sm" onClick={onRestoreSession}>
                 恢复旧文件列表
               </button>
+              {pendingSession.carverResumeOffset > 0 && onResumeScan && (
+                <button className="btn btn--sm" onClick={onResumeScan} title="跳过已扫字节，从断点继续深度扫描">
+                  从断点继续扫描（{formatSize(pendingSession.carverResumeOffset)} 处）
+                </button>
+              )}
             </div>
           </div>
         )}

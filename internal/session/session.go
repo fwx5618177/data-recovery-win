@@ -34,9 +34,16 @@ type Snapshot struct {
 	Files       []*types.RecoveredFile  `json:"files"`
 	OutputDir   string                  `json:"outputDir,omitempty"`
 	Completed   bool                    `json:"completed"`
+
+	// CarverResumeOffset 深度扫描断点续扫锚点（字节位移，绝对磁盘地址）。
+	// persistLoop 每 5s 写入当前 carver 扫描点；用户在 WelcomePage 点"从断点
+	// 继续"时，engine.Scan 从这个 offset 开始而不是 0。NTFS MFT / 各文件系统
+	// 阶段耗时相对短（秒到分钟级），整段重跑可接受，主要值是省 carver 时间
+	// （几 TB 盘要几小时）。
+	CarverResumeOffset int64 `json:"carverResumeOffset,omitempty"`
 }
 
-const currentVersion = 1
+const currentVersion = 2
 
 // Store 是带互斥锁的会话仓库，主程序持有一份。
 type Store struct {
@@ -116,7 +123,8 @@ func (s *Store) Load() (*Snapshot, error) {
 		// 旧版本或损坏，直接忽略（前端会当作没有会话）
 		return nil, nil
 	}
-	if snap.Version != currentVersion {
+	// v1 → v2 无破坏性字段（新增 CarverResumeOffset 默认 0）；接受 v1 作为 v2 读
+	if snap.Version != currentVersion && snap.Version != 1 {
 		return nil, nil
 	}
 	return &snap, nil

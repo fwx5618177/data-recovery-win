@@ -766,6 +766,27 @@ export default function App() {
     setPendingSession(null);
   }, [wailsApp]);
 
+  // 从断点继续扫描（跳过已扫的 carver 偏移）—— 只有 pendingSession 带 carverResumeOffset 才能用
+  const resumeLastScan = useCallback(async () => {
+    if (!pendingSession || !wailsApp?.ResumeLastScan) return;
+    resetScanState();
+    setScanActive(true);
+    setCurrentPage("workbench");
+    // 同步选盘显示
+    if (pendingSession.drivePath) {
+      const match = drives.find((d) => d.path === pendingSession.drivePath);
+      setSelectedDrive(match || { path: pendingSession.drivePath, name: pendingSession.driveLabel });
+    }
+    try {
+      await wailsApp.ResumeLastScan();
+      setPendingSession(null);
+    } catch (err) {
+      setScanActive(false);
+      alert(getFriendlyActionError("断点续扫", err));
+      setCurrentPage("welcome");
+    }
+  }, [pendingSession, drives, wailsApp]);
+
   /* =====================================================================
      8. 顶部标题文案
      ===================================================================== */
@@ -913,6 +934,7 @@ export default function App() {
             pendingSession={pendingSession}
             onRestoreSession={restoreSession}
             onDiscardSession={discardSession}
+            onResumeScan={resumeLastScan}
             shadows={shadows}
             onScanShadow={scanShadow}
             encryptedVolumes={encryptedVolumes}

@@ -146,6 +146,14 @@ type Engine struct {
 	// resilientReader 当前扫描会话用的带坏块保护的 reader（由 Scan 自动包装）
 	// 用来在扫完后汇报 BadSectors 给前端"坏扇区清单"UI
 	resilientReader *disk.ResilientReader
+
+	// 本次扫描的 carver 起点（0 = 全盘扫，>0 = 断点续扫）
+	// persistLoop 靠 CurrentCarverOffset() 拉当前 carver 位置写 session
+	carverStartOffset int64
+
+	// 下次 Scan 启动时 carver 起点，消费一次即清零（SetResumeCarverOffset 设置）
+	// 避免重复使用同一个 resume 点
+	nextResumeCarverOffset int64
 }
 
 // NewEngine 创建新的恢复引擎实例
@@ -304,7 +312,7 @@ func (e *Engine) ScanWithReader(
 	case types.ScanDeep:
 		// 深度模式：仅深度扫描
 		logger.Info("扫描模式", "mode", "deep")
-		files, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
+		files, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), func(p types.ScanProgress) {
 			// deep 模式下 carver 占 0-95%
 			p.Percent = p.Percent * 0.95
 			safeProgress(p)
@@ -406,7 +414,7 @@ func (e *Engine) ScanWithReader(
 		}
 
 		// 阶段2: 深度扫描 (15-95%) — 占 80% 的总进度，与实际耗时比例更接近
-		carverFiles, err := e.runCarverScan(ctx, reader, func(p types.ScanProgress) {
+		carverFiles, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), func(p types.ScanProgress) {
 			p.Percent = 15.0 + p.Percent*0.80
 			safeProgress(p)
 		}, safeFound)
@@ -960,19 +968,30 @@ func mftEntryToRecoveredFile(entry *ntfs.MFTEntry, boot *ntfs.BootSector, partit
 // 使用 carver.NewEngine(reader, sigDB, cfg) 创建引擎，
 // 调用 carver.Scan(ctx, start, end, onProgress, onFound) 执行扫描，
 // 其中 onProgress 的类型为 func(types.ScanProgress)。
+//
+// startOffset > 0 时走断点续扫：跳过前 startOffset 字节直接从那里开始 ——
+// 适用于用户上次扫到一半关机，重启后从 session 里读出进度点继续。
 func (e *Engine) runCarverScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	startOffset int64,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
 
-	logger.Info("开始深度扫描")
+	logger.Info("开始深度扫描", "startOffset", startOffset)
 
 	// 获取磁盘总大小
 	totalSize, err := reader.Size()
 	if err != nil {
 		return nil, fmt.Errorf("获取磁盘大小失败: %w", err)
+	}
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	if startOffset >= totalSize {
+		// 断点锚点已超过盘大小（扫描已完成？换盘了？）—— 从头重来
+		startOffset = 0
 	}
 
 	// 创建 carver.Engine，传入默认配置
@@ -980,13 +999,14 @@ func (e *Engine) runCarverScan(
 	carverEngine := carver.NewEngine(reader, e.sigDB, cfg)
 	e.mu.Lock()
 	e.carverEng = carverEngine
+	e.carverStartOffset = startOffset
 	e.mu.Unlock()
 
 	// 调用 carver.Scan —— onProgress 类型为 func(types.ScanProgress)
 	var files []*types.RecoveredFile
 	var filesMu sync.Mutex
 
-	err = carverEngine.Scan(ctx, 0, totalSize,
+	err = carverEngine.Scan(ctx, startOffset, totalSize,
 		func(p types.ScanProgress) {
 			// 直接透传 carver 的进度（调用者负责映射百分比）
 			onProgress(p)
@@ -1241,6 +1261,17 @@ func (e *Engine) RecoverWithOptions(
 		BytesWritten: 0,
 	})
 
+	// 设计决策 —— 恢复阶段严格单线程顺序写。
+	//
+	// 业界（R-Studio / ddrescue / DMDE）都是单线程写，原因：
+	//   1. disk IO 是瓶颈：HDD 并发 seek 会让吞吐暴跌（thrashing）
+	//   2. 写盘争用 reader：validator / sha256 也要读源盘，并发 + 共享 reader =
+	//      每次都要 seek 回去
+	//   3. 进度条语义清晰：N/Total 单调递增，用户不会看到"完成 3，跳 5"
+	//   4. 失败回溯：错误不需要跨 goroutine 传，records 有序
+	//
+	// 如未来要加并发，应该只并发 *不争用源 reader 的阶段* —— 比如 exif 解析、
+	// SHA-256 计算（基于已写好的目标文件），不并发 Write 本身。
 	for i, file := range targetFiles {
 		// 检查是否已取消
 		if ctx.Err() != nil {
@@ -1691,6 +1722,41 @@ func (e *Engine) BadSectors() []disk.BadSector {
 		return nil
 	}
 	return rr.BadSectors()
+}
+
+// SetResumeCarverOffset 设置下一次 Scan 启动时 carver 的起始偏移。
+// 典型用途：用户点击 WelcomePage 的"从断点继续扫描"按钮，App 层读 session.json
+// 里的 CarverResumeOffset 调此方法 → 然后 StartScan，engine 会消费一次。
+func (e *Engine) SetResumeCarverOffset(offset int64) {
+	if offset < 0 {
+		offset = 0
+	}
+	e.mu.Lock()
+	e.nextResumeCarverOffset = offset
+	e.mu.Unlock()
+}
+
+// popResumeCarverOffset 读出并清零下次 Scan 的 carver 起点（消费一次）
+func (e *Engine) popResumeCarverOffset() int64 {
+	e.mu.Lock()
+	off := e.nextResumeCarverOffset
+	e.nextResumeCarverOffset = 0
+	e.mu.Unlock()
+	return off
+}
+
+// CurrentCarverOffset 返回本次扫描 carver 当前读到的绝对磁盘偏移（断点续扫锚点）。
+// 扫描中每 5s 被 app.persistLoop 读取写入 session.json；用户下次打开可从此位置继续。
+// 未在 carver 阶段时返回 0。
+func (e *Engine) CurrentCarverOffset() int64 {
+	e.mu.RLock()
+	c := e.carverEng
+	start := e.carverStartOffset
+	e.mu.RUnlock()
+	if c == nil {
+		return 0
+	}
+	return start + c.BytesScanned()
 }
 
 // Stop 取消正在进行的扫描。

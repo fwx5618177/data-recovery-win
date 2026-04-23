@@ -1274,6 +1274,37 @@ func (a *App) DiscardSession() error {
 	return a.store.Clear()
 }
 
+// ResumeLastScan 从上次会话的断点继续扫描（跳过已扫的 carver 偏移）。
+//
+// 前端在 WelcomePage 点"从断点继续"按钮时调用：
+//   1. 读 LastSession 拿到 drivePath / mode / carverResumeOffset
+//   2. SetResumeCarverOffset 告诉 engine 起点
+//   3. StartScan 启动新扫描，engine.runCarverScan 自动消费该 offset
+//
+// NTFS / exFAT / FAT / ext / APFS / HFS+ 阶段会重跑（相对 carver 耗时很短）；
+// 主要目的是省掉 carver 的几小时全盘读。
+func (a *App) ResumeLastScan() error {
+	if a.store == nil {
+		return fmt.Errorf("会话存储未初始化")
+	}
+	snap, err := a.store.Load()
+	if err != nil || snap == nil {
+		return fmt.Errorf("未找到可恢复的扫描会话")
+	}
+	if snap.DrivePath == "" {
+		return fmt.Errorf("会话中源盘路径缺失")
+	}
+	if snap.CarverResumeOffset > 0 {
+		a.engine.SetResumeCarverOffset(snap.CarverResumeOffset)
+		appLogger.Info("断点续扫", "drive", snap.DrivePath, "resumeOffset", snap.CarverResumeOffset)
+	}
+	mode := snap.Mode
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+	return a.StartScan(snap.DrivePath, mode)
+}
+
 // persistLoop 扫描进行中每 5 秒保存一次快照；扫描结束由 caller close(stop) 退出。
 func (a *App) persistLoop(stop <-chan struct{}) {
 	if a.store == nil {
@@ -1311,12 +1342,13 @@ func (a *App) saveSnapshot(completed bool) {
 	a.mu.Unlock()
 
 	snap := session.Snapshot{
-		DrivePath:  drive.Path,
-		DriveLabel: drive.Name,
-		Mode:       mode,
-		Progress:   progress,
-		Files:      filesCopy,
-		Completed:  completed,
+		DrivePath:          drive.Path,
+		DriveLabel:         drive.Name,
+		Mode:               mode,
+		Progress:           progress,
+		Files:              filesCopy,
+		Completed:          completed,
+		CarverResumeOffset: a.engine.CurrentCarverOffset(),
 	}
 	if err := a.store.Save(snap); err != nil {
 		appLogger.Warn("保存会话快照失败", "err", err)
