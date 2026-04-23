@@ -77,13 +77,18 @@ func DownloadAsset(
 	// Stall watchdog：如果超过 StallTimeout 没收到任何字节，强制关闭 Body 让 Read 返回
 	// 错误 —— 否则 GitHub CDN 偶尔连接活着但不发数据的情况会让本 goroutine 永远 hang。
 	// 这是"下载好像失败了"的主要根因。
+	//
+	// 在主 goroutine 里把 stallCheckInterval 读到 local，闭包只用 local —— 否则
+	// 测试用例通过改全局 stallCheckInterval 来压缩超时（download_test.go:186），
+	// 上一个测试留下的 watchdog goroutine 对全局的读会和下一个测试的写 race。
+	interval := stallCheckInterval
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
 	var stalled atomic.Bool
 	stallDone := make(chan struct{})
 	defer close(stallDone)
 	go func() {
-		ticker := time.NewTicker(stallCheckInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
