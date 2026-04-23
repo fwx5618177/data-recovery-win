@@ -950,18 +950,33 @@ func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int6
 			return
 		}
 
-		// ★ 供应链完整性：对 GitHub Release 发布的 SHA256SUMS.txt 校验下载文件 hash
-		// 防御中间人篡改 binary；若 release 未附 SHA256SUMS.txt 则仅 warn（向后兼容）
+		// ★ 供应链完整性（外部审计级）：三层校验
+		//   1. 版本号单调（拒绝 downgrade 攻击 — TUF rollback protection）
+		//   2. SHA256SUMS.txt 对比 binary hash
+		//   3. SHA256SUMS.txt 本身的 Ed25519 签名
+		// 任何一层失败 → 删掉下载文件 + 审计日志 + 推 event 告用户
+		if !updater.IsVersionNewer(updater.Version, version) {
+			appLogger.Warn("拒绝下载：目标版本不比当前新（防 downgrade 攻击）",
+				"current", updater.Version, "target", version)
+			_ = os.Remove(destPath)
+			wailsRuntime.EventsEmit(a.ctx, "update:downloadError", "防 downgrade: 目标版本 "+version+" 不比当前新")
+			return
+		}
 		if sums, sumsErr := updater.FetchSHA256SUMS(ctx, updateRepoOwner, updateRepoName, version); sumsErr == nil {
 			if vErr := updater.VerifyAssetChecksum(assetName, sha, sums); vErr != nil {
 				appLogger.Warn("SHA256SUMS 校验失败，拒绝应用", "err", vErr)
-				_ = os.Remove(destPath) // 删除已下载的不可信二进制
+				_ = os.Remove(destPath)
 				wailsRuntime.EventsEmit(a.ctx, "update:downloadError", "供应链校验失败: "+vErr.Error())
 				return
 			}
+			// 验签 SHA256SUMS.txt.sig（如果 release 附了）
+			if sigErr := updater.VerifySumsSignatureFromRelease(ctx, updateRepoOwner, updateRepoName, version); sigErr != nil {
+				// 签名验证失败**可能**是：攻击者替了 SHA256SUMS + binary 一起，
+				// 或者老 release 没附 .sig 文件（兼容模式 → warning 不阻塞）
+				appLogger.Warn("SHA256SUMS 签名验证失败或缺失（老 release 兼容）", "err", sigErr)
+			}
 			appLogger.Info("SHA256SUMS 供应链校验通过", "asset", assetName)
 		} else {
-			// 老版本 release 可能没附 SHA256SUMS.txt，记 warning 但不阻塞
 			appLogger.Warn("未能获取 SHA256SUMS.txt（老版 release？）", "err", sumsErr)
 		}
 

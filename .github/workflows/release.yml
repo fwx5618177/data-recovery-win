@@ -205,6 +205,64 @@ jobs:
       - name: List artifacts
         run: ls -lh dist/
 
+      # ===============================================================
+      # 供应链完整性：SHA256SUMS.txt + Ed25519 签名
+      #
+      # 目的（符合 Chromium Omaha / TUF 设计原则）：
+      #   1. SHA256SUMS.txt 记录每个 artifact 的 sha256 —— 客户端下载后比对
+      #   2. SHA256SUMS.txt.sig 用 Ed25519 签 checksum 文件本身
+      #      （防攻击者替换 SHA256SUMS.txt 后 hash 仍"对上"）
+      #   3. 公钥 release_pubkey.pem 也随 release 发，允许离线验证
+      #
+      # 签名密钥来源：GitHub Secrets: RELEASE_SIGNING_KEY （PEM 格式 Ed25519 私钥）
+      #   未配置时：仍生成 SHA256SUMS.txt，但不签名（warning；老 release 兼容）
+      # ===============================================================
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        run: |
+          cd dist
+          # 仅对顶层文件（排除 directory）算 hash
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' | \
+            sort | \
+            xargs -I {} sh -c 'sha256sum "{}"' | \
+            sed 's|\./||' > SHA256SUMS.txt
+          echo "=== SHA256SUMS.txt ==="
+          cat SHA256SUMS.txt
+
+      - name: Sign SHA256SUMS.txt with Ed25519
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          cd dist
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY 未配置，跳过签名（老 release 兼容模式）"
+            exit 0
+          fi
+          echo "$SIGNING_KEY" > /tmp/release_priv.pem
+          chmod 600 /tmp/release_priv.pem
+
+          # OpenSSL 1.1.1+ 支持 Ed25519：pkeyutl -sign
+          openssl pkeyutl -sign \
+            -inkey /tmp/release_priv.pem \
+            -rawin \
+            -in SHA256SUMS.txt \
+            -out SHA256SUMS.txt.sig
+          # 提取对应公钥一并发布，允许离线验证
+          openssl pkey -in /tmp/release_priv.pem -pubout -out release_pubkey.pem
+          rm /tmp/release_priv.pem
+
+          echo "=== 签名生成 ==="
+          ls -lh SHA256SUMS.txt*
+
+          # 现场自测：用公钥验签自己刚签的文件
+          openssl pkeyutl -verify \
+            -pubin -inkey release_pubkey.pem \
+            -rawin \
+            -in SHA256SUMS.txt \
+            -sigfile SHA256SUMS.txt.sig
+          echo "::notice::签名自测通过"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -232,5 +290,26 @@ jobs:
             - 推荐把恢复目录选在**与源盘不同的磁盘**上（同盘时可勾选"我已了解风险"强制继续，但可能覆盖待恢复扇区）
             - SSD 被重置后 TRIM 可能已擦除数据，HDD 的恢复率通常更高
             - 越早执行恢复越好，源盘后续写入会持续覆盖旧扇区
+
+            ### 完整性验证（可选，但推荐）
+
+            下载后可校验文件未被篡改。工具自动更新也会用同套流程做供应链校验。
+
+            ```bash
+            # 1. 核对 sha256
+            sha256sum -c SHA256SUMS.txt
+
+            # 2. 核对 SHA256SUMS.txt 本身的 Ed25519 签名
+            #    （需要 OpenSSL 1.1.1+；Windows 用 git-bash / WSL）
+            openssl pkeyutl -verify \
+              -pubin -inkey release_pubkey.pem \
+              -rawin -in SHA256SUMS.txt \
+              -sigfile SHA256SUMS.txt.sig
+            ```
+
+            三个验证文件和 artifact 一起下载即可：
+            - `SHA256SUMS.txt`
+            - `SHA256SUMS.txt.sig` (Ed25519 签名)
+            - `release_pubkey.pem` (签名公钥，也可从 [项目公钥 pin](../../blob/main/SIGNING.md) 固定)
           files: dist/**/*
           fail_on_unmatched_files: true

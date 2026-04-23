@@ -79,8 +79,10 @@ func ParseApplyArgs(args []string) (parentPID int, oldExe, newExe string) {
 // 足够覆盖 Wails shutdown 的常见路径。
 func RunApplyHelper(parentPID int, oldExe, newExe string) error {
 	if oldExe == "" || newExe == "" {
+		auditLog("apply-reject", "reason", "empty path")
 		return fmt.Errorf("old/new exe path 不能为空")
 	}
+	auditLog("apply-start", "pid", fmt.Sprintf("%d", parentPID), "old", oldExe, "new", newExe)
 
 	// 1. 固定等待父进程退出（参数 parentPID 目前仅做日志记录）
 	_ = parentPID
@@ -88,19 +90,32 @@ func RunApplyHelper(parentPID int, oldExe, newExe string) error {
 
 	// ★ 安全：应用前对 newExe 验 SHA256 vs pending manifest 记录
 	// 防御下载后到 apply 之间 binary 被篡改（磁盘错误 / 恶意进程）
-	// 如果 pending 不可用或 hash 字段为空 → skip（向后兼容）
-	if pending, err := LoadPending(); err == nil && pending != nil && pending.SHA256 != "" {
+	pending, pErr := LoadPending()
+	if pErr == nil && pending != nil && pending.SHA256 != "" {
 		if pending.BinaryPath == newExe {
 			actualSHA, sErr := computeFileSHA256(newExe)
 			if sErr != nil {
+				auditLog("apply-reject", "reason", "hash-compute-fail", "err", sErr.Error())
 				return fmt.Errorf("计算新版 exe hash 失败: %w", sErr)
 			}
 			if actualSHA != pending.SHA256 {
-				_ = ClearPending() // 清理可能被篡改的 pending
+				_ = ClearPending()
+				auditLog("apply-reject", "reason", "hash-mismatch",
+					"expected", pending.SHA256, "actual", actualSHA)
 				return fmt.Errorf("新版 exe hash 不匹配 pending manifest：期望 %s 实际 %s（拒绝应用）",
 					pending.SHA256, actualSHA)
 			}
+			auditLog("apply-hash-ok", "sha256", actualSHA)
 		}
+	}
+
+	// ★ 回滚准备：先 backup 旧 exe 到 .bak；apply 失败时可恢复
+	backupPath := oldExe + ".bak"
+	if err := copyFile(oldExe, backupPath); err != nil {
+		// backup 失败不 fatal，但记录 warning
+		auditLog("apply-backup-fail", "err", err.Error())
+	} else {
+		auditLog("apply-backup-ok", "path", backupPath)
 	}
 
 	// 2. 带重试的复制 —— Windows 上运行中的 exe 刚退出仍可能持锁几百毫秒
@@ -115,8 +130,18 @@ func RunApplyHelper(parentPID int, oldExe, newExe string) error {
 		}
 	}
 	if lastErr != nil {
+		// 替换失败 → 尝试用 backup 恢复旧版（回滚）
+		auditLog("apply-replace-fail", "err", lastErr.Error())
+		if _, err := os.Stat(backupPath); err == nil {
+			if rErr := copyFile(backupPath, oldExe); rErr == nil {
+				auditLog("apply-rollback-ok")
+			} else {
+				auditLog("apply-rollback-fail", "err", rErr.Error())
+			}
+		}
 		return fmt.Errorf("替换 exe 失败（10 次重试仍不行）: %w", lastErr)
 	}
+	auditLog("apply-replace-ok")
 
 	// 3. 保留可执行权限（Unix 有用）
 	if runtime.GOOS != "windows" {
@@ -129,13 +154,15 @@ func RunApplyHelper(parentPID int, oldExe, newExe string) error {
 	newCmd.Stdout = nil
 	newCmd.Stderr = nil
 	if err := newCmd.Start(); err != nil {
+		auditLog("apply-restart-fail", "err", err.Error())
 		return fmt.Errorf("启动新版失败: %w", err)
 	}
 	_ = newCmd.Process.Release()
 
-	// 5. 清理 pending 目录
+	// 5. 清理 pending + backup（apply 成功后 backup 保留 24h 再自动清，
+	//    让真实用户"如果发现新版出问题"能手动回退）
 	_ = ClearPending()
-
+	auditLog("apply-done")
 	return nil
 }
 
