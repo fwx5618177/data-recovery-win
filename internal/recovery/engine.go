@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"data-recovery/internal/carver"
@@ -1814,6 +1815,8 @@ func (e *Engine) scanNTFSPartition(
 
 	var allEntries []*ntfs.MFTEntry
 	var entriesMu sync.Mutex
+	var liveFilesFound int64
+	startTime := time.Now()
 
 	onProgress(types.ScanProgress{
 		Phase:       "ntfs",
@@ -1828,11 +1831,20 @@ func (e *Engine) scanNTFSPartition(
 			}
 
 			percent := float64(current) / float64(total) * 60.0
+			bytesScanned := current * boot.MFTRecordSize
+			elapsed := time.Since(startTime).Seconds()
+			var speed int64
+			if elapsed > 0.5 {
+				speed = int64(float64(bytesScanned) / elapsed)
+			}
 			onProgress(types.ScanProgress{
 				Phase:        "ntfs",
 				Percent:      percent,
-				BytesScanned: current * boot.MFTRecordSize,
+				BytesScanned: bytesScanned,
 				TotalBytes:   total * boot.MFTRecordSize,
+				FilesFound:   int(atomic.LoadInt64(&liveFilesFound)),
+				Speed:        speed,
+				Elapsed:      formatElapsed(elapsed),
 				CurrentFile:  fmt.Sprintf("%s: 扫描 MFT 记录 %d/%d", partitionLabel, current, total),
 			})
 		},
@@ -1843,6 +1855,18 @@ func (e *Engine) scanNTFSPartition(
 			entriesMu.Lock()
 			allEntries = append(allEntries, entry)
 			entriesMu.Unlock()
+
+			// 实时推送：已删除且看起来可恢复 → 立即转 RecoveredFile 发给前端，
+			// 不等整个 MFT 扫完（那需要好几分钟，用户以为卡死了）。
+			// 最终的 scan:completed 会带完整 files 覆盖，这里是为了让用户在扫描
+			// 进行中就能看到结果陆续冒出来。
+			if onFound != nil && isLikelyRecoverable(entry) {
+				f := mftEntryToRecoveredFile(entry, boot, partition.Offset)
+				if f != nil {
+					onFound(f)
+					atomic.AddInt64(&liveFilesFound, 1)
+				}
+			}
 		},
 	)
 	if err != nil {
@@ -1971,6 +1995,39 @@ func (e *Engine) scanNTFSPartition(
 
 func isPhysicalDrivePath(path string) bool {
 	return strings.Contains(strings.ToLower(path), "physicaldrive")
+}
+
+// isLikelyRecoverable 复用 ntfs.FindDeletedFiles 的判断条件，用在 MFT 扫描的 onEntry
+// 实时回调里 —— 收到一个 entry 时立即判断能否恢复，能就转 RecoveredFile 推给前端。
+// 保持与 FindDeletedFiles 逻辑同步，避免扫完筛选和实时筛选两套标准漂移。
+func isLikelyRecoverable(e *ntfs.MFTEntry) bool {
+	if e == nil || !e.IsDeleted || e.IsDirectory {
+		return false
+	}
+	if e.FileSize <= 0 {
+		return false
+	}
+	if e.FileName == "" || strings.HasPrefix(e.FileName, "$") {
+		return false
+	}
+	hasDataRuns := len(e.DataRuns) > 0
+	hasResidentData := e.IsResident && len(e.ResidentData) > 0
+	return hasDataRuns || hasResidentData
+}
+
+// formatElapsed 把秒数格式化为 "12s" / "3m45s" / "1h02m" 便于前端展示
+func formatElapsed(seconds float64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", int(seconds))
+	}
+	if seconds < 3600 {
+		m := int(seconds / 60)
+		s := int(seconds) - m*60
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	h := int(seconds / 3600)
+	m := int((seconds - float64(h)*3600) / 60)
+	return fmt.Sprintf("%dh%02dm", h, m)
 }
 
 func partitionWeight(partition ntfs.Partition) float64 {

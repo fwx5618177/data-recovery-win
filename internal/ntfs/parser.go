@@ -44,7 +44,7 @@ const (
 	maxPathDepth = 100
 
 	// 进度回调间隔
-	progressInterval int64 = 100
+	progressInterval int64 = 20
 )
 
 // ========== 数据结构 ==========
