@@ -9,8 +9,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 )
+
+// StallTimeout 定义下载停滞多久视为网络死掉。
+// 30s 在国内慢速连接下仍留有容错（GitHub CDN 经常有短暂停顿），
+// 但用户等 30s 没进度也能明确知道要重试 —— 不会无限卡死。
+const StallTimeout = 30 * time.Second
+
+// stallCheckInterval 是 watchdog 轮询间隔（不是 stall 判定阈值）。
+var stallCheckInterval = 5 * time.Second
 
 // DownloadProgress 是 DownloadAsset 在下载过程中回调的进度。
 // JSON tag 与前端字段对齐（camelCase），否则 Wails 会输出 PascalCase 导致前端读空。
@@ -57,13 +66,40 @@ func DownloadAsset(
 	req.Header.Set("User-Agent", "data-recovery/"+Version)
 	req.Header.Set("Accept", "application/octet-stream")
 
-	// 下载可能几百 MB-GB，不设总超时；由 ctx + stall detector 控制
+	// 下载可能几百 MB-GB，不设总超时；由 ctx + stall detector 控制（见下方 watchdog）
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("请求下载失败: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Stall watchdog：如果超过 StallTimeout 没收到任何字节，强制关闭 Body 让 Read 返回
+	// 错误 —— 否则 GitHub CDN 偶尔连接活着但不发数据的情况会让本 goroutine 永远 hang。
+	// 这是"下载好像失败了"的主要根因。
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+	var stalled atomic.Bool
+	stallDone := make(chan struct{})
+	defer close(stallDone)
+	go func() {
+		ticker := time.NewTicker(stallCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stallDone:
+				return
+			case <-ticker.C:
+				last := time.Unix(0, lastActivity.Load())
+				if time.Since(last) > StallTimeout {
+					stalled.Store(true)
+					// Close body → 主循环 Read 立刻返回 "use of closed network connection"
+					_ = resp.Body.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("下载状态码 %d", resp.StatusCode)
@@ -107,6 +143,7 @@ func DownloadAsset(
 				return "", fmt.Errorf("写入临时文件失败: %w", werr)
 			}
 			done += int64(n)
+			lastActivity.Store(time.Now().UnixNano())
 			// 节流进度回调：每秒最多一次
 			if progress != nil && time.Since(lastReport) > time.Second {
 				dt := time.Since(lastReport).Seconds()
@@ -129,6 +166,10 @@ func DownloadAsset(
 			break
 		}
 		if rerr != nil {
+			// 优先识别 stall 触发的关闭 —— 让用户看到清晰的"停滞超时"而不是 net.ErrClosed
+			if stalled.Load() {
+				return "", fmt.Errorf("下载停滞超过 %v（网络中断或服务器限速），已中止 —— 请检查网络后重试", StallTimeout)
+			}
 			return "", fmt.Errorf("读取响应失败: %w", rerr)
 		}
 	}

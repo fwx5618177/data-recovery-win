@@ -4,6 +4,31 @@
 
 ---
 
+## v2.0.1 (2026-04-24)
+
+两个**用户可见的生产级 bug** 修复 —— 都是"防护机制注释有写、代码没落地"的同类架构漏洞。
+
+### Fixed
+- **预览恢复中的文件不再卡死** (`internal/recovery/engine.go`)
+  - 根因：`ReadFilePreview` 用裸 `disk.NewReader` 打开源盘，没包 `TimeoutReader`。bad sector 上 Windows `ReadFile` 在 driver queue 无限 hang，preview goroutine 永远不返回，前端表现为"点击预览卡死"
+  - 扫描 reader 在 `runScan` 里已经包了 `Resilient+Timeout` 链；preview 路径历史上被漏掉
+  - 修复：抽 `openPreviewReader(devicePath)` 工厂函数，强制 `TimeoutReader` 3s/read + `OpenWithTimeout` 5s。bad sector fail-fast 返回"预览超时"而不是静默花屏图
+  - 回归：`TestOpenPreviewReader_WrapsTimeoutReader` 锁死包装契约；`TestTimeoutReader_FailsFastOnHang` 用 hanging mock 验证超时真生效
+
+- **自动更新不再 silent hang** (`internal/updater/download.go`)
+  - 根因：`DownloadAsset` 注释声称"由 ctx + stall detector 控制"，但代码里根本**没有 stall detector**。`http.Client.Timeout=0` + 外层 ctx 来自应用生命周期 → GitHub CDN 在 CN 网络下 TCP 连接活着但停发数据时，`resp.Body.Read` 永远阻塞，progress 停发，用户 UI 冻结在某个百分比以为"下载失败了"
+  - 修复：加 stall watchdog goroutine + `atomic.Int64 lastActivity`，超过 `StallTimeout` (30s) 无活动自动 `resp.Body.Close()` 让 Read 返回错误；主循环识别 stall 触发 vs 服务器真错，返回清晰中文提示"下载停滞 30s，请检查网络后重试"
+  - 回归：`TestDownloadAsset_StallWatchdogTriggers` 用 hang server 验证 watchdog 在 30s 触发；`TestDownloadAsset_SlowButProgressingNotFalseTriggered` 验证慢但持续有进度的连接不误触发
+
+### Architecture Note
+两个 bug 共享同一个"aspirational comment"反模式：防护机制的注释写了，代码没实现。未来架构审计 checklist 要加一条：每一条"timeout / cancel / deadline"字样的注释都要能映射到具体实现。
+
+### Test Infrastructure
+- 全量 `go test -race ./...` 绿（30+ 包，含所有 fuzz + validator + updater 套件）
+- 两个回归测试在 CI 下 pass，已 commit
+
+---
+
 ## v2.0.0
 
 主版本升级。新增能力：

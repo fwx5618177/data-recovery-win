@@ -1526,10 +1526,13 @@ func (e *Engine) ReadFilePreview(fileID string, maxBytes int) ([]byte, error) {
 		return nil, fmt.Errorf("源盘路径不可用，请重新扫描后再试")
 	}
 
-	// 为预览单独开一个 reader（Windows FILE_SHARE_READ 允许并发），避免与扫描/恢复 reader 相互阻塞
-	reader := disk.NewReader(devicePath)
-	if err := reader.Open(); err != nil {
-		return nil, fmt.Errorf("打开源盘失败: %w", err)
+	// 为预览单独开一个 reader（Windows FILE_SHARE_READ 允许并发），避免与扫描/恢复 reader 相互阻塞。
+	// 关键：必须包 TimeoutReader —— 否则 bad sector 会让 Windows ReadFile 在 driver queue 里无限 hang，
+	// preview goroutine 永远不返回，前端表现为"卡死"。preview 走 fail-fast 策略（3s/read + 5s Open），
+	// 让用户看到明确"超时"而不是一张坏掉的图。
+	reader, err := openPreviewReader(devicePath)
+	if err != nil {
+		return nil, fmt.Errorf("打开源盘失败/超时: %w", err)
 	}
 	defer func() {
 		if err := reader.Close(); err != nil {
@@ -2161,6 +2164,25 @@ func ntfsFirstLess(a, b string) bool {
 		return false
 	}
 	return false
+}
+
+// openPreviewReader 为 ReadFilePreview 开一个短生命周期的 reader。
+//
+// 必须包 TimeoutReader：否则 preview 去读一个 bad sector 时，Windows 驱动层的
+// ReadFile 会在内核 queue 里无限 hang（见 internal/disk/timeout.go 的说明），
+// preview goroutine 永远不返回，前端用户体验就是"卡死"。扫描 reader 在
+// engine.runScan 里用了 Resilient+Timeout，preview 路径历史上漏掉了这层包装。
+//
+// 这里刻意不用 ResilientReader —— preview 是 UX 路径，bad sector 应该 fail-fast
+// 让用户看到"预览超时/失败"，而不是静默返回一张 zero-fill 的花屏图。
+// 3s/read + 5s Open 的组合对绝大多数健康盘都够，对坏盘也不会让用户等太久。
+func openPreviewReader(devicePath string) (disk.DiskReader, error) {
+	base := disk.NewReader(devicePath)
+	reader := disk.NewTimeoutReader(base, 3*time.Second)
+	if err := disk.OpenWithTimeout(reader, 5*time.Second); err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 func (e *Engine) cacheNTFSSource(fileID string, source ntfsRecoverySource) {

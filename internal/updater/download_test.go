@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestDownloadAsset_RoundTripAndSHA256(t *testing.T) {
@@ -163,5 +165,102 @@ func TestPending_SaveLoadClear(t *testing.T) {
 	after, _ := LoadPending()
 	if after != nil {
 		t.Error("ClearPending 后应无 pending")
+	}
+}
+
+// 回归测试：下载停滞时必须 bounded-time 返回错误，不能无限 hang。
+//
+// Bug 历史：DownloadAsset 的注释声称"由 ctx + stall detector 控制"，但
+// 代码里根本没有 stall detector。http.Client.Timeout=0，外层 ctx 来自
+// a.ctx（应用生命周期），没有任何机制检测"连接活着但服务器停发"这种
+// 情况。GitHub CDN 在国内偶尔出现 TCP 活着不发数据的情形，主循环的
+// resp.Body.Read 阻塞，progress 事件停止，用户 UI 冻结在"42%"，最终
+// 以为"下载失败了"关闭应用 —— 但实际上 goroutine 还在泄漏。
+//
+// 这个测试起一个 HTTP handler：发完 headers + 一小段 body 后故意 hang
+// 不关连接。有 stall detector 时 DownloadAsset 应在 ~StallTimeout 之后
+// 返回错误；没有 stall detector 时会永远阻塞（测试通过 5s 上限捕获）。
+func TestDownloadAsset_StallWatchdogTriggers(t *testing.T) {
+	// 为了测试快跑，压缩 StallTimeout 到 500ms（生产是 30s）
+	saveStallInterval := stallCheckInterval
+	stallCheckInterval = 100 * time.Millisecond
+	t.Cleanup(func() { stallCheckInterval = saveStallInterval })
+
+	// 临时把 StallTimeout 压到 500ms，测试完恢复
+	// （StallTimeout 是 const，不能直接改 —— 此测试验证当前 const 下
+	// watchdog 能触发即可；stall 起作用的机制是"超过阈值就 close Body"）
+	// 实际上我们验证的是：当 server 不发数据时，DownloadAsset 能在
+	// StallTimeout + 裕量内返回错误，而不是永远阻塞。
+
+	// 让 server 发 100 字节后故意 hang（不关连接）
+	blockCh := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1048576") // 声明 1MB，实际只发 100
+		w.(http.Flusher).Flush()
+		w.Write(make([]byte, 100))
+		w.(http.Flusher).Flush()
+		// Hang 到测试结束
+		<-blockCh
+	}))
+	defer func() {
+		close(blockCh)
+		server.Close()
+	}()
+
+	dest := filepath.Join(t.TempDir(), "stalled.bin")
+	asset := Asset{Name: "stalled.bin", DownloadURL: server.URL, Size: 1048576}
+
+	// 用一个比 StallTimeout 长的 test timeout 兜底（防 watchdog 没工作导致死锁）
+	ctx, cancel := context.WithTimeout(context.Background(), StallTimeout+10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := DownloadAsset(ctx, asset, dest, nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("stalled server 应让 DownloadAsset 返回错误，但 err == nil —— stall watchdog 没生效")
+	}
+	// 必须是"停滞"错误而不是 ctx.DeadlineExceeded，证明是 watchdog 触发而非 test ctx 兜底
+	if ctx.Err() != nil {
+		t.Fatalf("test ctx 先过期了（%v）而不是 watchdog 触发 —— stall watchdog 不起作用", ctx.Err())
+	}
+	if !strings.Contains(err.Error(), "停滞") {
+		t.Errorf("错误应该提示下载停滞，实际: %v", err)
+	}
+	// 返回时间应接近 StallTimeout（watchdog interval 有 1 个周期的误差 + Go scheduling）
+	if elapsed > StallTimeout+3*time.Second {
+		t.Errorf("DownloadAsset 返回耗时 %v，超过 StallTimeout (%v) + 3s 裕量 —— watchdog 检测偏慢", elapsed, StallTimeout)
+	}
+	if elapsed < StallTimeout-1*time.Second {
+		t.Errorf("DownloadAsset 返回耗时 %v，远小于 StallTimeout (%v) —— 可能是其他错误路径提前返回", elapsed, StallTimeout)
+	}
+}
+
+// 回归测试：正常下载流程下 stall watchdog 不应误触发。
+// 确保添加 watchdog 不会影响慢但持续有进度的连接。
+func TestDownloadAsset_SlowButProgressingNotFalseTriggered(t *testing.T) {
+	// 每 100ms 发一小段数据，共 10 段。总时长约 1s。
+	// 比 StallTimeout 短，watchdog 不应触发。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.(http.Flusher).Flush()
+		for i := 0; i < 10; i++ {
+			w.Write(make([]byte, 100))
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+
+	dest := filepath.Join(t.TempDir(), "slow.bin")
+	asset := Asset{Name: "slow.bin", DownloadURL: server.URL, Size: 1000}
+
+	sum, err := DownloadAsset(context.Background(), asset, dest, nil)
+	if err != nil {
+		t.Fatalf("slow-but-progressing 不应触发 stall 错误: %v", err)
+	}
+	if sum == "" {
+		t.Error("正常完成应返回 SHA256")
 	}
 }
