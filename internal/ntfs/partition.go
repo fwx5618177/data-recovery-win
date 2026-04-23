@@ -3,6 +3,7 @@ package ntfs
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -78,7 +79,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 		if bruteErr != nil {
 			errMsg += fmt.Sprintf("; 暴力搜索: %v", bruteErr)
 		}
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	return dedupePartitions(partitions), nil

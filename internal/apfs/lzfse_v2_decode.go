@@ -196,10 +196,6 @@ func decodeLMD(payload []byte, padBits int,
 	// output 生成（正向）：我们只能在 decode 完所有三元组后一次 emit。
 	// 为简化：先把 (L, M, D) 全存一个数组，再正向 emit。
 
-	lStates := make([]uint16, 0, nMatches)
-	mStates := make([]uint16, 0, nMatches)
-	dStates := make([]uint16, 0, nMatches)
-
 	// 所有 L/M/D 值（最终数值，已加 extra bits）
 	Ls := make([]uint16, nMatches)
 	Ms := make([]uint16, nMatches)
@@ -241,12 +237,7 @@ func decodeLMD(payload []byte, padBits int,
 		Ls[i] = lzfseLBaseValue[lSym] + uint16(lExtra)
 		Ms[i] = lzfseMBaseValue[mSym] + uint16(mExtra)
 		Ds[i] = lzfseDBaseValue[dSym] + dExtra
-
-		lStates = append(lStates, lS)
-		mStates = append(mStates, mS)
-		dStates = append(dStates, dS)
 	}
-	_ = lStates
 
 	// 正向 emit 输出：每组 L_i 个 literal + M_i 字节回溯
 	litCursor := 0

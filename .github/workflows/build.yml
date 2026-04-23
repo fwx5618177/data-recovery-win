@@ -34,8 +34,28 @@ jobs:
 
       - name: Go vet
         run: go vet ./...
-      - name: Go test (race)
-        run: go test -race ./...
+
+      - name: Install static analysis tools
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: staticcheck
+        run: staticcheck ./...
+
+      - name: gosec (数据恢复工具专用 exclude 列表)
+        run: |
+          # 排除数据恢复工具固有场景的警告（见 CLAUDE.md / .gosec.yaml 里的说明）
+          # G115: integer overflow in conversion (文件系统 parser 合法)
+          # G104: Unhandled errors (Close 错误)
+          # G304: File inclusion via variable (=本工具核心功能，读用户指定盘)
+          # G204: Subprocess (LookPath 后调固定工具)
+          # G301/G302/G306: file permissions (取证输出目录)
+          gosec -severity=medium -exclude=G115,G104,G304,G204,G301,G302,G306 ./...
+
+      - name: Go test (race, 3x)
+        run: go test -race -count=3 -timeout=10m ./...
+
       - name: Cross-compile smoke (all platforms)
         run: make verify-platforms
 

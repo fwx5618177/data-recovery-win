@@ -29,15 +29,6 @@ func readBytesAt(reader disk.DiskReader, offset int64, size int) ([]byte, error)
 	return buf[:n], io.ErrUnexpectedEOF
 }
 
-// readUint16BE 从 offset 处读取大端序 uint16
-func readUint16BE(reader disk.DiskReader, offset int64) (uint16, error) {
-	b, err := readBytesAt(reader, offset, 2)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint16(b), nil
-}
-
 // readUint16LE 从 offset 处读取小端序 uint16
 func readUint16LE(reader disk.DiskReader, offset int64) (uint16, error) {
 	b, err := readBytesAt(reader, offset, 2)
@@ -45,15 +36,6 @@ func readUint16LE(reader disk.DiskReader, offset int64) (uint16, error) {
 		return 0, err
 	}
 	return binary.LittleEndian.Uint16(b), nil
-}
-
-// readUint32BE 从 offset 处读取大端序 uint32
-func readUint32BE(reader disk.DiskReader, offset int64) (uint32, error) {
-	b, err := readBytesAt(reader, offset, 4)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(b), nil
 }
 
 // readUint32LE 从 offset 处读取小端序 uint32
@@ -77,14 +59,6 @@ func readUint64BE(reader disk.DiskReader, offset int64) (uint64, error) {
 // min64 返回两个 int64 中较小的一个
 func min64(a, b int64) int64 {
 	if a < b {
-		return a
-	}
-	return b
-}
-
-// max64 返回两个 int64 中较大的一个
-func max64(a, b int64) int64 {
-	if a > b {
 		return a
 	}
 	return b

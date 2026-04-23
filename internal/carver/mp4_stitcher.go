@@ -199,8 +199,8 @@ func (s *MP4Stitcher) searchNextBox(start, window int64) (int64, bool) {
 			continue
 		}
 		for i := 0; i+8 <= n; i++ {
-			boxType := string(buf[i+4 : i+8])
-			if !mp4ValidTopBoxes[boxType] {
+			// map lookup 内联 — SA6001 优化（避免 string() alloc）
+			if !mp4ValidTopBoxes[string(buf[i+4:i+8])] {
 				continue
 			}
 			size := int64(binary.BigEndian.Uint32(buf[i : i+4]))
@@ -212,16 +212,12 @@ func (s *MP4Stitcher) searchNextBox(start, window int64) (int64, bool) {
 				continue
 			}
 			// 确认是 box 而非巧合的 4 字节匹配：探测下一个 box 位置
-			// （合法文件 box 连续出现）
 			nextPos := probe + int64(i) + size
 			if nextPos < start+window {
 				nextHdr := make([]byte, 8)
 				nm, _ := s.Reader.ReadAt(nextHdr, nextPos)
-				if nm == 8 {
-					nextType := string(nextHdr[4:8])
-					if mp4ValidTopBoxes[nextType] {
-						return probe + int64(i), true
-					}
+				if nm == 8 && mp4ValidTopBoxes[string(nextHdr[4:8])] {
+					return probe + int64(i), true
 				}
 			} else {
 				// 单 box 命中也接受（可能是最后一个 box）

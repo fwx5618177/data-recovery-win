@@ -176,7 +176,7 @@ func TestParseFATDate(t *testing.T) {
 	// month 6 (bits 5-8), day 15 (bits 0-4) → date = (40<<9) | (6<<5) | 15
 	date := uint16((40 << 9) | (6 << 5) | 15)
 	// hour 14 (bits 11-15), minute 30 (bits 5-10), sec 0 → tm = (14<<11) | (30<<5) | 0
-	tm := uint16((14 << 11) | (30 << 5) | 0)
+	tm := uint16((14 << 11) | (30 << 5)) // sec 0 → 省略 | 0
 	got := parseFATDate(date, tm)
 	if got == nil {
 		t.Fatal("parseFATDate 应非 nil")

@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -94,9 +95,9 @@ func TestQuerySmart_NoSmartctl(t *testing.T) {
 		t.Skip("本机装了 smartctl，跳过 not-installed 测试")
 	}
 	// 直接调 QuerySmart 应返回 Available=false 而不是 fail
-	h, err := QuerySmart(nil, "/dev/sda")
+	h, err := QuerySmart(context.Background(), "/dev/sda")
 	if err != nil {
-		t.Skip("ctx 为 nil 在某些 Go 版本会 panic; 改用 context.Background 测")
+		t.Skip("ctx 某些 Go 版本行为异常；跳过")
 	}
 	if h != nil && h.Available {
 		t.Error("没装 smartctl 时 Available 应 false")

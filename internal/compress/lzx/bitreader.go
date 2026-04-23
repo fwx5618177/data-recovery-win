@@ -100,11 +100,6 @@ func (r *bitReader) read(n uint) uint32 {
 	return v
 }
 
-// readByte 读 8 位（对齐到字节）
-func (r *bitReader) readByte() uint8 {
-	return uint8(r.read(8))
-}
-
 // alignToByte 跳到下一个 16-bit word 边界（uncompressed block 前必需）
 func (r *bitReader) alignToWord() {
 	if r.nbit > 0 {

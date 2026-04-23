@@ -167,15 +167,13 @@ func buildFSETable(frequencies []int, numStates int) ([]fseEntry, error) {
 		threshold := (uint32(freq) << (nbitsBase + 1)) - uint32(numStates)
 		for i, st := range states {
 			var nbits uint8
-			var next int32
 			if uint32(i) < threshold {
 				nbits = nbitsBase + 1
-				next = int32(i)<<nbits - int32(numStates)
 			} else {
 				nbits = nbitsBase
-				next = int32(uint32(i)-threshold)<<nbits + int32(numStates)/2 - int32(numStates) + int32(threshold)<<uint32(nbitsBase)
-				_ = next // 复杂，见下
 			}
+			// 注：本函数是旧的简化版，只填 nbits 占位。**真正 decoder** 走 lzfse_v2_fse.go
+			// 的 buildFSEDecoderTable（含精确 deltaState 计算）。本处保留给测试向量生成
 			table[st].nbits = nbits
 			table[st].deltaState = int32(numStates) // 占位
 			_ = sym

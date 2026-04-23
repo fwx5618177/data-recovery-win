@@ -39,18 +39,18 @@ import (
 )
 
 const (
-	xfsInobtMagic      uint32 = 0x49414233 // "IAB3" (CRC inode btree v3)
+	xfsInobtMagic       uint32 = 0x49414233 // "IAB3" (CRC inode btree v3)
 	xfsInobtMagicLegacy uint32 = 0x49414254 // "IABT" (pre-v3)
-	xfsBmbtMagicV3     uint32 = 0x424D4233 // "BMB3"
-	xfsBmbtMagicLegacy uint32 = 0x424D4150 // "BMAP"
-
-	xfsInobtBlockSize = 4096 // inobt node block 通常 = fs block size
-
+	xfsBmbtMagicV3      uint32 = 0x424D4233 // "BMB3" 规范参考，未来 bmbt 深度 walker 用
+	xfsBmbtMagicLegacy  uint32 = 0x424D4150 // "BMAP" 规范参考
 	// inode chunk 固定 64 个 inode
 	xfsInodesPerChunk = 64
 
 	// inode 分配位图：64 个 bit 对应 64 个 inode（1 = allocated）
 )
+
+// 保留 bmbt magic 引用让 linter 认可（规范数据未来会用）
+var _ = [...]uint32{xfsBmbtMagicV3, xfsBmbtMagicLegacy}
 
 // InobtRecord 叶节点一条 record
 type InobtRecord struct {

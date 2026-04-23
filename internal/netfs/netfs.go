@@ -91,7 +91,7 @@ func IsRemoteURL(s string) bool {
 //
 // 返回路径列表给前端"快速选择镜像"用。
 func FindMountedRemoteImages() []string {
-	roots := []string{}
+	var roots []string
 	switch runtime.GOOS {
 	case "darwin":
 		roots = []string{"/Volumes"}

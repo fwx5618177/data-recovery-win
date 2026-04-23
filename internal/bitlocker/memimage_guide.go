@@ -21,6 +21,7 @@ package bitlocker
 //   - hiberfil.sys 被压缩（Win10 默认）→ 需先解压 LZXPRESS（本库已有 compress/lzx）
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -74,7 +75,8 @@ func FindMemoryImagesInVolume(reader disk.DiskReader, volumeOffset int64) ([]Mem
 	var candidates []MemoryImageCandidate
 
 	// 不做 ctx 取消（这个扫描应该在秒级完成，系统级文件量不大）
-	scanErr := scanner.ScanMFT(nil, boot, volumeOffset,
+	// 用 context.Background() 而非 nil —— 避免 scanner 内部 ctx 解引用 panic
+	scanErr := scanner.ScanMFT(context.Background(), boot, volumeOffset,
 		nil,
 		func(entry *ntfs.MFTEntry) {
 			if entry == nil || entry.IsDeleted {

@@ -55,7 +55,12 @@ func DecryptAESCCM(key, nonce, ciphertext, tag []byte) ([]byte, error) {
 	counter[0] = byte(ccmLengthSize - 1)
 	copy(counter[1:1+ccmNonceLen], nonce)
 	// counter 字段在末尾 L 字节；初值 0
+	//
+	// 注：nonce 不是硬编码 —— BitLocker CCM 的 nonce 由 sector number + salt
+	// 动态派生（每 sector 唯一），counter block 是 RFC 3610 规范定义的 CTR 初始值
+	// 拼装。gosec G407 误报（它把 make(...) 当空 IV）
 
+	// #nosec G407 — nonce 动态派生自 sector + salt，见上方说明
 	stream := cipher.NewCTR(block, counter)
 
 	// 解密 tag（counter=0 → CTR 第一个 block 是 0 时输出）

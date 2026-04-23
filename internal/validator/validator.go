@@ -733,11 +733,7 @@ func isValidMP3FrameHeader(header uint32) bool {
 
 	// Bits 10-11: Sample rate index — 11 是保留值
 	sampleRateIndex := (header >> 10) & 0x03
-	if sampleRateIndex == 0x03 {
-		return false
-	}
-
-	return true
+	return sampleRateIndex != 0x03
 }
 
 // mp3FrameSize 计算 MP3 帧的大小

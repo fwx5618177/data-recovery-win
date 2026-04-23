@@ -139,15 +139,15 @@ func parseAllFrequencies(freqBytes []byte) (lFreqs, mFreqs, dFreqs, litFreqs []i
 
 	lFreqs, err = decodeFrequencies(stream, 20, lmdStates)
 	if err != nil {
-		return nil, nil, nil, nil, 0, fmt.Errorf("L freqs: %w", err)
+		return nil, nil, nil, nil, 0, fmt.Errorf("l freqs: %w", err)
 	}
 	mFreqs, err = decodeFrequencies(stream, 20, lmdStates)
 	if err != nil {
-		return nil, nil, nil, nil, 0, fmt.Errorf("M freqs: %w", err)
+		return nil, nil, nil, nil, 0, fmt.Errorf("m freqs: %w", err)
 	}
 	dFreqs, err = decodeFrequencies(stream, 64, lmdStates)
 	if err != nil {
-		return nil, nil, nil, nil, 0, fmt.Errorf("D freqs: %w", err)
+		return nil, nil, nil, nil, 0, fmt.Errorf("d freqs: %w", err)
 	}
 	litFreqs, err = decodeFrequencies(stream, 256, literalStates)
 	if err != nil {

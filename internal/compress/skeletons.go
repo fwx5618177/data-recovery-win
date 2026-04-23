@@ -82,9 +82,15 @@ func DecompressDecmpfsInline(data []byte) ([]byte, error) {
 			return nil, fmt.Errorf("zlib reader: %w", err)
 		}
 		defer zr.Close()
+		// decompression bomb 防御：限制到 hdr.RawSize（+1 检测超限），
+		// 若解出 > RawSize 说明 header 和 payload 不一致，拒绝
+		maxAllowed := int64(hdr.RawSize) + 1
 		out := bytes.NewBuffer(make([]byte, 0, hdr.RawSize))
-		if _, err := io.Copy(out, zr); err != nil {
+		if _, err := io.CopyN(out, zr, maxAllowed); err != nil && err != io.EOF {
 			return nil, fmt.Errorf("zlib copy: %w", err)
+		}
+		if int64(out.Len()) > int64(hdr.RawSize) {
+			return nil, fmt.Errorf("zlib 解压超限（可能是 decompression bomb）")
 		}
 		return out.Bytes(), nil
 	case 5: // sparse 全 0

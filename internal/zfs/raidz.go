@@ -459,7 +459,7 @@ func solveThreeData(columns [][]byte, ka, kb, kc int, mi, mj, mk, stripeLen int)
 	// 求 V^-1 by Gaussian elimination on augmented [V | I]
 	inv, err := gf256Invert3x3(v)
 	if err != nil {
-		return fmt.Errorf("Vandermonde GF 求逆: %w", err)
+		return fmt.Errorf("vandermonde GF 求逆: %w", err)
 	}
 
 	// 对每个 byte 位置 j 独立求解

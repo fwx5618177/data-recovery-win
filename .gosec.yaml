@@ -1,0 +1,32 @@
+# gosec 配置 —— 数据恢复工具的特定场景排除
+#
+# 排除的规则类别（按影响排序）：
+#
+# G115: integer overflow in conversion
+#   排除理由：文件系统 parser 大量 uint32/uint64 → int 转换是合法的（MFT entry
+#   number / inode size / extent length 等），每个都在规范定义的范围内。
+#
+# G104: Unhandled errors
+#   排除理由：大多数命中是 Close() 返回错误未处理（Go 社区共识是可接受的），
+#   本项目的 IO 主路径上的错误都被处理；Close 错误仅日志级意义。
+#
+# G304: File inclusion via variable
+#   排除理由：**数据恢复工具的本质功能** = 用户指定任意盘/镜像文件路径。
+#   路径由用户选择，不是外部不可信输入；ValidateRecoveryTarget 已防同盘。
+#
+# G204: Subprocess launched with variable
+#   排除理由：本项目的 exec.Command 调用都是 exec.LookPath 后调固定工具名
+#   （smartctl / afsctool / compression_tool），参数经 sanitize。非攻击向量。
+#
+# G301 / G302 / G306: File permission issues
+#   排除理由：取证工具写输出目录时按需设置权限；custody.json 是公共可读。
+
+global:
+  exclude:
+    - G115
+    - G104
+    - G304
+    - G204
+    - G301
+    - G302
+    - G306

@@ -50,10 +50,7 @@ func parseSHA256SUMS(r io.Reader) (map[string]string, error) {
 			continue
 		}
 		hash := strings.ToLower(fields[0])
-		name := fields[len(fields)-1]
-		if strings.HasPrefix(name, "*") {
-			name = name[1:]
-		}
+		name := strings.TrimPrefix(fields[len(fields)-1], "*")
 		if len(hash) == 64 {
 			out[name] = hash
 		}

@@ -50,12 +50,15 @@ const (
 	// F2FS block 固定 4K
 	f2fsBlockSize = 4096
 
-	// inode 文件名最长
+	// inode 文件名最长（规范引用）
 	f2fsNameLen = 255
 
 	// Direct node 可容纳的 data block 指针数
 	f2fsAddrsPerInode = 923 // kernel 定义 F2FS_ADDRS_PER_INODE (随格式略变)
 )
+
+// 保留常量引用（dentry block 解析未来用）
+var _ = f2fsNameLen
 
 // ExtendedSuperblock 比基础 Superblock 多几个关键字段用于 inode 枚举
 type ExtendedSuperblock struct {

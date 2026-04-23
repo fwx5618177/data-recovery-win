@@ -114,9 +114,11 @@ func CheckLatest(ctx context.Context, owner, repo string) (*CheckResult, error) 
 		return &CheckResult{HasUpdate: false, CurrentVersion: Version}, nil
 	}
 
-	// 把 githubAsset → Asset（tag 从 browser_download_url 映射到 downloadUrl）
+	// 把 githubAsset → Asset（显式 map 因为 JSON tag 不同：browser_download_url → downloadUrl）
+	// 不能用类型转换 Asset(a) —— struct literal 是有意的
 	assets := make([]Asset, 0, len(rel.Assets))
 	for _, a := range rel.Assets {
+		//lint:ignore S1016 JSON tag 差异，struct literal 是故意的
 		assets = append(assets, Asset{
 			Name:        a.Name,
 			Size:        a.Size,

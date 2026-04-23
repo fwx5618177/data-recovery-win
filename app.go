@@ -1565,6 +1565,7 @@ func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, 
 		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".gif" {
 			return nil
 		}
+		// #nosec G122 — 用户自己的恢复输出目录不存在 TOCTOU 威胁场景
 		f, err := os.Open(p)
 		if err != nil {
 			return nil

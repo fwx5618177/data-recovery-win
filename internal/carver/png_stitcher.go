@@ -66,11 +66,6 @@ func NewPNGStitcher(r disk.DiskReader) *PNGStitcher {
 
 var pngSignature = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 
-// PNG chunk type 4cc → 是否 critical（IHDR/PLTE/IDAT/IEND 是 critical；大写首字母是 critical 规则）
-var pngCriticalTypes = map[string]bool{
-	"IHDR": true, "PLTE": true, "IDAT": true, "IEND": true,
-}
-
 // 合法 chunk type 清单（白名单，过滤随机 4 字节噪音）
 var pngValidTypes = map[string]bool{
 	"IHDR": true, "PLTE": true, "IDAT": true, "IEND": true,
@@ -155,16 +150,13 @@ func (s *PNGStitcher) Stitch(pngStart int64) (*PNGStitchResult, error) {
 			if s.MaxSearchWindow <= 0 {
 				return nil, fmt.Errorf("chunk %s CRC 不匹配 @%d", ctype, pos)
 			}
-			nextPos, nextHeader, nextLen, nextType, found := s.searchNextChunk(pos+8, s.MaxSearchWindow)
+			nextPos, _, _, _, found := s.searchNextChunk(pos+8, s.MaxSearchWindow)
 			if !found {
 				return nil, fmt.Errorf("CRC 失败后搜不到下一个合法 chunk")
 			}
 			result.FragmentsHit++
 			pos = nextPos
-			header = nextHeader
-			_ = nextLen
-			_ = nextType
-			continue // 重试新 pos
+			continue // 重试新 pos；下轮 iteration 从 pos 重读 header + 验 CRC
 		}
 
 		// CRC 通过 → 把整个 chunk (header + data + crc) 追加到 output

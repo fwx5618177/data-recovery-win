@@ -21,12 +21,18 @@ import (
 	"data-recovery/internal/disk"
 )
 
-// 容器超块的对象类型 (o_type) 常量
+// 容器超块的对象类型 (o_type) 常量 —— 规范文档引用
+//
+//nolint:unused // 规范引用，未来 o_type 过滤会用到
 const (
 	objTypeNXSuperblock uint32 = 0x00000001
 	objTypeFSSuperblock uint32 = 0x0000000D
+)
 
-	nxMagic = "NXSB" // 容器超块 magic
+var _ = [...]uint32{objTypeNXSuperblock, objTypeFSSuperblock}
+
+const (
+	nxMagic   = "NXSB" // 容器超块 magic
 	apfsMagic = "APSB" // 卷超块 magic
 )
 

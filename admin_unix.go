@@ -140,6 +140,7 @@ func relaunchLinuxWithSudo(exePath string) (bool, error) {
 
 	if pk, err := exec.LookPath("pkexec"); err == nil {
 		full := append([]string{"env", envPair}, args...)
+		// #nosec G702 G204 — re-exec 自身提权：args = os.Args[1:] 来自程序 CLI 不是外部输入
 		cmd := exec.Command(pk, full...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -153,6 +154,7 @@ func relaunchLinuxWithSudo(exePath string) (bool, error) {
 	if os.Getenv("SUDO_ASKPASS") != "" {
 		if su, err := exec.LookPath("sudo"); err == nil {
 			full := append([]string{"-A", "env", envPair}, args...)
+			// #nosec G702 — re-exec 自身提权：args 源于 os.Args 不是外部输入
 			cmd := exec.Command(su, full...)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr

@@ -36,24 +36,28 @@ import (
 	"data-recovery/internal/disk"
 )
 
-// Minstore entry tag 常量（社区逆向的常见值；不保证全覆盖）
+// Minstore entry tag 常量（社区逆向的常见值；作为**规范参考**保留）
+// 当前结构化解析走启发式；未来更精确实现会按这些 tag 选路径
+//
+//nolint:unused // 规范文档值，保留用于未来扩展
 const (
-	// Entry type 在 entry header 的 type 字段（uint16）
 	refsEntryTypeFile      = 0x10 // $FILE_ENTRY
 	refsEntryTypeDirectory = 0x20 // $DIRECTORY_ENTRY
 	refsEntryTypeFSV       = 0x30 // File System Volume info
-
-	// 每个 entry 内部的 field (attribute) 用 type-length-value 编码
-	// field type：
-	refsFieldStandardInfo = 0x10
-	refsFieldFileName     = 0x30
-	refsFieldData         = 0x80
-	refsFieldIndexRoot    = 0x90
-	refsFieldExtendedAttr = 0x100
-
-	// 每个 entry 的 key 前 8 字节常是 object_id (uint64)
-	refsKeyIDSize = 8
+	refsFieldStandardInfo  = 0x10
+	refsFieldFileName      = 0x30
+	refsFieldData          = 0x80
+	refsFieldIndexRoot     = 0x90
+	refsFieldExtendedAttr  = 0x100
+	refsKeyIDSize          = 8
 )
+
+// 保留引用让 linter 知道这些常量"有意义" —— 它们是规范文档数据
+var _ = [...]int{
+	refsEntryTypeFile, refsEntryTypeDirectory, refsEntryTypeFSV,
+	refsFieldStandardInfo, refsFieldFileName, refsFieldData,
+	refsFieldIndexRoot, refsFieldExtendedAttr, refsKeyIDSize,
+}
 
 // ReFSFileEntry 结构化解析出的文件条目
 type ReFSFileEntry struct {

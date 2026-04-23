@@ -13,10 +13,7 @@ package apfs
 // 本实现的 bit reader 按 64-bit accumulator 缓冲，每次从流末尾填充 64 bit。
 // 位顺序按 little-endian（Apple 格式）。
 
-import (
-	"encoding/binary"
-	"fmt"
-)
+import "fmt"
 
 // reverseBitReader 从字节流末尾向前读 bit
 //
@@ -115,23 +112,3 @@ func (r *reverseBitReader) pull(n uint8) (uint32, error) {
 	return uint32(out), nil
 }
 
-// finalizedBytesConsumed 返回总共消费了多少字节（用于 assertion / debug）
-func (r *reverseBitReader) finalizedBytesConsumed() int {
-	return len(r.data) - r.bytePos
-}
-
-// 为对齐 Apple 源码约定，提供两个 helper 读指定块 head 的 accumulator 初始化值
-//   decoder 开始前 accum 必须包含流**末尾** bytes，低位是最后推入的 bit
-func readAccumulatorFromEnd(data []byte) uint64 {
-	var accum uint64
-	take := 8
-	if len(data) < take {
-		take = len(data)
-	}
-	start := len(data) - take
-	for i := 0; i < take; i++ {
-		accum |= uint64(data[start+i]) << (uint(i) * 8)
-	}
-	_ = binary.LittleEndian // 标记字节序约定，避免 import-unused
-	return accum
-}
