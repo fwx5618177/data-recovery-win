@@ -51,22 +51,6 @@ export default function WelcomePage({
       </div>
 
       <div className="page__body flex-col gap-3">
-        <div className="banner banner--warning">
-          <IconAlertTriangle size={18} className="banner__icon" />
-          <div className="banner__content">
-            <div className="banner__title">重要数据请优先用成熟的行业工具</div>
-            <div className="banner__text">
-              这个工具目前支持 <b>NTFS</b> 的 MFT 解析 + 全盘签名雕刻，
-              对 <span className="mono">exFAT/FAT32</span> / Volume Shadow Copy / 碎片重组 / BitLocker / RAID 等场景
-              <b>不支持或刚起步</b>。
-              <br />
-              如果你是被盗电脑 / 重要数据恢复，建议先用 <b>PhotoRec</b>（免费）、
-              <b>DMDE Free</b>（免费）、<b>R-Studio</b>（付费试用）跑一遍，
-              再用本工具做交叉验证。这些工具经过 10+ 年真实案例打磨，可靠度是本工具没法比的。
-            </div>
-          </div>
-        </div>
-
         {needsElevation && (
           <div className="banner banner--danger">
             <IconShield size={18} className="banner__icon" />

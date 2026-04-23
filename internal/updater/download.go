@@ -151,9 +151,19 @@ func DownloadAsset(
 
 	sum := hex.EncodeToString(hasher.Sum(nil))
 
-	// 最后一次进度（done）
+	// 最后一次进度：100%，填上平均速度让 UI 最后一帧不显示 "0.0 MB/s"
 	if progress != nil {
-		progress(DownloadProgress{BytesTotal: total, BytesDone: done})
+		totalSec := time.Since(start).Seconds()
+		var avgSpeed int64
+		if totalSec > 0 {
+			avgSpeed = int64(float64(done) / totalSec)
+		}
+		progress(DownloadProgress{
+			BytesTotal: total,
+			BytesDone:  done,
+			Speed:      avgSpeed,
+			ETASec:     0,
+		})
 	}
 
 	return sum, nil

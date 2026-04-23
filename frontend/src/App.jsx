@@ -1037,8 +1037,13 @@ function UpdateBanner({
             <span className="muted"> （当前 {updateInfo.currentVersion}）</span>
           )}
         </span>
-        <button className="btn btn--sm btn--primary" onClick={onDownload}>
-          后台下载，下次重启自动应用
+        <button
+          className="btn btn--sm btn--primary"
+          onClick={onDownload}
+          disabled={downloadState === "downloading"}
+          title={downloadState === "downloading" ? "已在后台下载，无需重复点击" : ""}
+        >
+          {downloadState === "downloading" ? "已在下载..." : "后台下载，下次重启自动应用"}
         </button>
         <button className="btn btn--sm" onClick={onOpenRelease}>
           查看发布说明

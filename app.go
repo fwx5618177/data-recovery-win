@@ -89,6 +89,10 @@ type App struct {
 
 	// 可选载入的 NSRL 良性 hash 库（取证场景用）
 	nsrlDB *forensics.NSRLDB
+
+	// 下载是否进行中 —— 防止 autoCheckForUpdate 静默下载后，用户点"下载"
+	// 按钮又触发一次，两个下载并发写同 pending 目录 → 进度回退 bug
+	downloadActive bool
 }
 
 // NewApp 创建一个新的 App 实例
@@ -926,6 +930,18 @@ func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int6
 		return fmt.Errorf("下载参数不完整")
 	}
 
+	// 避免并发下载：autoCheckForUpdate 已经静默启动了，用户再点 UI 下载按钮
+	// 不该再起第二个下载任务（两个 goroutine 写同 pending 目录 + 各自 emit 进度
+	// 事件 → UI 百分比会来回跳）
+	a.mu.Lock()
+	if a.downloadActive {
+		a.mu.Unlock()
+		appLogger.Info("下载已在进行，忽略重复请求", "version", version)
+		return nil // 静默 return，前端 UI 不弹错误
+	}
+	a.downloadActive = true
+	a.mu.Unlock()
+
 	pendingDir, err := updater.PendingDir()
 	if err != nil {
 		return err
@@ -939,6 +955,12 @@ func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int6
 	go func() {
 		ctx, cancel := context.WithCancel(a.ctx)
 		defer cancel()
+		// 保证 goroutine 退出时释放下载锁，让下次 release 能重试
+		defer func() {
+			a.mu.Lock()
+			a.downloadActive = false
+			a.mu.Unlock()
+		}()
 
 		asset := updater.Asset{Name: assetName, DownloadURL: assetURL, Size: assetSize}
 		sha, err := updater.DownloadAsset(ctx, asset, destPath, func(p updater.DownloadProgress) {
