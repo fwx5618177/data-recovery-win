@@ -558,6 +558,19 @@ type RAIDScanRequest struct {
 	Mode        string   `json:"mode"`
 }
 
+// DetectRAIDArrays 从一组盘读 mdadm v1.x superblock，按 array UUID 聚合
+// 返回可直接组装的阵列（level / chunkBytes / 按 role 排好序的成员盘路径）。
+//
+// 前端流程：用户多选盘 → 调本接口 → 展示识别出的阵列 → 一键填入 StartRAIDScan 表单。
+func (a *App) DetectRAIDArrays(paths []string) ([]volmgr.DetectedArray, error) {
+	arrays, errs := volmgr.DetectRAIDArrays(paths)
+	if len(arrays) == 0 && len(errs) > 0 {
+		// 没识别出任何阵列且有错误 → 返回第一个错误让用户看清楚原因
+		return nil, errs[0]
+	}
+	return arrays, nil
+}
+
 // StartRAIDScan 把多个物理盘 / 镜像按 RAID 规则虚拟拼成一个连续设备，
 // 然后跑标准 NTFS / carver 等扫描流程。
 //

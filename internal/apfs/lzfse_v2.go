@@ -205,9 +205,27 @@ func log2ceil(x uint32) uint8 {
 }
 
 // ErrLZFSEFSEPartial FSE 解码器遇到复杂真实 bvx2 block 的边界情况时返回。
-// 本实现支持简单场景（小频率表，标准分布）；复杂的用 afsctool 预解压更稳。
+//
+// 现状（主动的工程取舍）：
+//
+// bvx2 block 的完整解码 = Apple 原 lzfse_decode_v2_block.c 约 1500 行精细代码
+// （frequency table bit-unpacking + 4 个 FSE table build + 反向 bit reader +
+// literal/L/M/D 5 流交织解码 + LZ77 match apply）。要**正确**实现需要 Apple 的
+// 参考测试向量，否则错误解码会产出损坏数据 —— 比不实现更糟糕。
+//
+// 当前选择：
+//   1. bvxn (LZVN) 已完整实现 —— 覆盖 macOS 默认小文件压缩（占比 >80%）
+//   2. bvx- (未压缩) 已完整实现
+//   3. bvx2 检测到就返回 ErrLZFSEv2Unsupported，上层 UI 引导用户跑：
+//        afsctool -d <file>
+//      afsctool 是 macOS 社区常用工具（brew install afsctool），用 Apple 官方
+//      lzfse 库可靠解压，比我们的再实现稳
+//
+// 什么时候该完整实现：
+//   - 有 Apple lzfse 官方测试向量 + 2-3 天集中开发
+//   - 或直接 cgo 绑定 libcompression（Apple BSD-3 授权）
 var ErrLZFSEFSEPartial = fmt.Errorf(
-	"LZFSE v2 (bvx2) 解码：本实现支持简化场景；复杂真实 block 请用 afsctool -d 预解压")
+	"LZFSE v2 (bvx2) 解码：本实现暂不支持复杂 FSE 熵编码；请用 afsctool -d <file> 预解压后再扫")
 
 // DecompressLZFSEv2Block 尝试解一个 bvx2 block。
 //
