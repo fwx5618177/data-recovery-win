@@ -1182,6 +1182,16 @@ func (a *App) startRecoveryInternal(fileIDs []string, outputDir string, allowSam
 			}
 			if mp, err := forensics.BuildAndWrite(outputDir, custody); err == nil {
 				appLogger.Info("保管链已自动生成", "path", mp)
+				// 签名版本（Ed25519 + 可选 RFC 3161 TSA）；失败不阻塞恢复
+				if sp, err := forensics.BuildSignAndWrite(outputDir, custody); err == nil {
+					appLogger.Info("签名保管链已生成", "path", sp)
+					// 再打成 evidence.zip bundle，方便 B2B 客户直接交付法务
+					if zp, err := forensics.BundleEvidence(outputDir); err == nil {
+						appLogger.Info("Evidence Bundle 已生成", "path", zp)
+					}
+				} else {
+					appLogger.Warn("签名保管链生成失败（不影响恢复结果）", "err", err)
+				}
 			}
 		}
 

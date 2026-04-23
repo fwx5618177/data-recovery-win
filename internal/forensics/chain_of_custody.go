@@ -106,6 +106,48 @@ func BuildAndWrite(outputDir string, c Custody) (string, error) {
 	return dest, nil
 }
 
+// BuildSignAndWrite 是 BuildAndWrite 的 B2B 级扩展：manifest 之上加 Ed25519
+// 数字签名 + RFC 3161 时间戳（默认 freetsa.org；失败回退 digicert / sectigo）。
+//
+// 输出文件：custody.signed.json —— 含 manifest 原字段 + signaturePublicKey +
+// signature + tsaResponseB64。
+//
+// 第三方验证流程：
+//   1. 拿到 custody.signed.json + 本工具发布的公钥（随 release 附）
+//   2. 用 VerifySignedCustody 或标准 Ed25519 工具验 signature
+//   3. 提取 tsaResponseB64 解 base64 → custody.tsr 文件
+//      → `openssl ts -reply -in custody.tsr -text` 查真实 TSA 时间戳
+//
+// 失败时（TSA 全挂）不 fatal：manifest 签名已完成，时间戳字段留空。
+func BuildSignAndWrite(outputDir string, c Custody) (string, error) {
+	// 先跑常规 manifest 流程（计算 hash 等）
+	if _, err := BuildAndWrite(outputDir, c); err != nil {
+		return "", err
+	}
+	// 读刚写的 custody.json 再算一次（为了 outputFiles 准确）
+	raw, err := os.ReadFile(filepath.Join(outputDir, "custody.json"))
+	if err != nil {
+		return "", err
+	}
+	var filled Custody
+	if err := json.Unmarshal(raw, &filled); err != nil {
+		return "", err
+	}
+	signed, err := SignCustody(filled, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.MarshalIndent(signed, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	dest := filepath.Join(outputDir, "custody.signed.json")
+	if err := os.WriteFile(dest, out, 0o644); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
