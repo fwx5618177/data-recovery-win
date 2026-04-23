@@ -950,6 +950,21 @@ func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int6
 			return
 		}
 
+		// ★ 供应链完整性：对 GitHub Release 发布的 SHA256SUMS.txt 校验下载文件 hash
+		// 防御中间人篡改 binary；若 release 未附 SHA256SUMS.txt 则仅 warn（向后兼容）
+		if sums, sumsErr := updater.FetchSHA256SUMS(ctx, updateRepoOwner, updateRepoName, version); sumsErr == nil {
+			if vErr := updater.VerifyAssetChecksum(assetName, sha, sums); vErr != nil {
+				appLogger.Warn("SHA256SUMS 校验失败，拒绝应用", "err", vErr)
+				_ = os.Remove(destPath) // 删除已下载的不可信二进制
+				wailsRuntime.EventsEmit(a.ctx, "update:downloadError", "供应链校验失败: "+vErr.Error())
+				return
+			}
+			appLogger.Info("SHA256SUMS 供应链校验通过", "asset", assetName)
+		} else {
+			// 老版本 release 可能没附 SHA256SUMS.txt，记 warning 但不阻塞
+			appLogger.Warn("未能获取 SHA256SUMS.txt（老版 release？）", "err", sumsErr)
+		}
+
 		info, _ := os.Stat(destPath)
 		var size int64
 		if info != nil {

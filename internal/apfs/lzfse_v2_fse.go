@@ -84,8 +84,11 @@ func buildFSEDecoderTable(freqs []int, numStates int) ([]fseEntry, error) {
 		}
 	}
 	if pos != 0 {
-		// 某些 numStates 下 step 不互质；当前实现对 1024/64 是互质，应回 0
-		// 不致命：spread 完成只是 symbol 顺序可能略有不同
+		// step 与 numStates 不互质（gcd != 1）→ spread 有空洞，某些 symbol 会
+		// 无解码路径 → 解出错 symbol。当前支持的 numStates (1024/64) 已验证互质，
+		// 这里加 assertion 防止未来改动引入非互质组合（老 iOS 格式 / 未来 lzfse 变体）
+		return nil, fmt.Errorf("FSE spread 不完全 (pos=%d numStates=%d step=%d 非互质)",
+			pos, numStates, step)
 	}
 
 	// Step 3: 按 symbol 聚合 state，计算 (nbits, delta)

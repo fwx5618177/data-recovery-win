@@ -146,12 +146,16 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 				confidence += 0.15
 				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (轻度异常)", health*100))
 			case health >= 0.4:
-				// 碎片嫌疑 —— 用户看到 "半边乱码" 多是这里
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (碎片化嫌疑，可能无法正常解码)", health*100))
+				// 碎片嫌疑 —— 强制 confidence 到 0.45（低于 LowConfidenceThreshold=0.5）
+				// 这样走 _low_confidence/ 子目录，用户一眼看出"可能打不开"
+				if confidence > 0.45 {
+					confidence = 0.45
+				}
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (碎片化嫌疑，已归类到 low confidence)", health*100))
 			default:
-				// 几乎肯定是废文件
-				confidence -= 0.2
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (严重损坏，不建议保留)", health*100))
+				// 几乎肯定是废文件 → 强制到 0 跳过
+				confidence = 0
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (严重损坏，拒绝交付)", health*100))
 			}
 		}
 	}

@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +11,21 @@ import (
 	"strconv"
 	"time"
 )
+
+// computeFileSHA256 整文件 SHA256；返回 hex lowercase
+// apply helper 在替换 exe 前用此验证 binary 未被篡改
+func computeFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // ApplyFlag 是主程序检测到的"进入 helper 模式"的命令行开关。
 // main.go 在 os.Args 里看到这个 flag 就走 RunApplyHelper() 而非正常启动。
@@ -68,6 +85,23 @@ func RunApplyHelper(parentPID int, oldExe, newExe string) error {
 	// 1. 固定等待父进程退出（参数 parentPID 目前仅做日志记录）
 	_ = parentPID
 	time.Sleep(2 * time.Second)
+
+	// ★ 安全：应用前对 newExe 验 SHA256 vs pending manifest 记录
+	// 防御下载后到 apply 之间 binary 被篡改（磁盘错误 / 恶意进程）
+	// 如果 pending 不可用或 hash 字段为空 → skip（向后兼容）
+	if pending, err := LoadPending(); err == nil && pending != nil && pending.SHA256 != "" {
+		if pending.BinaryPath == newExe {
+			actualSHA, sErr := computeFileSHA256(newExe)
+			if sErr != nil {
+				return fmt.Errorf("计算新版 exe hash 失败: %w", sErr)
+			}
+			if actualSHA != pending.SHA256 {
+				_ = ClearPending() // 清理可能被篡改的 pending
+				return fmt.Errorf("新版 exe hash 不匹配 pending manifest：期望 %s 实际 %s（拒绝应用）",
+					pending.SHA256, actualSHA)
+			}
+		}
+	}
 
 	// 2. 带重试的复制 —— Windows 上运行中的 exe 刚退出仍可能持锁几百毫秒
 	var lastErr error
