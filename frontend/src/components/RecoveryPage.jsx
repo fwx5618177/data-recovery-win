@@ -37,13 +37,20 @@ export default function RecoveryPage({
   const [filter, setFilter] = useState("failed"); // all | success | failed
 
   const counts = useMemo(() => {
-    const c = { success: 0, partial: 0, failed: 0, skipped: 0 };
+    const c = { success: 0, lowConfidence: 0, partial: 0, failed: 0, skipped: 0 };
     (records || []).forEach((r) => {
-      if (r.state === "success") c.success++;
-      else if (r.state === "partial") c.partial++;
+      if (r.state === "success") {
+        c.success++;
+        // output path 含 _low_confidence → 统计到 low confidence（仍 success 但标警告）
+        if (r.outputPath && r.outputPath.indexOf("_low_confidence") >= 0) {
+          c.lowConfidence++;
+        }
+      } else if (r.state === "partial") c.partial++;
       else if (r.state === "failed") c.failed++;
       else if (r.state === "skipped") c.skipped++;
     });
+    // 高可靠 = success 总数 - 走 low confidence 的数量
+    c.highConfidence = c.success - c.lowConfidence;
     return c;
   }, [records]);
 
@@ -119,16 +126,29 @@ export default function RecoveryPage({
       <div className="page__body flex-col gap-3">
         <div className="report-summary">
           <div className="stat-card stat-card--success">
-            <div className="stat-card__label">成功</div>
-            <div className="stat-card__value">{counts.success.toLocaleString()}</div>
+            <div className="stat-card__label">✓ 高可靠</div>
+            <div className="stat-card__value">{counts.highConfidence.toLocaleString()}</div>
+            <div className="stat-card__hint">能正常打开（真实解码验证通过）</div>
+          </div>
+          <div className={`stat-card ${counts.lowConfidence > 0 ? "stat-card--warning" : ""}`}>
+            <div className="stat-card__label">⚠ 低可靠</div>
+            <div className="stat-card__value">{counts.lowConfidence.toLocaleString()}</div>
+            <div className="stat-card__hint">已归到 _low_confidence/，可能打不开</div>
           </div>
           <div className={`stat-card ${counts.partial > 0 ? "stat-card--warning" : ""}`}>
-            <div className="stat-card__label">部分恢复 / 跳过</div>
-            <div className="stat-card__value">{(counts.partial + counts.skipped).toLocaleString()}</div>
+            <div className="stat-card__label">◑ 部分恢复</div>
+            <div className="stat-card__value">{counts.partial.toLocaleString()}</div>
+            <div className="stat-card__hint">大小不完整</div>
+          </div>
+          <div className={`stat-card ${counts.skipped > 0 ? "stat-card--muted" : ""}`}>
+            <div className="stat-card__label">⊘ 已拒绝</div>
+            <div className="stat-card__value">{counts.skipped.toLocaleString()}</div>
+            <div className="stat-card__hint">validator 判废，未写盘</div>
           </div>
           <div className={`stat-card ${counts.failed > 0 ? "stat-card--danger" : ""}`}>
-            <div className="stat-card__label">失败</div>
+            <div className="stat-card__label">✗ 失败</div>
             <div className="stat-card__value">{counts.failed.toLocaleString()}</div>
+            <div className="stat-card__hint">读/写错误</div>
           </div>
         </div>
 

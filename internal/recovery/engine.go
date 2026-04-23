@@ -65,12 +65,14 @@ type FileRecoveryRecord struct {
 
 // RecoveryResult 恢复操作的结果汇总。
 type RecoveryResult struct {
-	Succeeded  int                   `json:"success"`
-	Partial    int                   `json:"partial"`
-	Failed     int                   `json:"failed"`
-	Duplicates int                   `json:"duplicates"` // 跨源 SHA-256 去重数量
-	Total      int                   `json:"total"`
-	Records    []*FileRecoveryRecord `json:"records"`
+	Succeeded     int `json:"success"`       // 完整恢复 + validator 判 valid
+	LowConfidence int `json:"lowConfidence"` // 走 _low_confidence/ 子目录（validator 判不完全可靠）
+	Partial       int `json:"partial"`       // 大小不完整恢复
+	Failed        int `json:"failed"`        // 写盘失败 / 读源盘出错
+	Skipped       int `json:"skipped"`       // validator 判 invalid → 拒绝交付
+	Duplicates    int `json:"duplicates"`    // 跨源 SHA-256 去重数量
+	Total         int `json:"total"`
+	Records       []*FileRecoveryRecord `json:"records"`
 }
 
 type ntfsRecoverySource struct {
@@ -1230,6 +1232,8 @@ func (e *Engine) RecoverWithOptions(
 	successCount := 0
 	partialCount := 0
 	failedCount := 0
+	skippedCount := 0       // validator 判 invalid 的被拒文件
+	lowConfCount := 0       // 走 _low_confidence/ 的被保留但标低可靠
 	duplicateCount := 0
 	bytesWritten := int64(0)
 	records := make([]*FileRecoveryRecord, 0, total)
@@ -1292,11 +1296,12 @@ func (e *Engine) RecoverWithOptions(
 			file.ValidationMsg = verify.Message
 
 			if !verify.IsValid {
-				failedCount++
-				appendRecord(file, RecoveryStateSkipped, "", "深度扫描结果校验失败: "+verify.Message, started)
+				// validator 判 invalid = 文件打不开 → "skipped" 而非 "failed"
+				skippedCount++
+				appendRecord(file, RecoveryStateSkipped, "", "校验失败: "+verify.Message, started)
 				logger.Info("跳过低可靠文件", "file", file.FileName, "reason", verify.Message)
 				safeProgress(types.RecoveryProgress{
-					Current:      successCount + partialCount + failedCount,
+					Current:      successCount + partialCount + failedCount + skippedCount,
 					Total:        total,
 					CurrentFile:  file.FileName,
 					BytesWritten: bytesWritten,
@@ -1318,7 +1323,7 @@ func (e *Engine) RecoverWithOptions(
 		}
 		outputPath, pathErr := writer.GenerateOutputPath(file, effectiveOutDir)
 		if pathErr != nil {
-			failedCount++
+			skippedCount++
 			appendRecord(file, RecoveryStateSkipped, "", "生成输出路径失败: "+pathErr.Error(), started)
 			logger.Warn("跳过输出路径生成失败的文件", "file", file.FileName, "err", pathErr)
 			safeProgress(types.RecoveryProgress{
@@ -1394,6 +1399,10 @@ func (e *Engine) RecoverWithOptions(
 		case writeErr == nil:
 			successCount++
 			bytesWritten += file.Size
+			// 输出路径含 _low_confidence 子目录 = validator 标低可靠（走 writer.GenerateOutputPath 规则）
+			if strings.Contains(outputPath, "_low_confidence") {
+				lowConfCount++
+			}
 			appendRecord(file, RecoveryStateSuccess, outputPath, "", started)
 			logger.Info("恢复文件成功", "file", file.FileName, "output", outputPath)
 		case errors.As(writeErr, &partialErr):
@@ -1445,16 +1454,20 @@ func (e *Engine) RecoverWithOptions(
 
 	logger.Info("恢复完成",
 		"success", successCount,
+		"low_confidence", lowConfCount,
 		"partial", partialCount,
 		"failed", failedCount,
+		"skipped", skippedCount,
 		"duplicates", duplicateCount)
 	return &RecoveryResult{
-		Succeeded:  successCount,
-		Partial:    partialCount,
-		Failed:     failedCount,
-		Duplicates: duplicateCount,
-		Total:      total,
-		Records:    records,
+		Succeeded:     successCount,
+		LowConfidence: lowConfCount,
+		Partial:       partialCount,
+		Failed:        failedCount,
+		Skipped:       skippedCount,
+		Duplicates:    duplicateCount,
+		Total:         total,
+		Records:       records,
 	}, nil
 }
 
