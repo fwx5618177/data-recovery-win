@@ -317,15 +317,22 @@ func ReconstructRAIDZ2(columns [][]byte, missing []int) error {
 	return nil
 }
 
-// ReconstructRAIDZ3 三盘失败：P, Q, R triple parity
-// 参考 James S. Plank "A New MDS Erasure Code for RAID-6"
+// ReconstructRAIDZ3 三 parity：P, Q, R
+// - P = Σ D_i        (generator α^0 = 1)
+// - Q = Σ α^i · D_i  (generator α = 2)
+// - R = Σ β^i · D_i  (generator β = 4 = α²)
 //
-// 略简化：当前只支持"所有三个缺失都是 data 盘" 的最常见场景（RAIDZ3 实战最关心的
-// 是 rebuild 时先挂 P/Q/R 再跑 rebuild）；parity 缺失可通过 ReconstructRAIDZ2
-// 处理完 data 再重算 parity 得到。
+// columns 顺序：[0]=P, [1]=Q, [2]=R, [3..N+2]=data (N data disks)
 //
-// 完整实现需要 Vandermonde 矩阵 GF 求逆，~600 额外行。本实现提供框架 +
-// 常见 3-data-缺失场景的简化解（适用 vdev rebuild 的大多数情况）。
+// missing 支持所有组合（≤3 盘缺失）：
+//   ≤2 缺失 → 降级走 RAIDZ2 逻辑（R 不动）或 P/Q parity 缺失场景
+//   3 盘缺失 → 分类讨论：
+//     case A: 3 parity 全缺 → 从 data 重算
+//     case B: 2 parity + 1 data → 用剩 1 parity 解 data，再重算 parity
+//     case C: 1 parity + 2 data → 用剩 2 parity 解 data，再重算 parity
+//     case D: 3 data 全缺 → 解 3×3 Vandermonde 矩阵求解（核心场景，本次实现）
+//
+// GF(2^8) 矩阵求解用 Gaussian elimination（in-place, 无除法只 XOR + gfMul/gfDiv）
 func ReconstructRAIDZ3(columns [][]byte, missing []int) error {
 	if len(columns) < 4 {
 		return fmt.Errorf("RAIDZ3 至少 4 列")
@@ -336,13 +343,370 @@ func ReconstructRAIDZ3(columns [][]byte, missing []int) error {
 	if len(missing) == 0 {
 		return nil
 	}
-	// 降级到 RAIDZ2 的 case
 	if len(missing) <= 2 {
-		// 把 RAIDZ3 的前 3 列当 P/Q/R；RAIDZ2 用前 2 列
 		return ReconstructRAIDZ2(columns, missing)
 	}
 
-	// TODO: 完整 3-data-缺失求解需要 3×3 Vandermonde 矩阵 GF 求逆
-	// 当前返回 "not implemented" 让上层 fallback 到"先 2 盘修复再 1 盘"策略
-	return fmt.Errorf("RAIDZ3 三盘同时缺失的完整求解留给下一版（3x3 Vandermonde GF inverse）")
+	// 3 盘缺失分类
+	// 按升序排序
+	m := append([]int{}, missing...)
+	sortInts3(&m)
+	mi, mj, mk := m[0], m[1], m[2]
+
+	// 确定 stripe 长度
+	var stripeLen int
+	for i, c := range columns {
+		if i == mi || i == mj || i == mk {
+			continue
+		}
+		if c == nil {
+			return fmt.Errorf("列 %d 未标 missing 但 nil", i)
+		}
+		if stripeLen == 0 {
+			stripeLen = len(c)
+		} else if len(c) != stripeLen {
+			return fmt.Errorf("列长度不一致")
+		}
+	}
+	if stripeLen == 0 {
+		return fmt.Errorf("无可用列")
+	}
+	for _, m := range missing {
+		columns[m] = make([]byte, stripeLen)
+	}
+
+	// Case A: 3 parity 缺 (mi=0, mj=1, mk=2) → 从 data 重算
+	if mi == 0 && mj == 1 && mk == 2 {
+		for i := 3; i < len(columns); i++ {
+			k := i - 3
+			aK := zfsGFExp[k%255]
+			bK := zfsGFExp[(2*k)%255] // β^k = (α²)^k = α^(2k)
+			for j := 0; j < stripeLen; j++ {
+				columns[0][j] ^= columns[i][j]
+				columns[1][j] ^= gfMul(aK, columns[i][j])
+				columns[2][j] ^= gfMul(bK, columns[i][j])
+			}
+		}
+		return nil
+	}
+
+	// Case B: 2 parity + 1 data 缺（mi, mj 都 <=2, mk >= 3）
+	// 用剩 1 parity 解 data，再重算 2 parity
+	if mi <= 2 && mj <= 2 && mk >= 3 {
+		k := mk - 3
+		remainingParity := 0 + 1 + 2 - mi - mj // XOR 法找剩的那个 parity index
+		if err := solveOneDataWithOneParity(columns, remainingParity, k, mk, stripeLen); err != nil {
+			return err
+		}
+		// 重算丢失的 2 parity
+		recalcParity(columns, mi, stripeLen)
+		recalcParity(columns, mj, stripeLen)
+		return nil
+	}
+
+	// Case C: 1 parity + 2 data 缺（mi <= 2, mj >= 3, mk >= 3）
+	if mi <= 2 && mj >= 3 && mk >= 3 {
+		// 可用 parity 中排除 mi。按 RAIDZ2 思路：只用 2 个可用 parity 解 2 个 data
+		remaining := pickRemainingTwoParities(mi) // 返回剩 2 个 parity index
+		if err := solveTwoDataWithTwoParities(columns, remaining[0], remaining[1], mj-3, mk-3, mj, mk, stripeLen); err != nil {
+			return err
+		}
+		recalcParity(columns, mi, stripeLen)
+		return nil
+	}
+
+	// Case D: 3 data 缺（mi, mj, mk 都 >= 3）—— 核心：3×3 Vandermonde GF 求逆
+	ka := mi - 3
+	kb := mj - 3
+	kc := mk - 3
+	return solveThreeData(columns, ka, kb, kc, mi, mj, mk, stripeLen)
+}
+
+// solveThreeData 三 data 缺失核心求解：Gaussian elimination on GF(2^8)
+//
+// 方程组：
+//   | 1        1        1        |   | D_a |   | P' |
+//   | α^ka     α^kb     α^kc     | · | D_b | = | Q' |
+//   | α^(2ka)  α^(2kb)  α^(2kc)  |   | D_c |   | R' |
+//
+// P' = P XOR (已知 data 的 XOR)
+// Q' = Q XOR (已知 α^l · D_l 的 XOR)
+// R' = R XOR (已知 α^(2l) · D_l 的 XOR)
+//
+// 对每个 byte 位置 j 独立解一个 3×3 方程。由于每个 byte 系数相同，
+// 预计算 (3×3) Vandermonde 在 GF 上的逆矩阵，然后对每 byte 只 9 次 gfMul。
+func solveThreeData(columns [][]byte, ka, kb, kc int, mi, mj, mk, stripeLen int) error {
+	aKa := zfsGFExp[ka%255]
+	aKb := zfsGFExp[kb%255]
+	aKc := zfsGFExp[kc%255]
+
+	// 验 3 个系数互异（否则矩阵奇异）
+	if aKa == aKb || aKa == aKc || aKb == aKc {
+		return fmt.Errorf("RAIDZ3 缺失 data 盘系数重复，矩阵奇异")
+	}
+
+	// 构造 3×3 Vandermonde matrix V
+	//   row 0: [1, 1, 1]
+	//   row 1: [α^ka, α^kb, α^kc]
+	//   row 2: [α^(2ka), α^(2kb), α^(2kc)]
+	var v [3][3]byte
+	v[0][0], v[0][1], v[0][2] = 1, 1, 1
+	v[1][0], v[1][1], v[1][2] = aKa, aKb, aKc
+	v[2][0] = gfMul(aKa, aKa)
+	v[2][1] = gfMul(aKb, aKb)
+	v[2][2] = gfMul(aKc, aKc)
+
+	// 求 V^-1 by Gaussian elimination on augmented [V | I]
+	inv, err := gf256Invert3x3(v)
+	if err != nil {
+		return fmt.Errorf("Vandermonde GF 求逆: %w", err)
+	}
+
+	// 对每个 byte 位置 j 独立求解
+	// 算 P', Q', R' —— 先用 P/Q/R 的原值
+	pPrime := make([]byte, stripeLen)
+	qPrime := make([]byte, stripeLen)
+	rPrime := make([]byte, stripeLen)
+	copy(pPrime, columns[0])
+	copy(qPrime, columns[1])
+	copy(rPrime, columns[2])
+
+	for l := 0; l < len(columns)-3; l++ {
+		if l == ka || l == kb || l == kc {
+			continue
+		}
+		aL := zfsGFExp[l%255]
+		bL := gfMul(aL, aL) // α^(2l)
+		for j := 0; j < stripeLen; j++ {
+			d := columns[l+3][j]
+			pPrime[j] ^= d
+			qPrime[j] ^= gfMul(aL, d)
+			rPrime[j] ^= gfMul(bL, d)
+		}
+	}
+
+	// | D_a |   | inv[0][0]·P' + inv[0][1]·Q' + inv[0][2]·R' |
+	// | D_b | = | inv[1][0]·P' + inv[1][1]·Q' + inv[1][2]·R' |
+	// | D_c |   | inv[2][0]·P' + inv[2][1]·Q' + inv[2][2]·R' |
+	for j := 0; j < stripeLen; j++ {
+		p, q, r := pPrime[j], qPrime[j], rPrime[j]
+		columns[mi][j] = gfMul(inv[0][0], p) ^ gfMul(inv[0][1], q) ^ gfMul(inv[0][2], r)
+		columns[mj][j] = gfMul(inv[1][0], p) ^ gfMul(inv[1][1], q) ^ gfMul(inv[1][2], r)
+		columns[mk][j] = gfMul(inv[2][0], p) ^ gfMul(inv[2][1], q) ^ gfMul(inv[2][2], r)
+	}
+	return nil
+}
+
+// gf256Invert3x3 GF(2^8) 上对 3×3 矩阵求逆（Gaussian elimination）
+// 返回 inv 使得 V · inv = I
+func gf256Invert3x3(v [3][3]byte) ([3][3]byte, error) {
+	// 增广 [V | I]，做行操作把 V 变成单位阵 → 右半部分即 V^-1
+	var aug [3][6]byte
+	for i := 0; i < 3; i++ {
+		aug[i][0] = v[i][0]
+		aug[i][1] = v[i][1]
+		aug[i][2] = v[i][2]
+		aug[i][3+i] = 1
+	}
+
+	for col := 0; col < 3; col++ {
+		// 主元选择：找当前 col 列中 aug[row][col] != 0 的行
+		pivot := -1
+		for row := col; row < 3; row++ {
+			if aug[row][col] != 0 {
+				pivot = row
+				break
+			}
+		}
+		if pivot < 0 {
+			var zero [3][3]byte
+			return zero, fmt.Errorf("矩阵奇异（col %d 全 0）", col)
+		}
+		if pivot != col {
+			aug[col], aug[pivot] = aug[pivot], aug[col]
+		}
+		// 把 aug[col][col] 归一化为 1
+		piv := aug[col][col]
+		invPiv := gfDiv(1, piv)
+		for k := 0; k < 6; k++ {
+			aug[col][k] = gfMul(aug[col][k], invPiv)
+		}
+		// 消掉其他行的 col 列
+		for row := 0; row < 3; row++ {
+			if row == col || aug[row][col] == 0 {
+				continue
+			}
+			factor := aug[row][col]
+			for k := 0; k < 6; k++ {
+				aug[row][k] ^= gfMul(factor, aug[col][k])
+			}
+		}
+	}
+
+	var out [3][3]byte
+	for i := 0; i < 3; i++ {
+		out[i][0] = aug[i][3]
+		out[i][1] = aug[i][4]
+		out[i][2] = aug[i][5]
+	}
+	return out, nil
+}
+
+// ---- 辅助：RAIDZ3 case B / case C 的分支 ----
+
+// solveOneDataWithOneParity 用单个可用 parity (P/Q/R) 解单个 data 缺失
+// parityIdx: 0=P, 1=Q, 2=R
+// dataK: 缺失 data 盘的编号（0..N-1）
+// dataColIdx: 缺失 data 盘在 columns 里的 index（= dataK + 3）
+func solveOneDataWithOneParity(columns [][]byte, parityIdx, dataK, dataColIdx, stripeLen int) error {
+	copy(columns[dataColIdx], columns[parityIdx])
+	switch parityIdx {
+	case 0: // 用 P：D_k = P XOR Σ_{l!=k} D_l
+		for i := 3; i < len(columns); i++ {
+			if i == dataColIdx {
+				continue
+			}
+			for j := 0; j < stripeLen; j++ {
+				columns[dataColIdx][j] ^= columns[i][j]
+			}
+		}
+	case 1: // 用 Q: D_k = (Q XOR Σ_{l!=k} α^l·D_l) / α^k
+		tmp := make([]byte, stripeLen)
+		copy(tmp, columns[1])
+		for i := 3; i < len(columns); i++ {
+			if i == dataColIdx {
+				continue
+			}
+			coef := zfsGFExp[(i-3)%255]
+			for j := 0; j < stripeLen; j++ {
+				tmp[j] ^= gfMul(coef, columns[i][j])
+			}
+		}
+		invAK := gfDiv(1, zfsGFExp[dataK%255])
+		for j := 0; j < stripeLen; j++ {
+			columns[dataColIdx][j] = gfMul(tmp[j], invAK)
+		}
+	case 2: // 用 R: D_k = (R XOR Σ_{l!=k} α^(2l)·D_l) / α^(2k)
+		tmp := make([]byte, stripeLen)
+		copy(tmp, columns[2])
+		for i := 3; i < len(columns); i++ {
+			if i == dataColIdx {
+				continue
+			}
+			l := i - 3
+			coef := gfMul(zfsGFExp[l%255], zfsGFExp[l%255])
+			for j := 0; j < stripeLen; j++ {
+				tmp[j] ^= gfMul(coef, columns[i][j])
+			}
+		}
+		aK := zfsGFExp[dataK%255]
+		invBK := gfDiv(1, gfMul(aK, aK))
+		for j := 0; j < stripeLen; j++ {
+			columns[dataColIdx][j] = gfMul(tmp[j], invBK)
+		}
+	}
+	return nil
+}
+
+// solveTwoDataWithTwoParities case C 用：用剩 2 个 parity 解 2 个 data
+// parityA, parityB: 剩余 2 parity index (0/1/2 的 2 个)
+// ka, kb: 缺失 data 盘的编号
+// colA, colB: 缺失 data 在 columns 里的 index
+func solveTwoDataWithTwoParities(columns [][]byte, parityA, parityB, ka, kb, colA, colB, stripeLen int) error {
+	// 写成 Vandermonde 2×2 方程：
+	//   [α^(exp_A·ka)  α^(exp_A·kb)] · [D_a]   [parityA' ]
+	//   [α^(exp_B·ka)  α^(exp_B·kb)]   [D_b] = [parityB' ]
+	// 其中 exp_A = parityA (0/1/2)，exp_B 同理
+	//
+	// parityA' = parityA XOR Σ α^(exp_A·l)·D_l（已知 l!=ka,kb）
+	// 2×2 求逆：
+	//   det = coef[0][0]·coef[1][1] XOR coef[0][1]·coef[1][0]
+	//   inv = 1/det · adj
+
+	coefAK := zfsGFExp[(parityA*ka)%255]
+	coefAKb := zfsGFExp[(parityA*kb)%255]
+	coefBK := zfsGFExp[(parityB*ka)%255]
+	coefBKb := zfsGFExp[(parityB*kb)%255]
+
+	det := gfMul(coefAK, coefBKb) ^ gfMul(coefAKb, coefBK)
+	if det == 0 {
+		return fmt.Errorf("RAIDZ3 case C 矩阵奇异")
+	}
+	invDet := gfDiv(1, det)
+
+	aPrime := make([]byte, stripeLen)
+	bPrime := make([]byte, stripeLen)
+	copy(aPrime, columns[parityA])
+	copy(bPrime, columns[parityB])
+	for l := 0; l < len(columns)-3; l++ {
+		if l == ka || l == kb {
+			continue
+		}
+		cA := zfsGFExp[(parityA*l)%255]
+		cB := zfsGFExp[(parityB*l)%255]
+		for j := 0; j < stripeLen; j++ {
+			d := columns[l+3][j]
+			aPrime[j] ^= gfMul(cA, d)
+			bPrime[j] ^= gfMul(cB, d)
+		}
+	}
+
+	// D_a = (coefBKb · aPrime XOR coefAKb · bPrime) / det
+	// D_b = (coefBK · aPrime  XOR coefAK  · bPrime) / det
+	for j := 0; j < stripeLen; j++ {
+		da := gfMul(gfMul(coefBKb, aPrime[j])^gfMul(coefAKb, bPrime[j]), invDet)
+		db := gfMul(gfMul(coefBK, aPrime[j])^gfMul(coefAK, bPrime[j]), invDet)
+		columns[colA][j] = da
+		columns[colB][j] = db
+	}
+	return nil
+}
+
+// recalcParity 重算丢失的 parity 列
+func recalcParity(columns [][]byte, parityIdx, stripeLen int) {
+	for j := 0; j < stripeLen; j++ {
+		columns[parityIdx][j] = 0
+	}
+	for i := 3; i < len(columns); i++ {
+		l := i - 3
+		var coef byte
+		switch parityIdx {
+		case 0:
+			coef = 1
+		case 1:
+			coef = zfsGFExp[l%255]
+		case 2:
+			coef = gfMul(zfsGFExp[l%255], zfsGFExp[l%255])
+		}
+		for j := 0; j < stripeLen; j++ {
+			columns[parityIdx][j] ^= gfMul(coef, columns[i][j])
+		}
+	}
+}
+
+// pickRemainingTwoParities 给定一个 parity index (0/1/2)，返回剩两个
+func pickRemainingTwoParities(missing int) [2]int {
+	switch missing {
+	case 0:
+		return [2]int{1, 2}
+	case 1:
+		return [2]int{0, 2}
+	default:
+		return [2]int{0, 1}
+	}
+}
+
+// sortInts3 对 3 个 int 升序排（避免 import "sort"）
+func sortInts3(s *[]int) {
+	arr := *s
+	if len(arr) >= 2 && arr[0] > arr[1] {
+		arr[0], arr[1] = arr[1], arr[0]
+	}
+	if len(arr) >= 3 && arr[1] > arr[2] {
+		arr[1], arr[2] = arr[2], arr[1]
+	}
+	if len(arr) >= 2 && arr[0] > arr[1] {
+		arr[0], arr[1] = arr[1], arr[0]
+	}
+	*s = arr
 }
