@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/hirochachacha/go-smb2 v1.1.0
+	github.com/klauspost/compress v1.17.9
 	github.com/wailsapp/wails/v2 v2.12.0
 	golang.org/x/crypto v0.33.0
 	golang.org/x/sys v0.30.0

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // TestLZ4RawDecompress 用手工构造的 LZ4 block 验证解压器正确性
@@ -101,6 +103,30 @@ func TestParseZAPMicro(t *testing.T) {
 	}
 	if entries[0].Name != "hello.txt" || entries[0].Value != 12345 || entries[0].CD != 7 {
 		t.Errorf("entry 不对: %+v", entries[0])
+	}
+}
+
+// ZSTD round-trip：用真实 zstd encoder 压 → 我们的 decoder 解 → 对比
+func TestZSTDDecompress_RoundTrip(t *testing.T) {
+	plain := []byte("The quick brown fox jumps over the lazy dog. Repeat: ABCABCABCABC")
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		t.Fatalf("encoder: %v", err)
+	}
+	encoded := enc.EncodeAll(plain, nil)
+	enc.Close()
+
+	// 模拟 ZFS 8 字节封装（c_len BE + 4 字节 padding）
+	wrapped := make([]byte, 8+len(encoded))
+	binary.BigEndian.PutUint32(wrapped[0:4], uint32(len(encoded)))
+	copy(wrapped[8:], encoded)
+
+	out, err := zstdDecompress(wrapped, len(plain))
+	if err != nil {
+		t.Fatalf("解压: %v", err)
+	}
+	if !bytes.Equal(out, plain) {
+		t.Errorf("round-trip 不等:\n got %q\nwant %q", out, plain)
 	}
 }
 

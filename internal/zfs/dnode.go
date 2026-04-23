@@ -45,8 +45,11 @@ package zfs
 // 参考：openzfs include/sys/dnode.h / zap_leaf.h / zio_compress.h / lz4.c
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+
+	"github.com/klauspost/compress/zstd"
 
 	"data-recovery/internal/disk"
 )
@@ -168,9 +171,64 @@ func ReadDataBlock(reader disk.DiskReader, vdevStart int64, bp *BlockPointer) ([
 			return nil, fmt.Errorf("LZ4 解压: %w", err)
 		}
 		return out[:n2], nil
+	case zioCompressZSTD:
+		out, err := zstdDecompress(raw, int(logicalSize))
+		if err != nil {
+			return nil, fmt.Errorf("ZSTD 解压: %w", err)
+		}
+		return out, nil
 	default:
-		return nil, fmt.Errorf("未支持的压缩算法 %d（需要 LZ4 / 未压缩；ZSTD/GZIP 暂未实现）", bp.Compression)
+		return nil, fmt.Errorf("未支持的压缩算法 %d（已实现 LZ4 / ZSTD / 未压缩；GZIP/LZJB 暂未接入）", bp.Compression)
 	}
+}
+
+// -----------------------------------------------------------------------
+// ZSTD 解压（ZFS zio_zstd 封装）
+// -----------------------------------------------------------------------
+//
+// ZFS 的 zstd_wrapper 在 raw 数据前有 8 字节 ZFS 封装头：
+//   offset 0: c_len (uint32 BE) — 实际 zstd frame 字节数
+//   offset 4: version + level (packed)
+//   offset 8..: zstd frame
+//
+// 本实现：剥掉 ZFS header 后调 klauspost/compress/zstd 解真 zstd frame。
+
+var globalZstdReader *zstd.Decoder
+
+func getZstdReader() (*zstd.Decoder, error) {
+	if globalZstdReader == nil {
+		r, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return nil, err
+		}
+		globalZstdReader = r
+	}
+	return globalZstdReader, nil
+}
+
+// zstdDecompress 解 ZFS zstd block；logicalSize 是预期 uncompressed 大小
+func zstdDecompress(src []byte, logicalSize int) ([]byte, error) {
+	if len(src) < 8 {
+		return nil, fmt.Errorf("ZFS zstd 封装 < 8 字节")
+	}
+	// 剥 ZFS 头
+	cLen := int(binary.BigEndian.Uint32(src[0:4]))
+	if cLen < 0 || 8+cLen > len(src) {
+		// 某些 ZFS 版本不带 c_len 或字段含义不同；fallback 到整 src[8:]
+		cLen = len(src) - 8
+	}
+	body := src[8 : 8+cLen]
+
+	r, err := getZstdReader()
+	if err != nil {
+		return nil, err
+	}
+	// DecodeAll 一次性解；避免流式读的 overhead
+	out, err := r.DecodeAll(body, bytes.NewBuffer(make([]byte, 0, logicalSize)).Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("zstd decode: %w", err)
+	}
+	return out, nil
 }
 
 // -----------------------------------------------------------------------
