@@ -1085,7 +1085,12 @@ func (s *Scanner) parseMFTEntryForDataRuns(data []byte) ([]DataRun, int64, error
 	// 应用 fixup
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	_ = applyFixup(dataCopy)
+	if err := applyFixup(dataCopy); err != nil {
+		// 与 parseMFTEntry 一致：fixup 失败不静默，记录警告让上层知道此 entry
+		// 数据可能不可靠（attribute list 子条目场景也可能是损坏数据）
+		logging.L().Warn("MFT attribute list fixup 校验失败",
+			"component", "ntfs", "err", err)
+	}
 
 	// 遍历属性查找未命名的 $DATA
 	if len(dataCopy) < 0x16 {

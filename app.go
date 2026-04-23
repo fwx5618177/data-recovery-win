@@ -109,11 +109,48 @@ func (a *App) startup(ctx context.Context) {
 		appLogger.Info("会话存储就绪", "path", store.Path())
 	}
 
-	// 启动后台版本检查。注意：故意不阻塞启动，不报错干扰用户，
-	// 仅当 HasUpdate=true 时通过事件通知前端；其余情况静默
+	// 启动后台版本检查 + 静默自动更新（下载 + 下次启动自动替换）
+	// 注意：故意不阻塞启动，不报错干扰用户
 	go a.autoCheckForUpdate()
 
 	appLogger.Info("应用启动完成", "version", updater.Version)
+}
+
+// ApplyPendingUpdateOnStartup 在 main.go 很早期（wails.Run 之前）调用：
+// 检测是否有上次下载好的新版本 pending；有就 spawn helper 替换 exe 并 exit，
+// 用户下次启动（通过 helper 重新拉起）就是新版本 —— 完全静默。
+//
+// 返回 true 表示"已发起替换 + 当前进程应退出"（让 helper 接管）。
+// 独立在 app struct 外是因为 struct 实例化时已经太晚。
+func ApplyPendingUpdateOnStartup() bool {
+	// 环境变量 opt-out（CI / 企业部署可禁）
+	if os.Getenv("DATA_RECOVERY_NO_AUTO_UPDATE") == "1" {
+		return false
+	}
+	pending, err := updater.LoadPending()
+	if err != nil || pending == nil {
+		return false
+	}
+	// pending 版本必须比当前运行的 binary 版本新
+	if pending.Version == "" || pending.Version == updater.Version {
+		return false
+	}
+	// 二进制文件必须存在（user 可能手动清理过）
+	if _, err := os.Stat(pending.BinaryPath); err != nil {
+		_ = updater.ClearPending()
+		return false
+	}
+	currentExe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	appLogger.Info("检测到 pending 更新，静默替换", "version", pending.Version)
+	if err := updater.SpawnApplyHelper(currentExe, pending.BinaryPath); err != nil {
+		appLogger.Warn("静默更新 spawn helper 失败", "err", err)
+		return false
+	}
+	// helper 已脱离本进程；当前进程退出让 helper 替换 exe 再重新拉起
+	return true
 }
 
 // autoCheckForUpdate 后台检查 GitHub Releases。
@@ -151,6 +188,45 @@ func (a *App) autoCheckForUpdate() {
 		"latest", res.LatestVersion,
 		"url", res.DownloadPage)
 	wailsRuntime.EventsEmit(a.ctx, "update:available", res)
+
+	// 静默自动下载：用户 opt-out 才不做
+	if os.Getenv("DATA_RECOVERY_NO_AUTO_UPDATE") == "1" {
+		return
+	}
+	// 选择本平台对应的 asset（按平台 + arch 前缀匹配）
+	asset := pickPlatformAsset(res.Assets)
+	if asset == nil {
+		appLogger.Info("自动更新：未找到本平台 asset，留给用户手动下载")
+		return
+	}
+	appLogger.Info("开始静默后台下载", "asset", asset.Name, "size", asset.Size)
+	// 复用 DownloadUpdate 的核心逻辑 —— 直接调 DownloadAsset + SavePending
+	if err := a.DownloadUpdate(res.LatestVersion, asset.DownloadURL, asset.Name, asset.Size); err != nil {
+		appLogger.Debug("静默下载调度失败（忽略）", "err", err)
+	}
+}
+
+// pickPlatformAsset 从 release assets 里选当前平台对应的 asset
+// 匹配规则：文件名包含 runtime.GOOS + runtime.GOARCH（或 universal）
+func pickPlatformAsset(assets []updater.Asset) *updater.Asset {
+	osName := runtime.GOOS
+	arch := runtime.GOARCH
+	// GitHub Release asset 命名惯例：data-recovery-{os}-{arch}.{ext}
+	// universal 也匹配（macOS 通用二进制）
+	for i := range assets {
+		name := strings.ToLower(assets[i].Name)
+		if strings.Contains(name, osName) && (strings.Contains(name, arch) || strings.Contains(name, "universal")) {
+			return &assets[i]
+		}
+	}
+	// 仅按 OS 匹配的 fallback（有些 release 用 amd64 别名如 x64/x86_64）
+	for i := range assets {
+		name := strings.ToLower(assets[i].Name)
+		if strings.Contains(name, osName) {
+			return &assets[i]
+		}
+	}
+	return nil
 }
 
 // CheckForUpdate 提供给前端主动触发版本检查的入口（"立刻检查更新"按钮）。

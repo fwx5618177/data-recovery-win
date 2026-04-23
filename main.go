@@ -49,6 +49,14 @@ func main() {
 		return
 	}
 
+	// 静默自动更新：检测到上次下载好的 pending 新版本，spawn helper 替换 exe，
+	// 本进程立即退出让 helper 接管（再以新版 exe 重启应用）
+	// 整个流程用户无感知（除了下次启动真的是新版本）
+	if ApplyPendingUpdateOnStartup() {
+		bootLogger.Info("静默更新已派发 helper，当前进程退出让新版替换")
+		return
+	}
+
 	app := NewApp()
 
 	err = wails.Run(&options.App{
