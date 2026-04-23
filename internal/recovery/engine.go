@@ -142,6 +142,10 @@ type Engine struct {
 
 	scanCancel    context.CancelFunc
 	recoverCancel context.CancelFunc
+
+	// resilientReader 当前扫描会话用的带坏块保护的 reader（由 Scan 自动包装）
+	// 用来在扫完后汇报 BadSectors 给前端"坏扇区清单"UI
+	resilientReader *disk.ResilientReader
 }
 
 // NewEngine 创建新的恢复引擎实例
@@ -189,15 +193,23 @@ func (e *Engine) Scan(
 	mode types.ScanMode,
 	callbacks ScanCallbacks,
 ) (*types.ScanResult, error) {
-	reader := disk.NewReader(drivePath)
-	if err := reader.Open(); err != nil {
+	base := disk.NewReader(drivePath)
+	if err := base.Open(); err != nil {
 		return nil, fmt.Errorf("打开磁盘设备失败: %w", err)
 	}
+	// 包两层保护：
+	//   1. TimeoutReader: 单次 ReadAt 超时 8s → 把 driver 层 hang 当坏块
+	//   2. ResilientReader: 遇坏块按扇区切分重试 2 次，仍失败就 0 填充 + 记录
+	// 链路：Engine → ResilientReader → TimeoutReader → 平台 reader
+	reader := disk.NewResilientReader(disk.NewTimeoutReader(base, 0), int64(base.SectorSize()), 0)
 	defer func() {
-		if err := reader.Close(); err != nil {
+		if err := base.Close(); err != nil {
 			logger.Warn("关闭磁盘设备失败", "err", err)
 		}
 	}()
+	e.mu.Lock()
+	e.resilientReader = reader
+	e.mu.Unlock()
 	return e.ScanWithReader(reader, mode, callbacks)
 }
 
@@ -1667,6 +1679,18 @@ func (e *Engine) recoverEXTFile(file *types.RecoveredFile, outputPath string) er
 		return fmt.Errorf("收集 ext 文件块失败: %w", err)
 	}
 	return writer.WriteEXTFile(file, ranges, source.SuperBlock, outputPath)
+}
+
+// BadSectors 返回本次扫描期间 ResilientReader 跳过的坏扇区清单
+// （没扫描过或 Scan 用自定义 reader 时返回 nil）。
+func (e *Engine) BadSectors() []disk.BadSector {
+	e.mu.RLock()
+	rr := e.resilientReader
+	e.mu.RUnlock()
+	if rr == nil {
+		return nil
+	}
+	return rr.BadSectors()
 }
 
 // Stop 取消正在进行的扫描。

@@ -1865,9 +1865,11 @@ func (a *App) ListAPFSSnapshots(drivePath string) ([]APFSSnapshotInfo, error) {
 }
 
 // GetBadSectors 返回最近一次扫描中 ResilientReader 跳过的坏扇区列表。
-// 当前 engine 不直接用 ResilientReader；此接口预留给未来 engine 包装时用。
-// 现在没有数据时返回空数组，让前端可以"总是显示'0 坏扇区'指示灯"。
+// Engine.Scan 现在自动包 ResilientReader → 用户不用管；前端可直接展示。
 func (a *App) GetBadSectors() []disk.BadSector {
+	if bs := a.engine.BadSectors(); bs != nil {
+		return bs
+	}
 	return []disk.BadSector{}
 }
 

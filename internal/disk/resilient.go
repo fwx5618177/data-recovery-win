@@ -51,6 +51,14 @@ func (r *ResilientReader) Size() (int64, error) { return r.underlying.Size() }
 func (r *ResilientReader) SectorSize() int      { return int(r.sectorSize) }
 func (r *ResilientReader) DevicePath() string   { return r.underlying.DevicePath() }
 
+// Cancel 透传给底层（保留 Canceller 能力让 StopScan 能强制中断 underlying syscall）
+func (r *ResilientReader) Cancel() error {
+	if c, ok := r.underlying.(Canceller); ok {
+		return c.Cancel()
+	}
+	return nil
+}
+
 // ReadAt 是核心：遇错就切小块逐扇区重试，全失败的扇区用 0 填充。
 //
 // 这种策略让"500GB 盘有 100 个坏扇区"也能完成扫描，而不是从第一个坏扇区就死。
