@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"image/jpeg"
+	"image/png"
 	"math"
 
 	"data-recovery/internal/disk"
@@ -131,31 +133,38 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 		messages = append(messages, fmt.Sprintf("文件大小异常: %s", types.FormatSize(size)))
 	}
 
-	// ★ 新增关键检查：熵流健康度（之前"一半正常一半乱码"就是漏了这一步）
-	// 读全文（或前 8MB，平衡内存和准确性）扫 FF xx 序列比合法 vs 非法 marker 比例
-	// 非法 marker 高 = 熵流中跨了 extent 边界接入其他文件数据 / 空闲区
-	if size <= 8*1024*1024 {
+	// ★ 最强检查：真实 Decode（用户能打开 <=> Decode 成功）
+	//
+	// 之前用"熵流健康度"启发判定，但用户反馈仍有"10 张里 8 张打不开"
+	// —— 因为 health 算法对 SOI/EOI 齐全但中段乱码的半截图判分偏高（可能 0.7+）。
+	//
+	// 权威判定：Go 标准库 image/jpeg.Decode() 跑完整 Huffman + IDCT + color conversion。
+	// 任何一层失败 = 用户打不开 = 不该恢复。**这就是用户真实体验的对齐**。
+	//
+	// 代价：每个 JPEG 都解码一次，对几 MB 图片 ~10-50ms。批量恢复数千张时
+	// 总耗时 +几秒；比让用户收到一堆打不开的图强得多。
+	if size > 100 && size <= 16*1024*1024 {
 		full, err := v.readAt(offset, int(size))
 		if err == nil {
-			health := computeJPEGHealth(full)
-			switch {
-			case health >= 0.9:
-				confidence += 0.3
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (干净)", health*100))
-			case health >= 0.7:
-				confidence += 0.15
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (轻度异常)", health*100))
-			case health >= 0.4:
-				// 碎片嫌疑 —— 强制 confidence 到 0.45（低于 LowConfidenceThreshold=0.5）
-				// 这样走 _low_confidence/ 子目录，用户一眼看出"可能打不开"
-				if confidence > 0.45 {
-					confidence = 0.45
+			if _, decErr := jpeg.Decode(bytes.NewReader(full)); decErr == nil {
+				// Decode 成功 = 权威 valid
+				confidence += 0.4
+				messages = append(messages, "标准库 JPEG 解码成功（能正常打开）")
+			} else {
+				// Decode 失败 = 基本打不开；再看 health 区分"部分可挽救" vs "废文件"
+				health := computeJPEGHealth(full)
+				if health >= 0.85 {
+					// Decode 失败但熵流非常干净 —— 可能是尾部截断或某个边角 case
+					// 保留但标低置信度
+					if confidence > 0.45 {
+						confidence = 0.45
+					}
+					messages = append(messages, fmt.Sprintf("解码失败但熵流健康 %.0f%% — 可能尾部截断，低置信保留", health*100))
+				} else {
+					// Decode 失败 + 熵流不干净 = 废文件
+					confidence = 0
+					messages = append(messages, fmt.Sprintf("解码失败 + 熵流 %.0f%% — 碎片化或损坏，拒绝交付", health*100))
 				}
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (碎片化嫌疑，已归类到 low confidence)", health*100))
-			default:
-				// 几乎肯定是废文件 → 强制到 0 跳过
-				confidence = 0
-				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (严重损坏，拒绝交付)", health*100))
 			}
 		}
 	}
@@ -169,9 +178,11 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 	}
 
 	return Result{
-		// 阈值 0.5 = 与 LowConfidenceThreshold 对齐 —— 碎片化嫌疑文件走
-		// _low_confidence/ 子目录，严重损坏 (<0.5) 则整个跳过
-		IsValid:    confidence >= 0.5,
+		// 阈值 0.7 —— 需要 Decode 成功(+0.4) 才能跨过门槛
+		// 头部 4 项(+0.65) + Decode 失败 = 0.65 < 0.7 = invalid 跳过
+		// 头部 4 项(+0.65) + Decode 成功 = 1.0 = valid 正常输出
+		// 头部 4 项(+0.65) + Decode 失败但熵流 >= 0.85 → confidence capped 0.45 走 low_confidence/
+		IsValid:    confidence >= 0.7,
 		Confidence: confidence,
 		Message:    fmt.Sprintf("JPEG 验证: %s", joinMessages(messages)),
 	}
@@ -357,12 +368,30 @@ func (v *Validator) validatePNG(offset, size int64) Result {
 		messages = append(messages, "未找到 IEND chunk")
 	}
 
+	// 真解码验证（与 JPEG 同策略）：Decode 成功 = 用户能打开
+	if size > 100 && size <= 16*1024*1024 {
+		full, err := v.readAt(offset, int(size))
+		if err == nil {
+			if _, decErr := png.Decode(bytes.NewReader(full)); decErr == nil {
+				confidence += 0.3
+				messages = append(messages, "标准库 PNG 解码成功（能正常打开）")
+			} else {
+				// 解码失败 —— CRC 都通过但 Decode 失败少见；真失败就拒
+				confidence = 0
+				messages = append(messages, fmt.Sprintf("PNG 解码失败: %v", decErr))
+			}
+		}
+	}
+
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
+	if confidence < 0 {
+		confidence = 0
+	}
 
 	return Result{
-		IsValid:    confidence >= 0.5,
+		IsValid:    confidence >= 0.6, // 比 JPEG 低（PNG header 更严格本身就可靠）
 		Confidence: confidence,
 		Message:    fmt.Sprintf("PNG 验证: %s", joinMessages(messages)),
 	}
@@ -784,31 +813,31 @@ func (v *Validator) validateMP4(offset, size int64) Result {
 		atomCount++
 	}
 
-	// 必要 box 检查 —— 播放器要求 moov + mdat 都在
-	switch {
-	case hasMoov && hasMdat:
-		confidence += 0.3
-		messages = append(messages, "moov + mdat 双命中")
-	case hasMoov && !hasMdat:
-		// 仅有 metadata，无视频 payload —— 扣分（无法播放）
-		confidence -= 0.2
-		messages = append(messages, "仅 moov 无 mdat（视频数据缺失，无法播放）")
-	case !hasMoov && hasMdat:
-		confidence -= 0.2
-		messages = append(messages, "仅 mdat 无 moov（元数据缺失，无法播放）")
-	default:
-		confidence -= 0.3
-		messages = append(messages, "无 moov/mdat atom")
+	// 必要 box 硬要求：没有 moov+mdat 双命中直接 fail
+	// 之前只扣 confidence，但总分仍能过 0.5 —— 不完整视频被当合格交付
+	if !hasMoov || !hasMdat {
+		return Result{
+			IsValid:    false,
+			Confidence: 0.2, // 留个非零分让前端知道"识别到但不完整"
+			Message: fmt.Sprintf("MP4 验证失败: moov=%v mdat=%v（播放器要求两个都在才能解）; %s",
+				hasMoov, hasMdat, joinMessages(messages)),
+		}
 	}
+	confidence += 0.3
+	messages = append(messages, "moov + mdat 双命中")
 
-	// box 链完整的奖励**只在** moov + mdat 双命中才给（moov only 的场景不算完整 MP4）
-	if boxChainComplete && atomCount >= 2 && hasMoov && hasMdat {
+	// box 链完整 → 加分；不完整 → 碎片嫌疑扣分
+	if boxChainComplete && atomCount >= 2 {
 		confidence += 0.2
 		messages = append(messages, fmt.Sprintf("box 链完整 (%d atoms)", atomCount))
-	} else if !boxChainComplete {
-		// 碎片化：box 链在某处断裂
-		confidence -= 0.1
+	} else {
+		confidence -= 0.15
+		messages = append(messages, "box 链不完整（碎片化嫌疑）")
 	}
+
+	// mdat 最小大小：小于 4KB 基本不是真视频
+	// 这是启发，真实短视频 mdat 也会远超这个
+	// （留给未来：完整解析 moov.trak.mdia.minf.stbl 看轨道数 / 时长）
 
 	if confidence > 1.0 {
 		confidence = 1.0
@@ -818,7 +847,8 @@ func (v *Validator) validateMP4(offset, size int64) Result {
 	}
 
 	return Result{
-		IsValid:    confidence >= 0.5,
+		// 阈值 0.7 —— 与 JPEG 对齐，要求 moov+mdat + box 链完整才能过
+		IsValid:    confidence >= 0.7,
 		Confidence: confidence,
 		Message:    fmt.Sprintf("MP4 验证: %s", joinMessages(messages)),
 	}
