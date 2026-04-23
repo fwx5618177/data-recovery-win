@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { formatSize, formatConfidence, formatPath } from "../formatters";
+import { formatSize, formatPath } from "../formatters";
 import { getCategoryMeta, getSourceMeta, isHighPriorityRecovery } from "../recovery-helpers";
 import { IconEye, IconForCategory, IconSearch, IconX } from "../icons";
+import ConfidenceBadge from "./ConfidenceBadge";
 
 /**
  * FileTable — 大列表展示 + 行选中。
@@ -218,9 +219,6 @@ export default function FileTable({
 }
 
 function Row({ file, selected, onToggle, onPreview }) {
-  const confidence = formatConfidence(file.confidence);
-  const confClass =
-    confidence >= 70 ? "confidence-bar--high" : confidence >= 40 ? "confidence-bar--mid" : "confidence-bar--low";
   const categoryMeta = getCategoryMeta(file.category);
   const sourceMeta = getSourceMeta(file.source);
   // 预览支持：image / document(pdf, txt) / video(前几秒) / archive(只列结构) — 多类型分发
@@ -275,12 +273,7 @@ function Row({ file, selected, onToggle, onPreview }) {
         <span className="badge">{sourceMeta.shortLabel}</span>
       </td>
       <td className="cell-confidence">
-        <span className={`confidence-bar ${confClass}`}>
-          <span className="confidence-bar__track">
-            <span className="confidence-bar__fill" style={{ width: `${confidence}%` }} />
-          </span>
-          {confidence}%
-        </span>
+        <ConfidenceBadge file={file} />
       </td>
       <td className="file-path" title={formatPath(file)}>{formatPath(file)}</td>
     </tr>

@@ -206,6 +206,98 @@ export function countHighPriority(files) {
   return n;
 }
 
+/**
+ * confidenceTier 把后端给的 0-1 浮点 confidence 映射成用户能读懂的 4 档徽章：
+ *   high    高可靠 —— validator 打分 >= 0.85，基本可以直接开
+ *   medium  可能可靠 —— >= 0.6，格式解析通过但边界不清
+ *   partial 部分损坏 —— >= 0.3，能看出类型但不保证完整
+ *   low     低可靠 —— 剩下的，很可能开不了
+ *
+ * 注意：这是 *扫描阶段* 的分档。恢复完成后 engine.go 有一个更精准的 5 档
+ * （高可靠 / 低可靠 / 部分 / 拒绝 / 失败），那个看的是 validator 真解码
+ * + DataRun 完整性结果。本函数是 UI 扫描态预览，只看 confidence 数字。
+ */
+export function confidenceTier(file) {
+  const c = Number(file?.confidence || 0);
+  if (file?.isValid === false) return { key: "low", label: "低可靠", color: "#9ca3af" };
+  if (c >= 0.85) return { key: "high", label: "高可靠", color: "#16a34a" };
+  if (c >= 0.6) return { key: "medium", label: "可能可靠", color: "#ca8a04" };
+  if (c >= 0.3) return { key: "partial", label: "部分", color: "#ea580c" };
+  return { key: "low", label: "低可靠", color: "#9ca3af" };
+}
+
+/**
+ * bucketFiles 把扁平文件列表分到 6 个"用户视角"的桶里，每条文件只落进第一个
+ * 命中的桶（按优先级），避免 UI 上一条文件出现两次让总数对不上。
+ *
+ * 优先级（自上而下，越往下越兜底）：
+ *   1. windowsOld  —— Windows.old 子树（旧系统备份里的用户数据，最有价值）
+ *   2. desktop     —— 桌面（用户"第一现场"数据）
+ *   3. photos      —— Category=image（照片 / 壁纸 / 扫描件）
+ *   4. documents   —— Category=document（论文、财务、合同）
+ *   5. recent      —— 30 天内修改过（不在上面任何桶的新文件）
+ *   6. other       —— 兜底（视频 / 音频 / 压缩包 / 数据库 / 其他）
+ *
+ * 系统文件按 isSystemFile 规则直接排除（不会进任何桶）—— 用户在高级模式
+ * 勾选"显示系统文件"才看得到它们。
+ */
+const RECENT_MODIFIED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
+
+export const BUCKETS = [
+  { key: "windowsOld",  label: "Windows.old 里的文件", desc: "旧系统备份里保留的用户数据 —— 这里面最可能是你真正要找的东西",     priority: 1 },
+  { key: "desktop",     label: "桌面上的文件",          desc: "扫描到的桌面路径文件，通常是你最近在用的东西",                      priority: 2 },
+  { key: "photos",      label: "我的照片",              desc: "扫描到的图片文件，按置信度排序",                                     priority: 3 },
+  { key: "documents",   label: "我的文档",              desc: "PDF / Word / Excel / PPT / 文本",                                   priority: 4 },
+  { key: "recent",      label: "最近修改过的文件",      desc: "过去 30 天内改过的文件，排除了上面已经分好的类",                    priority: 5 },
+  { key: "other",       label: "其他文件",              desc: "视频 / 音频 / 压缩包 / 数据库 / 其他杂项",                          priority: 6 },
+];
+
+function bucketOf(file, nowMs) {
+  if (!file) return null;
+  if (isSystemFile(file)) return null; // 系统文件不进任何桶
+
+  const path = String(file.originalPath || "").toLowerCase().replace(/\\/g, "/");
+  if (path.includes("windows.old/")) return "windowsOld";
+  if (path.includes("/desktop/") || path.startsWith("desktop/")) return "desktop";
+
+  const cat = String(file.category || "").toLowerCase();
+  if (cat === "image") return "photos";
+  if (cat === "document") return "documents";
+
+  const mt = file.modifiedTime ? Date.parse(file.modifiedTime) : NaN;
+  if (Number.isFinite(mt) && nowMs - mt <= RECENT_MODIFIED_WINDOW_MS) return "recent";
+
+  return "other";
+}
+
+/**
+ * bucketFiles 返回 { windowsOld: [...], desktop: [...], ... }，每个桶按
+ * recoveryScore 降序排列（高可靠 + 高优先级靠前），便于卡片展示 Top N。
+ */
+export function bucketFiles(files) {
+  const result = { windowsOld: [], desktop: [], photos: [], documents: [], recent: [], other: [] };
+  if (!files || files.length === 0) return result;
+  const now = Date.now();
+  for (let i = 0; i < files.length; i++) {
+    const b = bucketOf(files[i], now);
+    if (b) result[b].push(files[i]);
+  }
+  // 每桶按 recoveryScore 降序（大致等同于置信度高的在前）
+  for (const key of Object.keys(result)) {
+    result[key].sort((a, b) => recoveryScore(b) - recoveryScore(a));
+  }
+  return result;
+}
+
+/** bucketCounts 数一下每个桶多大，避免每次渲染都遍历全量再 .length。 */
+export function bucketCounts(bucketed) {
+  const out = {};
+  for (const key of Object.keys(bucketed || {})) {
+    out[key] = (bucketed[key] || []).length;
+  }
+  return out;
+}
+
 export function buildFallbackScanResult(files = [], progress = {}) {
   const stats = {};
 

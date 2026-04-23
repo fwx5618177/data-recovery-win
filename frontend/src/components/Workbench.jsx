@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import FileTable from "./FileTable";
+import BestChanceFirst from "./BestChanceFirst";
 import {
   IconAlertTriangle,
   IconCheckCircle,
@@ -20,6 +21,8 @@ import {
   getSourceMeta,
   getDriveLabel,
   sufficiencyOf,
+  bucketFiles,
+  BUCKETS,
 } from "../recovery-helpers";
 import { formatSize, formatDuration, formatSpeed, clampPercent } from "../formatters";
 import { t, onLocaleChange } from "../i18n";
@@ -62,6 +65,11 @@ export default function Workbench({
   const [archiveByExifDate, setArchiveByExifDate] = useState(false);
   // 默认隐藏系统文件（.exe/.dll/.ico/.sys 等 + /Windows 子树），让真正的照片文档浮上来
   const [hideSystemFiles, setHideSystemFiles] = useState(true);
+  // 视图模式：buckets = 6 桶 Best Chance First 苹果级默认视图；table = 经典 FileTable
+  // 用户扫描后默认进 buckets，手动切到 table 做深度筛选
+  const [viewMode, setViewMode] = useState("buckets");
+  // 若 viewMode=table 且 bucketFilter 非空，文件表只显示该桶内的文件，顶部显示"← 返回分类视图"
+  const [bucketFilter, setBucketFilter] = useState(null);
 
   // outputDir 或 outputValidation 变化时重置"我已了解风险"开关，避免旧盘留的勾延用到新盘
   useEffect(() => { setAllowSameDisk(false); }, [outputDir]);
@@ -87,7 +95,13 @@ export default function Workbench({
     () => ({ keyword, categories, sources, validity, hideSystemFiles }),
     [keyword, categories, sources, validity, hideSystemFiles],
   );
-  const filtered = useMemo(() => filterFiles(files, filter), [files, filter]);
+  // 6 桶预计算：BestChanceFirst 组件需要，当"drill in 某个桶"时 FileTable 也要从桶里取数据
+  const bucketed = useMemo(() => bucketFiles(files), [files]);
+  const baseFiles = useMemo(() => {
+    if (bucketFilter && bucketed[bucketFilter]) return bucketed[bucketFilter];
+    return files;
+  }, [bucketFilter, bucketed, files]);
+  const filtered = useMemo(() => filterFiles(baseFiles, filter), [baseFiles, filter]);
 
   // 分类/来源的计数跟随 hideSystemFiles 一起过滤——避免出现"侧栏说有 500 张图片，
   // 但表里只看到 20 张"的困惑（ICO 计入图片分类的常见误解）
@@ -150,6 +164,29 @@ export default function Workbench({
   };
   const clearSelection = () => setSelectedIds(new Set());
 
+  // BestChanceFirst 的 3 个交互：
+  //   bulkSelect  —— 桶卡"恢复此类全部"：把桶内所有 id 塞进 selectedIds，切到 table 让用户看到 + 按底部"开始恢复"
+  //   drillBucket —— 桶卡"查看列表"：切到 table + 设 bucketFilter，FileTable 只显示本桶文件
+  //   switchAdv   —— "查看全部文件（高级模式）"：切到 table + 清 bucketFilter
+  const handleBucketBulkSelect = (ids) => {
+    if (!ids || ids.length === 0) return;
+    setSelectedIds(new Set(ids));
+    setViewMode("table");
+    setBucketFilter(null); // 显示全部文件，让用户看清选了什么
+  };
+  const handleBucketDrillIn = (bucketKey) => {
+    setBucketFilter(bucketKey);
+    setViewMode("table");
+  };
+  const handleSwitchToAdvanced = () => {
+    setBucketFilter(null);
+    setViewMode("table");
+  };
+  const handleBackToBuckets = () => {
+    setBucketFilter(null);
+    setViewMode("buckets");
+  };
+
   // 能否恢复：要有选文件、要有输出目录；校验通过 OR（同盘警告 + 用户已知情勾选）
   const canRecover =
     selectedIds.size > 0 &&
@@ -164,7 +201,7 @@ export default function Workbench({
   const phaseLabel = phaseText(scanProgress?.phase, scanActive);
 
   return (
-    <div className="workbench">
+    <div className={`workbench${viewMode === "buckets" ? " workbench--buckets" : ""}`}>
       {/* 顶部进度条 ---------------------------------------------------- */}
       <div className="workbench__progress">
         <div className="progress-strip">
@@ -290,7 +327,22 @@ export default function Workbench({
         </div>
       </div>
 
-      {/* 左侧过滤器 -------------------------------------------------- */}
+      {/* Buckets 模式 —— 默认苹果级分类视图，替代上来就扔给用户一个 10000 行表格 */}
+      {viewMode === "buckets" && (
+        <section className="workbench__files">
+          <BestChanceFirst
+            files={files}
+            scanActive={scanActive}
+            onBulkSelect={handleBucketBulkSelect}
+            onDrillBucket={handleBucketDrillIn}
+            onSwitchToAdvanced={handleSwitchToAdvanced}
+            onRequestPreview={onRequestPreview}
+          />
+        </section>
+      )}
+
+      {/* 左侧过滤器 —— 仅高级模式显示 -------------------------------- */}
+      {viewMode === "table" && (
       <aside className="workbench__sidebar">
         <div className="filter-panel">
           <div className="filter-group">
@@ -381,11 +433,34 @@ export default function Workbench({
               清空选择
             </button>
           </div>
+
+          <div className="filter-group">
+            <button className="btn btn--sm btn--ghost" onClick={handleBackToBuckets}>
+              ← 返回分类视图
+            </button>
+          </div>
         </div>
       </aside>
+      )}
 
-      {/* 文件表 ------------------------------------------------------ */}
+      {/* 文件表 —— 仅高级模式显示 ----------------------------------- */}
+      {viewMode === "table" && (
       <section className="workbench__files">
+        {bucketFilter && (
+          <div className="bucket-filter-bar" style={{
+            display: "flex", alignItems: "center", gap: 12,
+            padding: "8px 12px", marginBottom: 8,
+            background: "var(--accent-soft)", borderRadius: "var(--radius-md)",
+            border: "1px solid var(--border-strong)",
+            fontSize: 13,
+          }}>
+            <span>当前分类：<b>{BUCKETS.find((b) => b.key === bucketFilter)?.label || bucketFilter}</b></span>
+            <span className="muted">{(bucketed[bucketFilter] || []).length.toLocaleString()} 个文件</span>
+            <button className="btn btn--sm btn--ghost" onClick={handleBackToBuckets} style={{ marginLeft: "auto" }}>
+              ← 返回分类视图
+            </button>
+          </div>
+        )}
         <FileTable
           files={filtered}
           selectedIds={selectedIds}
@@ -412,6 +487,7 @@ export default function Workbench({
           }
         />
       </section>
+      )}
 
       {/* 底部操作条 -------------------------------------------------- */}
       <footer className="workbench__footer">
