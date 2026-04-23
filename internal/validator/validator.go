@@ -420,36 +420,81 @@ func (v *Validator) validatePDF(offset, size int64) Result {
 		}
 	}
 
-	// 检查 xref 或 startxref 关键字
-	// 在文件尾部区域搜索
-	xrefFound := false
+	// 检查 xref 或 startxref 关键字 + **解析 startxref 后的偏移值**
+	xrefOK := false
+	startxrefOff := int64(-1)
 	if tail != nil {
-		if bytes.Contains(tail, []byte("startxref")) || bytes.Contains(tail, []byte("xref")) {
-			xrefFound = true
+		if idx := bytes.LastIndex(tail, []byte("startxref")); idx >= 0 {
+			// startxref 后跟 \n + 数字 + \n + %%EOF
+			after := tail[idx+len("startxref"):]
+			// 跳过空白 + 解析数字
+			i := 0
+			for i < len(after) && (after[i] == ' ' || after[i] == '\n' || after[i] == '\r' || after[i] == '\t') {
+				i++
+			}
+			numStart := i
+			for i < len(after) && after[i] >= '0' && after[i] <= '9' {
+				i++
+			}
+			if i > numStart {
+				// 解析 int
+				var n int64
+				for j := numStart; j < i; j++ {
+					n = n*10 + int64(after[j]-'0')
+				}
+				startxrefOff = n
+			}
 		}
 	}
-	// 也在文件中间搜索 xref（大文件只采样前 64KB 和后 64KB）
-	if !xrefFound {
-		sampleSize := int64(65536)
+	if startxrefOff >= 0 && startxrefOff < size {
+		// 读该偏移处，应是 "xref\n" 或 "N N obj"（PDF 1.5+ 的 xref stream）
+		xrefProbe, err := v.readAt(offset+startxrefOff, 32)
+		if err == nil {
+			if bytes.HasPrefix(xrefProbe, []byte("xref")) {
+				xrefOK = true
+				confidence += 0.25
+				messages = append(messages, "startxref 指向有效 xref 表")
+			} else if hasXrefStreamPrefix(xrefProbe) {
+				xrefOK = true
+				confidence += 0.2
+				messages = append(messages, "startxref 指向 xref stream (PDF 1.5+)")
+			} else {
+				messages = append(messages, fmt.Sprintf("startxref 偏移 %d 指向无效位置（可能文件损坏或碎片化）", startxrefOff))
+				confidence -= 0.1
+			}
+		}
+	} else if tail != nil && bytes.Contains(tail, []byte("startxref")) {
+		// 有 startxref 关键字但解不出合法 offset
+		messages = append(messages, "startxref 值无法解析")
+	} else {
+		messages = append(messages, "未找到 startxref")
+	}
+
+	// 深度校验：扫 "obj" 数量（正常 PDF 至少有 Catalog + Pages + 1 Page = 3 obj）
+	// 碎片化 PDF 可能只剩头部，obj 数量极少
+	if !xrefOK {
+		// xref 失败时再靠 obj 数量兜底
+		sampleSize := int64(256 * 1024) // 扫 256KB 足够常见 PDF
 		if sampleSize > size {
 			sampleSize = size
 		}
 		sample, err := v.readAt(offset, int(sampleSize))
 		if err == nil {
-			if bytes.Contains(sample, []byte("xref")) || bytes.Contains(sample, []byte("startxref")) {
-				xrefFound = true
+			objCount := bytes.Count(sample, []byte(" obj\n")) + bytes.Count(sample, []byte(" obj\r"))
+			if objCount >= 3 {
+				confidence += 0.1
+				messages = append(messages, fmt.Sprintf("发现 %d 个 object 定义", objCount))
+			} else {
+				messages = append(messages, fmt.Sprintf("object 定义过少 (%d 个，可能截断)", objCount))
 			}
 		}
-	}
-	if xrefFound {
-		confidence += 0.3
-		messages = append(messages, "xref/startxref 存在")
-	} else {
-		messages = append(messages, "未找到 xref/startxref")
 	}
 
 	if confidence > 1.0 {
 		confidence = 1.0
+	}
+	if confidence < 0 {
+		confidence = 0
 	}
 
 	return Result{
@@ -457,6 +502,37 @@ func (v *Validator) validatePDF(offset, size int64) Result {
 		Confidence: confidence,
 		Message:    fmt.Sprintf("PDF 验证: %s", joinMessages(messages)),
 	}
+}
+
+// hasXrefStreamPrefix PDF 1.5+ 用 object stream 替代传统 xref 表
+// 形如 "15 0 obj\n<</Type/XRef..." —— 开头 "N N obj"
+func hasXrefStreamPrefix(buf []byte) bool {
+	// 简化判定：前缀匹配 N + space + N + space + "obj"
+	pos := 0
+	// 第一个数
+	if pos >= len(buf) || buf[pos] < '0' || buf[pos] > '9' {
+		return false
+	}
+	for pos < len(buf) && buf[pos] >= '0' && buf[pos] <= '9' {
+		pos++
+	}
+	if pos >= len(buf) || buf[pos] != ' ' {
+		return false
+	}
+	pos++
+	// 第二个数
+	if pos >= len(buf) || buf[pos] < '0' || buf[pos] > '9' {
+		return false
+	}
+	for pos < len(buf) && buf[pos] >= '0' && buf[pos] <= '9' {
+		pos++
+	}
+	if pos >= len(buf) || buf[pos] != ' ' {
+		return false
+	}
+	pos++
+	// "obj"
+	return pos+3 <= len(buf) && string(buf[pos:pos+3]) == "obj"
 }
 
 // ---------- ZIP 验证器 ----------
@@ -641,52 +717,100 @@ func (v *Validator) validateMP4(offset, size int64) Result {
 		messages = append(messages, "atom 结构验证失败")
 	}
 
-	// 检查是否有 moov 或 mdat atom（在前几个 atom 中搜索）
-	moovMdatFound := false
+	// 遍历所有 top-level atom —— 收集存在的 box types + 检测链中断
+	hasMoov := false
+	hasMdat := false
+	boxChainComplete := true
+	atomCount := 0
 	searchOffset := offset
-	for i := 0; i < 20 && searchOffset < offset+size-8; i++ {
+	endLimit := offset + size
+	for atomCount < 200 && searchOffset+8 <= endLimit {
 		atomHeaderBuf, err := v.readAt(searchOffset, 8)
 		if err != nil {
+			boxChainComplete = false
 			break
 		}
 		atomSize := int64(binary.BigEndian.Uint32(atomHeaderBuf[0:4]))
 		atomType := string(atomHeaderBuf[4:8])
 
-		if atomType == "moov" || atomType == "mdat" {
-			moovMdatFound = true
-			confidence += 0.2
-			messages = append(messages, fmt.Sprintf("%s atom 存在", atomType))
-			break
+		if atomType == "moov" {
+			hasMoov = true
+		} else if atomType == "mdat" {
+			hasMdat = true
 		}
 
 		// 处理特殊 atom size
 		if atomSize == 0 {
-			// atom 延伸到文件末尾
+			// atom 延伸到文件末尾（合法终止）
 			break
 		} else if atomSize == 1 {
-			// 64位扩展大小
-			if searchOffset+16 > offset+size {
+			// 64 位扩展大小
+			if searchOffset+16 > endLimit {
+				boxChainComplete = false
 				break
 			}
 			extSizeBuf, err := v.readAt(searchOffset+8, 8)
 			if err != nil {
+				boxChainComplete = false
 				break
 			}
 			atomSize = int64(binary.BigEndian.Uint64(extSizeBuf))
 		}
 
+		// 合法性检查：atomSize 必须 >= 8 且不超过文件尾
 		if atomSize < 8 {
+			boxChainComplete = false
+			messages = append(messages, fmt.Sprintf("atom %s 有非法 size=%d", atomType, atomSize))
 			break
 		}
+		// 如果 atomSize 让我们跳出文件 → 链中断（典型碎片化特征）
+		if searchOffset+atomSize > endLimit {
+			boxChainComplete = false
+			messages = append(messages, fmt.Sprintf("atom %s 长度 %d 超出文件尾（碎片化嫌疑）", atomType, atomSize))
+			break
+		}
+		// 如果 atom type 非法 ASCII → 数据被其他文件污染
+		if !isValidAtomType(atomType) {
+			boxChainComplete = false
+			messages = append(messages, fmt.Sprintf("非法 atom type %q（碎片化嫌疑）", atomType))
+			break
+		}
+
 		searchOffset += atomSize
+		atomCount++
 	}
 
-	if !moovMdatFound {
-		messages = append(messages, "未找到 moov/mdat atom")
+	// 必要 box 检查 —— 播放器要求 moov + mdat 都在
+	switch {
+	case hasMoov && hasMdat:
+		confidence += 0.3
+		messages = append(messages, "moov + mdat 双命中")
+	case hasMoov && !hasMdat:
+		// 仅有 metadata，无视频 payload —— 扣分（无法播放）
+		confidence -= 0.2
+		messages = append(messages, "仅 moov 无 mdat（视频数据缺失，无法播放）")
+	case !hasMoov && hasMdat:
+		confidence -= 0.2
+		messages = append(messages, "仅 mdat 无 moov（元数据缺失，无法播放）")
+	default:
+		confidence -= 0.3
+		messages = append(messages, "无 moov/mdat atom")
+	}
+
+	// box 链完整的奖励**只在** moov + mdat 双命中才给（moov only 的场景不算完整 MP4）
+	if boxChainComplete && atomCount >= 2 && hasMoov && hasMdat {
+		confidence += 0.2
+		messages = append(messages, fmt.Sprintf("box 链完整 (%d atoms)", atomCount))
+	} else if !boxChainComplete {
+		// 碎片化：box 链在某处断裂
+		confidence -= 0.1
 	}
 
 	if confidence > 1.0 {
 		confidence = 1.0
+	}
+	if confidence < 0 {
+		confidence = 0
 	}
 
 	return Result{
