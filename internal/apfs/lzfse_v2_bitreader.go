@@ -32,7 +32,8 @@ type reverseBitReader struct {
 // headBits 是流开头要保留的 unused bits（Apple header 里 literal_bits / lmd_bits 字段）
 // 这是 encoder 对齐 accumulator 时留下的"padding bit"数量；decode 开始前要先 pull 掉。
 func newReverseBitReader(data []byte, headBits int) (*reverseBitReader, error) {
-	r := &reverseBitReader{data: data, bytePos: len(data)}
+	// bitPos 初始化为 64 = accum 完全消费状态，首次 fill() 不会把空 accum 当 leftover
+	r := &reverseBitReader{data: data, bytePos: len(data), bitPos: 64}
 	if err := r.fill(); err != nil {
 		return nil, err
 	}
@@ -75,9 +76,14 @@ func (r *reverseBitReader) fill() error {
 	leftover := r.accum >> uint(r.bitPos)
 	leftoverBits := 64 - r.bitPos
 	startIdx := r.bytePos - take
+
+	// 反向 bit stream：stream 末尾的字节是"最近 encoder 写入"，decoder 要先读它。
+	// 所以末尾字节进 accum 的**低位**（下次 pull 从低位取）；次末尾进稍高位...
+	// 这意味着拼 newBytes 时顺序是 data[bytePos-1] → byte[0], data[bytePos-2] → byte[1]...
 	var newBytes uint64
 	for i := 0; i < take; i++ {
-		newBytes |= uint64(r.data[startIdx+i]) << (uint(i) * 8)
+		// r.data[bytePos-1-i] 放在 newBytes 的第 i 个 byte（低→高）
+		newBytes |= uint64(r.data[r.bytePos-1-i]) << (uint(i) * 8)
 	}
 	// 填入 accum：低 take*8 bit 是新数据，其上是 leftover
 	r.accum = newBytes | (leftover << uint(take*8))

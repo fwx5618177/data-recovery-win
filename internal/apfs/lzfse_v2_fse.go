@@ -109,39 +109,39 @@ func buildFSEDecoderTable(freqs []int, numStates int) ([]fseEntry, error) {
 		indicesPerSymbol[e.symbol] = append(indicesPerSymbol[e.symbol], i)
 	}
 
-	for sym, indices := range indicesPerSymbol {
-		freq := len(indices)
-		if freq == 0 {
+	// 标准 tANS 算法（Yann Collet FSE）：
+	//   对每个 symbol s 维护 next[s] 计数器，初值 freq[s]
+	//   按 state 在 table 里的升序遍历：
+	//     sym = table[i].symbol
+	//     nbits = log2(numStates) - floor(log2(next[sym]))
+	//     destState = next[sym] << nbits - numStates  （落在 [0, numStates)）
+	//     delta = (next[sym] << nbits) - numStates
+	//     next[sym]++
+	//
+	// 保证 nextState ∈ [0, numStates) 对任何 raw_bits ∈ [0, 2^nbits)
+	//
+	// 数学要点：next[sym] 从 freq 到 2*freq-1，其 log2 floor 在 numStates 的
+	// log2 内保持单调递减 nbits；destState << nbits - numStates 落在合法范围
+	next := make(map[int16]uint32, len(freqs))
+	for sym, f := range freqs {
+		next[int16(sym)] = uint32(f)
+	}
+
+	for stateIdx := 0; stateIdx < numStates; stateIdx++ {
+		sym := table[stateIdx].symbol
+		if sym < 0 {
 			continue
 		}
-		baseNBits := logNS - log2floor(uint32(freq))
-		threshold := (uint32(freq) << (baseNBits + 1)) - uint32(numStates)
-
-		for i, stateIdx := range indices {
-			// destination index 在 symbol 内的编号（0..freq-1）
-			// 对每个 symbol 的第 i 个 state：
-			//   如果 i < threshold → nbits = baseNBits + 1
-			//   否则 → nbits = baseNBits
-			//   destState 按 FSE 约定：
-			//     低 threshold 个 state 在 "next_state_base" 之前：destState = i
-			//     其余 state 映射到后面：destState = threshold + (i-threshold) * 2
-			//   （这让 delta 计算让累加器在 [numStates, 2*numStates) 间恰好循环）
-			var nbits uint8
-			var destState int32
-			if uint32(i) < threshold {
-				nbits = baseNBits + 1
-				destState = int32(i)
-			} else {
-				nbits = baseNBits
-				destState = int32(threshold) + int32(uint32(i)-threshold)
-			}
-			// delta: nextState = destState << nbits + raw_bits - numStates
-			// encoder 产生 raw_bits ∈ [0, 2^nbits) → nextState ∈ [destState<<nbits - numStates, ...)
-			delta := int32(destState<<nbits) - int32(numStates)
-			table[stateIdx].nbits = nbits
-			table[stateIdx].deltaState = delta
+		ns := next[sym]
+		if ns == 0 {
+			continue
 		}
-		_ = sym // keep for debug
+		nbits := logNS - log2floor(ns)
+		// delta = (ns << nbits) - numStates；nextState = delta + raw_bits ∈ [0, numStates)
+		delta := int32(ns<<nbits) - int32(numStates)
+		table[stateIdx].nbits = nbits
+		table[stateIdx].deltaState = delta
+		next[sym] = ns + 1
 	}
 
 	return table, nil
