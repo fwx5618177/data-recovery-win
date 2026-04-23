@@ -44,10 +44,10 @@ func (e *LZVNOpUnsupportedError) Error() string {
 func DecompressLZVN(src []byte, dst []byte) (int, error) {
 	srcPos := 0
 	dstPos := 0
-	dstCap := cap(dst)
-	if dstCap == 0 {
-		dstCap = len(dst)
-	}
+	// dst 写入上限必须是 len(dst) —— cap() 可能更大但索引访问只保护 len 范围。
+	// 上层 lzfse.go 传 subDst = dst[dstPos:dstPos+maxOut]，len()=maxOut 正是预期边界。
+	// 之前 bug：用 cap() 会让 maxOut=0（nRaw=0）时仍允许多字节写入 → fuzz 抓到 panic。
+	dstCap := len(dst)
 
 	for srcPos < len(src) && dstPos < dstCap {
 		op := src[srcPos]

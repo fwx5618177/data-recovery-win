@@ -145,10 +145,14 @@ func (s *ZIPStitcher) Stitch() (*ZIPStitchResult, error) {
 	out.Write(cdBuf)
 
 	// 6. 追加 EOCD（以及 ZIP64 部分如果有）
-	eocdBuf := make([]byte, 256)
+	// comment 最大 65535 字节（uint16 上限），+22 EOCD header
+	eocdBufSize := 22 + int(eocdRec.commentLen)
+	if eocdBufSize > 65535+22 {
+		eocdBufSize = 65535 + 22
+	}
+	eocdBuf := make([]byte, eocdBufSize)
 	_, _ = s.Reader.ReadAt(eocdBuf, s.ZipStart+eocdOff)
-	// 至少写 22 字节标准 EOCD
-	out.Write(eocdBuf[:22+int(eocdRec.commentLen)])
+	out.Write(eocdBuf)
 
 	r := &ZIPStitchResult{
 		Data:        out.Bytes(),
