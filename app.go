@@ -811,7 +811,7 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 				Offset:    v.Offset,
 				Name:      label,
 				Encrypted: false,
-				Note:      fmt.Sprintf("%s 卷（block=%d total=%d files=%d）。本工具暂未做 Catalog B-tree 文件枚举；可用深度签名扫描", label, v.BlockSize, v.TotalBlocks, v.FileCount),
+				Note:      fmt.Sprintf("%s 卷（block=%d total=%d files=%d）。Catalog B-tree + Extents Overflow 已支持", label, v.BlockSize, v.TotalBlocks, v.FileCount),
 			})
 		}
 	}
@@ -824,7 +824,7 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 				Offset:    v.Offset,
 				Name:      fmt.Sprintf("ReFS v%d.%d", v.MajorVersion, v.MinorVersion),
 				Encrypted: false,
-				Note:      "ReFS 卷。本工具暂未做 Minstore B-tree 解析（无公开规范）；可用深度签名扫描",
+				Note:      "ReFS 卷。Minstore page 索引 + 启发式 entry 提取已支持（M$ 规范未公开，为 best-effort）",
 			})
 		}
 	}
@@ -835,10 +835,10 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 		for _, c := range containers {
 			for _, v := range c.Volumes {
 				kind := "apfs-volume"
-				note := "APFS 卷。本工具暂未做 B-tree 文件枚举，建议用 macOS Disk Utility / R-Studio Mac"
+				note := "APFS 卷。omap + fs B-tree 文件枚举已支持；含 snapshot / FileVault 解锁路径"
 				if v.IsEncrypted {
 					kind = "filevault"
-					note = "FileVault 加密的 APFS 卷。需用户密码或 Institutional Key 才能解密 —— 用 R-Studio Mac / 苹果 Recovery 工具"
+					note = "FileVault 加密 APFS 卷。点解锁按钮输入用户密码；完整链 keybag → PBKDF2 → AES-KeyWrap → VEK → XTS"
 				}
 				out = append(out, EncryptedVolumeInfo{
 					DrivePath: drivePath,
