@@ -69,7 +69,7 @@ func (v *Validator) Validate(file *types.RecoveredFile) Result {
 
 func (v *Validator) validateJPEG(offset, size int64) Result {
 	confidence := 0.0
-	messages := make([]string, 0, 4)
+	messages := make([]string, 0, 5)
 
 	// 文件太小，不可能是有效图片
 	if size <= 100 {
@@ -87,7 +87,7 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 	}
 
 	if header[0] == 0xFF && header[1] == 0xD8 {
-		confidence += 0.3
+		confidence += 0.2
 		messages = append(messages, "SOI 标记正确")
 	} else {
 		messages = append(messages, fmt.Sprintf("SOI 标记错误: %02X%02X (期望 FFD8)", header[0], header[1]))
@@ -96,7 +96,7 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 	// 检查 EOI (End Of Image): FF D9
 	tail, err := v.readAt(offset+size-2, 2)
 	if err == nil && tail[0] == 0xFF && tail[1] == 0xD9 {
-		confidence += 0.3
+		confidence += 0.2
 		messages = append(messages, "EOI 标记正确")
 	} else {
 		messages = append(messages, "EOI 标记缺失或错误")
@@ -114,7 +114,7 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 			marker == 0xDD || // DRI
 			marker == 0xFE // COM
 		if validMarker {
-			confidence += 0.2
+			confidence += 0.15
 			messages = append(messages, fmt.Sprintf("有效 JPEG marker: FF%02X", marker))
 		} else {
 			messages = append(messages, fmt.Sprintf("未知 JPEG marker: FF%02X", marker))
@@ -125,22 +125,141 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 
 	// 大小合理性 (1KB - 50MB)
 	if size >= 1024 && size <= 50*1024*1024 {
-		confidence += 0.2
+		confidence += 0.15
 		messages = append(messages, fmt.Sprintf("文件大小合理: %s", types.FormatSize(size)))
 	} else {
 		messages = append(messages, fmt.Sprintf("文件大小异常: %s", types.FormatSize(size)))
 	}
 
-	// 限制最大置信度为 1.0
+	// ★ 新增关键检查：熵流健康度（之前"一半正常一半乱码"就是漏了这一步）
+	// 读全文（或前 8MB，平衡内存和准确性）扫 FF xx 序列比合法 vs 非法 marker 比例
+	// 非法 marker 高 = 熵流中跨了 extent 边界接入其他文件数据 / 空闲区
+	if size <= 8*1024*1024 {
+		full, err := v.readAt(offset, int(size))
+		if err == nil {
+			health := computeJPEGHealth(full)
+			switch {
+			case health >= 0.9:
+				confidence += 0.3
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (干净)", health*100))
+			case health >= 0.7:
+				confidence += 0.15
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (轻度异常)", health*100))
+			case health >= 0.4:
+				// 碎片嫌疑 —— 用户看到 "半边乱码" 多是这里
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (碎片化嫌疑，可能无法正常解码)", health*100))
+			default:
+				// 几乎肯定是废文件
+				confidence -= 0.2
+				messages = append(messages, fmt.Sprintf("熵流健康度 %.0f%% (严重损坏，不建议保留)", health*100))
+			}
+		}
+	}
+
+	// 限制范围
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
+	if confidence < 0 {
+		confidence = 0
+	}
 
 	return Result{
+		// 阈值 0.5 = 与 LowConfidenceThreshold 对齐 —— 碎片化嫌疑文件走
+		// _low_confidence/ 子目录，严重损坏 (<0.5) 则整个跳过
 		IsValid:    confidence >= 0.5,
 		Confidence: confidence,
 		Message:    fmt.Sprintf("JPEG 验证: %s", joinMessages(messages)),
 	}
+}
+
+// computeJPEGHealth 熵流非法 marker 比例评分（0..1）
+//
+// 算法：
+//   1. JPEG 结构：SOI | header segments (APP0/DQT/DHT/SOF) | SOS | entropy stream | EOI
+//   2. 合法 marker 只有 RST0-RST7 + FF00 stuffed + FFFF fill（允许在熵流里）
+//   3. 碎片化 JPEG 特征：熵流中间混入 APP/DQT/DHT/SOF 等 header marker
+//      —— 这些只应在 SOI..SOS 之间出现，出现在熵流里说明跨入其他文件数据
+//   4. **关键**：只扫 SOS 之后到 EOI 之前的区间，header 段不计入
+func computeJPEGHealth(data []byte) float32 {
+	if len(data) < 20 {
+		return 0
+	}
+	if data[0] != 0xFF || data[1] != 0xD8 {
+		return 0
+	}
+	hasEOI := data[len(data)-2] == 0xFF && data[len(data)-1] == 0xD9
+
+	// 找第一个 SOS (FF DA) marker —— 熵流从 SOS 段结束之后开始
+	sosPos := findSOS(data)
+	if sosPos < 0 {
+		// 没找到 SOS → 不是完整 JPEG structure
+		if hasEOI {
+			return 0.3
+		}
+		return 0.1
+	}
+	// SOS 段长度：[sosPos+2..sosPos+4] 是 big-endian 段长度（含自身 2 字节）
+	if sosPos+4 >= len(data) {
+		return 0.1
+	}
+	sosLen := int(data[sosPos+2])<<8 | int(data[sosPos+3])
+	entropyStart := sosPos + 2 + sosLen
+	entropyEnd := len(data)
+	if hasEOI {
+		entropyEnd = len(data) - 2
+	}
+	if entropyStart >= entropyEnd {
+		return 0.3 // 熵流区间为空
+	}
+
+	body := data[entropyStart:entropyEnd]
+	var legal, illegal int
+	for i := 0; i < len(body)-1; i++ {
+		if body[i] != 0xFF {
+			continue
+		}
+		next := body[i+1]
+		switch {
+		case next == 0x00 || next == 0xFF:
+			// stuffed / fill — 合法在熵流里
+		case next >= 0xD0 && next <= 0xD7:
+			// RST0..7 — 合法
+			legal++
+		case next == 0xD9:
+			// 熵流内遇到 EOI —— 合法（即该 EOI 就是文件结束）
+			legal++
+		case next >= 0xC0 && next <= 0xCF, // SOF/DHT/DAC
+			next >= 0xE0 && next <= 0xEF, // APPn
+			next == 0xD8, next == 0xDA, // SOI 再现 / 另一个 SOS
+			next == 0xDB, next == 0xDC, next == 0xDD, next == 0xDE, next == 0xDF, next == 0xFE:
+			// 这些 marker 在熵流**中间**是非法的 → 碎片化嫌疑
+			illegal++
+		}
+	}
+	total := legal + illegal
+	if total == 0 {
+		// 熵流内一个 marker 都没 —— 小图很正常
+		if hasEOI {
+			return 0.9
+		}
+		return 0.5
+	}
+	ratio := float32(legal) / float32(total)
+	if !hasEOI {
+		ratio *= 0.5
+	}
+	return ratio
+}
+
+// findSOS 找第一个 0xFF 0xDA 位置；-1 = 未找到
+func findSOS(data []byte) int {
+	for i := 0; i < len(data)-1; i++ {
+		if data[i] == 0xFF && data[i+1] == 0xDA {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---------- PNG 验证器 ----------
