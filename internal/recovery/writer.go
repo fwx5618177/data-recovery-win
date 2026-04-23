@@ -8,9 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"data-recovery/internal/disk"
 	"data-recovery/internal/exfat"
@@ -944,48 +948,96 @@ func (w *SafeWriter) writeResidentFile(file *types.RecoveredFile, data []byte, o
 
 // ===================== 辅助函数 =====================
 
-// sanitizeFilename 清理文件名，替换非法字符
+// windowsReservedNames Windows 保留文件名（不区分大小写，不含扩展名形式也保留）
+// 参考 https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+var windowsReservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM0": true, "COM1": true, "COM2": true, "COM3": true, "COM4": true,
+	"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT0": true, "LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
+	"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+// sanitizeFilename 跨平台安全的文件名清洗。
+//
+// 处理：
+//   1. Windows 非法字符 < > : " / \ | ? * 替换为 _
+//   2. 控制字符（C0 0x00-0x1F / DEL 0x7F / C1 0x80-0x9F）去掉
+//   3. Unicode NFC 归一（macOS NFD → NFC，避免跨平台文件名不一致）
+//   4. 过滤 BiDi override（U+202A..U+202E / U+2066..U+2069）和零宽字符
+//      （防"evil.exe.pdf" 因 U+202E 在资源管理器显示成 "fdp.exe.live"）
+//   5. Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）前缀加 _
+//   6. 首尾空格和点去掉（Windows 建目录会报错）
+//   7. 长度限制：**按 rune 数而非 byte**，默认 200 字符（中文 UTF-8 每字符 3 字节，
+//      原按 byte 限 200 只能装 66 个汉字 → 改按 rune 装 200 个汉字）
+//   8. 空结果用 "unnamed" 兜底
 func sanitizeFilename(name string) string {
 	if name == "" {
 		return "unnamed"
 	}
 
-	// 替换 Windows 非法字符: < > : " / \ | ? *
-	illegalChars := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
-	result := name
-	for _, ch := range illegalChars {
-		result = strings.ReplaceAll(result, ch, "_")
-	}
+	// 1. NFC 归一（macOS NFD 合成到 NFC）
+	name = norm.NFC.String(name)
 
-	// 去除控制字符 (ASCII 0-31, 127)
-	cleaned := make([]byte, 0, len(result))
-	for i := 0; i < len(result); i++ {
-		b := result[i]
-		if b >= 0x20 && b != 0x7F {
-			cleaned = append(cleaned, b)
+	// 2. 替换 Windows 非法字符
+	name = reIllegalWinChars.ReplaceAllString(name, "_")
+
+	// 3. 按 rune 过滤控制字符 + bidi override + zero-width + 非法 UTF-8 字节
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r == utf8.RuneError: // 非法 UTF-8 序列被 range 替换为 FFFD
+			continue
+		case r < 0x20, r == 0x7F: // C0 控制 + DEL
+			continue
+		case r >= 0x80 && r <= 0x9F: // C1 控制
+			continue
+		case r >= 0x202A && r <= 0x202E: // LRE/RLE/PDF/LRO/RLO (bidi override)
+			continue
+		case r >= 0x2066 && r <= 0x2069: // LRI/RLI/FSI/PDI
+			continue
+		case r == 0x200B, r == 0x200C, r == 0x200D, r == 0xFEFF: // zero-width + BOM
+			continue
 		}
+		b.WriteRune(r)
 	}
-	result = string(cleaned)
+	result := b.String()
 
-	// 去除首尾空格和点
+	// 4. 首尾空格和点
 	result = strings.TrimSpace(result)
-	result = strings.TrimRight(result, ".")
+	result = strings.Trim(result, ".")
 
-	// 限制长度（最长 200 字符）
-	if len(result) > 200 {
-		// 保留扩展名
-		ext := filepath.Ext(result)
-		base := result[:200-len(ext)]
-		result = base + ext
+	// 5. 按 rune 限长 200
+	const maxRunes = 200
+	if utf8.RuneCountInString(result) > maxRunes {
+		ext := filepath.Ext(result) // ext 都是 ASCII，rune=byte
+		base := strings.TrimSuffix(result, ext)
+		baseRunes := []rune(base)
+		keep := maxRunes - utf8.RuneCountInString(ext)
+		if keep < 1 {
+			keep = 1
+		}
+		if keep > len(baseRunes) {
+			keep = len(baseRunes)
+		}
+		result = string(baseRunes[:keep]) + ext
 	}
 
-	// 空名用 "unnamed" 替代
+	// 6. Windows 保留名
+	noExt := strings.TrimSuffix(result, filepath.Ext(result))
+	if windowsReservedNames[strings.ToUpper(noExt)] {
+		result = "_" + result
+	}
+
 	if result == "" {
 		return "unnamed"
 	}
-
 	return result
 }
+
+// 预编译一次；Windows 非法字符 + 各 OS 下全部保守过滤
+var reIllegalWinChars = regexp.MustCompile(`[<>:"/\\|?*]`)
 
 func buildNTFSRelativePath(file *types.RecoveredFile) string {
 	rawPath := strings.TrimSpace(file.OriginalPath)

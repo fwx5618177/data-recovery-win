@@ -125,6 +125,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 所有 36 个 Go 包通过 `go vet -race -count=1 -short`
 
 ### Fixed
+- **商业生产级扫描体验升级**
+  - `disk.OpenWithTimeout` 5s + 新 `TimeoutReader`（每次 ReadAt 8s 超时，驱动层 hang 当坏块 fallthrough）
+  - `Engine.Scan` 自动包 `ResilientReader + TimeoutReader`（之前 ResilientReader 写了但没接入）
+  - `GetBadSectors` IPC 从空数组占位接回真实坏扇区清单
+  - `Engine.Stop` 额外调 `disk.Canceller.Cancel()` 强制中断卡在 syscall 的扫描 goroutine
+- **断点续扫**（carver 字节级）
+  - `session.Snapshot.CarverResumeOffset`；persistLoop 每 5s 写盘
+  - `ResumeLastScan` IPC + WelcomePage 第三按钮"从断点继续（N GB 处）"
+  - NTFS/exFAT/FAT/ext 阶段重跑（秒-分钟），省 carver 几小时全盘读
+- **NTFS MFT 扫描期间实时推送文件** —— 原本等扫完才批量转换，用户以为卡死；现在 `onEntry` 命中即转 `RecoveredFile` 推前端；Speed/Elapsed 字段接入
+- **RAID mdadm 自动检测**（v1.x superblock 完整解析）
+  - 新 `volmgr.ParseMDADMSuperblockV1` —— UUID/level/chunk/role/device UUID
+  - `DetectRAIDArrays([]path)` 跨盘按 UUID 分组 + role 排序，一键填 StartRAIDScan
+  - 之前要求用户手动输入盘序/chunk，错了就是垃圾数据
+- **取证 B2B 级证据链**
+  - 新 `forensics.SignCustody`：manifest → Ed25519 签名 → RFC 3161 TSA 时间戳
+    （默认 TSA：freetsa.org / digicert / sectigo 依次 fallback）
+  - 新 `BundleEvidence` 打包 `evidence.zip`：custody.signed.json + public_key.pem + tsa_response.tsr + verify.sh + README
+  - 恢复完成自动生成；可直接交付 B2B 客户法务
+  - RFC 4998 长期归档 hash renewal 未做（需专业归档软件；当前 bundle 作为上游输入）
+- **文件名 Unicode / 跨平台安全**
+  - `sanitizeFilename` 升级：NFC 归一（macOS NFD → NFC）+ rune-based 长度限制（200 字符，原按 byte 中文被切半）+ BiDi override 过滤（防 "evil.exe.pdf" 因 U+202E 显示异常）+ zero-width 过滤 + Windows 保留名（CON/PRN/AUX/COM1-9/LPT1-9）前缀加 `_`
+- **目标盘校验 + ResilientReader + 虚拟滚动 + 目标盘同盘保护 + i18n 英文 + macOS 代码签名 gate** 均为**现有已完整实现**（二阶评估修正）
+
+### Fixed
 - **Windows 启动白屏** —— 两处修复
   - `vite.config.js`：`base: "./"` 改相对路径（WebView2 对 `/assets/` 绝对路径解析不稳），`inlineDynamicImports: true` 把 dynamic import 内联到单 bundle，避免 chunk fetch 失败
   - `App.jsx` 键盘快捷键 `useEffect` 依赖数组里引用了在下方才声明的 `stopScan`（const TDZ）→ render 阶段 `ReferenceError` → React 挂载失败 → 白屏；把这段 `useEffect` 移到 `stopScan` 声明之后
