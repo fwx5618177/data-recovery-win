@@ -244,12 +244,14 @@ func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {
 		return 0, fmt.Errorf("dst 容量不足")
 	}
 
-	// 首选路径：macOS compression_tool（Apple 官方 lzfse）
+	// 首选路径：pure Go FSE decode（跨平台，无外部依赖）
+	if n, err := decodeV2BlockPureGo(block, dst); err == nil {
+		return n, nil
+	}
+	// 第二路径：macOS compression_tool（Apple 官方 lzfse）— pure Go 失败时用
+	// 作为回退，尤其应对 frequency encoding 还有本地未覆盖的 Apple 变体
 	if n, err := DecompressLZFSEv2WithAfsctool(block, dst); err == nil {
 		return n, nil
 	}
-
-	// 纯 Go fallback 路径当前未完成（已有 freq decoder，缺 FSE table build + decode loop）
-	// 遇到非 macOS 或缺工具环境，返回 FSEPartial 让 lzfse.go 给友好提示
 	return 0, ErrLZFSEFSEPartial
 }
