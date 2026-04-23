@@ -18,6 +18,7 @@ package updater
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,7 +59,13 @@ func VerifySumsSignatureFromRelease(ctx context.Context, owner, repo, version st
 	// 3. 选公钥
 	var pubBytes []byte
 	if EmbeddedPublicKey != "" {
-		pubBytes = []byte(EmbeddedPublicKey)
+		// ldflags 注入的是 base64 编码的 PEM（避免 newline 在 ldflags 里的转义问题）
+		// 先尝试 base64 decode；失败则当 PEM 原文
+		if decoded, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(EmbeddedPublicKey)); decErr == nil {
+			pubBytes = decoded
+		} else {
+			pubBytes = []byte(EmbeddedPublicKey)
+		}
 	} else {
 		pubBytes, err = fetchFile(ctx, baseURL+"/release_pubkey.pem")
 		if err != nil {

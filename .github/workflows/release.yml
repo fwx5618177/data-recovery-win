@@ -86,10 +86,26 @@ jobs:
         # 字符串，前端用 new Date(str) 处理。`set -o pipefail` 让 wails 的 exit code
         # 能穿透管道传到 step（不然 sed 成功就 mask 掉 build 失败）。
         shell: bash
+        env:
+          # 代码内 pin 公钥 —— 外部审计关键项：防止攻击者替换 release 里的 release_pubkey.pem
+          # 未配置时 EmbeddedPublicKey 为空，binary 退到"从 release 下载公钥"模式（开发期 OK）
+          PUBKEY_B64: ${{ secrets.RELEASE_PUBKEY_B64 }}
         run: |
           set -o pipefail
+
+          # 动态拼 ldflags：基础 repo 信息 + 可选的 EmbeddedPublicKey（base64 PEM）
+          LDFLAGS="-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}"
+          if [ -n "$PUBKEY_B64" ]; then
+            # 直接把 base64 作为 ldflags 值（无 newline，ldflags 友好）
+            # 客户端 verify_release.go 在使用时 base64 decode 回 PEM
+            LDFLAGS="$LDFLAGS -X data-recovery/internal/updater.EmbeddedPublicKey=$PUBKEY_B64"
+            echo "::notice::EmbeddedPublicKey 已 pin 进 binary (base64 编码)"
+          else
+            echo "::warning::RELEASE_PUBKEY_B64 未配置，binary 没 pin 公钥（生产发布前必填）"
+          fi
+
           wails build -platform ${{ matrix.platform }} \
-            -ldflags "-X main.updateRepoOwner=${{ github.repository_owner }} -X main.updateRepoName=${{ github.event.repository.name }}" \
+            -ldflags "$LDFLAGS" \
             2>&1 | sed '/Not found: time\.Time/d'
 
       - name: List build output
