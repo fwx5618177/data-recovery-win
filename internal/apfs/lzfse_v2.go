@@ -229,10 +229,12 @@ var ErrLZFSEFSEPartial = fmt.Errorf(
 
 // DecompressLZFSEv2Block 尝试解一个 bvx2 block。
 //
-// 成功返回解出字节数。遇到实现不完整的 tANS 边界返回 ErrLZFSEFSEPartial。
+// 策略（按可靠性排序）：
+//   1. macOS 上调 /usr/bin/compression_tool（Apple 官方库，100% 兼容）→ 首选
+//   2. 未来：纯 Go FSE decoder（当前 freq decoder 已就绪；主 decode loop 未实现）
+//   3. fallback：返回 ErrLZFSEFSEPartial，上层退化到 "ErrLZFSEv2Unsupported"
 //
-// 给 lzfse.go 的 DecompressLZFSE 升级用：当遇到 bvx2 时先试调本函数，失败再退到
-// "ErrLZFSEv2Unsupported" 的 afsctool 引导。
+// 成功返回解出字节数。
 func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {
 	h, err := parseV2Header(block)
 	if err != nil {
@@ -242,18 +244,12 @@ func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {
 		return 0, fmt.Errorf("dst 容量不足")
 	}
 
-	// 频率表解码 —— Apple lzfse 用固定尺寸 bit-packed 表：
-	//   L freq: 20 × 5 bit = 100 bit
-	//   M freq: 20 × 5 bit = 100 bit
-	//   D freq: 64 × 5 bit = 320 bit
-	//   literal freq: 256 × 10 bit = 2560 bit
-	// 总计 3080 bit = 385 字节（对齐到字节）
-	//
-	// 完整实现这一步需要精确的 bit-unpacking。本简化版假设 n_literals 足够小，
-	// 直接返回 ErrLZFSEFSEPartial 让上层退化。
-	//
-	// **生产级**：建议直接 cgo 调 Apple 原 lzfse（BSD-3）或等待此 decoder 扩展到完整。
-	_ = h
+	// 首选路径：macOS compression_tool（Apple 官方 lzfse）
+	if n, err := DecompressLZFSEv2WithAfsctool(block, dst); err == nil {
+		return n, nil
+	}
 
+	// 纯 Go fallback 路径当前未完成（已有 freq decoder，缺 FSE table build + decode loop）
+	// 遇到非 macOS 或缺工具环境，返回 FSEPartial 让 lzfse.go 给友好提示
 	return 0, ErrLZFSEFSEPartial
 }
