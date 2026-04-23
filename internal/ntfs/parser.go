@@ -10,6 +10,7 @@ import (
 	"unicode/utf16"
 
 	"data-recovery/internal/disk"
+	"data-recovery/internal/logging"
 )
 
 // ========== NTFS 文件系统常量 ==========
@@ -96,6 +97,11 @@ type MFTEntry struct {
 	// CompressionUnitClusters 每个 compression unit 的 cluster 数（2^N，规范默认 N=4 → 16 clusters）。
 	// 0 表示不压缩（IsCompressed=false）。
 	CompressionUnitClusters int
+
+	// FixupFailed 表示 MFT 条目的 fixup 校验失败（跨扇区写入不一致），
+	// 意味着本 entry 的 metadata 可能有错位 —— 上层应降低该文件的 confidence
+	// 或提示用户"此结果可能不可靠"。true 时仍可恢复但应带警告。
+	FixupFailed bool
 }
 
 // DataRun 表示一段连续的磁盘簇区域
@@ -622,15 +628,22 @@ func (s *Scanner) parseMFTEntry(data []byte, entryNumber int64) (*MFTEntry, erro
 	// 应用 fixup 数组修复跨扇区数据
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
+	fixupOK := true
 	if err := applyFixup(dataCopy); err != nil {
-		// Fixup 失败不一定意味着条目完全无效，但数据可能不完整
-		// 对于已删除文件的恢复，我们仍然尝试解析
-		_ = err
+		// NTFS fixup 校验失败 = MFT 条目跨扇区写入有不一致
+		// 原因：1) 磁盘坏扇区；2) 扇区号被覆盖；3) 非法的 MFT 数据
+		// 我们仍尝试解析（碎片恢复里能抢救到文件名/extent），但标记 FixupFailed
+		// 让上层降低该文件 confidence。之前 _ = err **静默忽略**让损坏和合法无差别
+		logging.L().Warn("MFT fixup 校验失败",
+			"component", "ntfs",
+			"entry", entryNumber, "err", err)
+		fixupOK = false
 	}
 
 	entry := &MFTEntry{
 		EntryNumber: entryNumber,
 		ParentEntry: -1,
+		FixupFailed: !fixupOK,
 	}
 
 	// 偏移 0x16: flags (uint16 LE)
