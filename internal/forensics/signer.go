@@ -123,18 +123,11 @@ func rawReadFile(path string) ([]byte, error) {
 
 // SignCustodyWithSigner 用可插拔 Signer 替代默认 LocalEd25519Signer。
 //
-// 流程与 SignCustody 一致，区别只在签名后端：
-//   canonical manifest → signer.Sign → 填 Signature / SignaturePublicKey / Scheme
-//   可选申请 TSA 时间戳
+// 任何实现 Signer 接口的后端都可以走这条路 —— LocalEd25519Signer / ExternalCLISigner /
+// 自定义 HSM / KMS adapter 等都共用同一 canonical 序列化路径，
+// verify 端不需要改任何代码。
+//
+// 与 SignCustody 同一底层实现 (signCustodyCanonical)；保持 API 兼容。
 func SignCustodyWithSigner(c Custody, signer Signer, tsaURLs []string) (*SignedCustody, error) {
-	if signer == nil {
-		return nil, fmt.Errorf("signer 为 nil")
-	}
-	// 对于本机 Ed25519 signer，复用现有 SignCustody 逻辑（正确性已测）
-	if eddsa, ok := signer.(*LocalEd25519Signer); ok {
-		return SignCustody(c, eddsa.priv, tsaURLs)
-	}
-	// 其他 Signer：复刻 canonical 流程
-	// （当前仅 placeholder；完整实现需要把 SignCustody 重构为接受 Signer）
-	return nil, fmt.Errorf("非 LocalEd25519Signer 暂未完整接入；作为接口预留")
+	return signCustodyCanonical(c, signer, tsaURLs)
 }

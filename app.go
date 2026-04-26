@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,8 +22,12 @@ import (
 	"data-recovery/internal/disk"
 	"data-recovery/internal/forensics"
 	"data-recovery/internal/gpt"
+	"data-recovery/internal/android"
 	"data-recovery/internal/hfsplus"
+	"data-recovery/internal/ios"
 	"data-recovery/internal/logging"
+	"data-recovery/internal/luks"
+	"data-recovery/internal/mtp"
 	"data-recovery/internal/netfs"
 	"data-recovery/internal/ocr"
 	"data-recovery/internal/parallel"
@@ -33,6 +38,7 @@ import (
 	"data-recovery/internal/session"
 	"data-recovery/internal/types"
 	"data-recovery/internal/updater"
+	"data-recovery/internal/veracrypt"
 	"data-recovery/internal/volmgr"
 	"data-recovery/internal/vss"
 )
@@ -93,6 +99,16 @@ type App struct {
 	// 下载是否进行中 —— 防止 autoCheckForUpdate 静默下载后，用户点"下载"
 	// 按钮又触发一次，两个下载并发写同 pending 目录 → 进度回退 bug
 	downloadActive bool
+
+	// NAS 扫描的 cancel 函数（Batch 2）；一次只有一个 SMB/NFS 扫描在跑
+	smbScanCancel context.CancelFunc
+	nfsScanCancel context.CancelFunc
+
+	// iOS 备份扫描的 cancel（Batch 3）
+	iosScanCancel context.CancelFunc
+
+	// Android backup 扫描 cancel（Batch 4）
+	androidScanCancel context.CancelFunc
 }
 
 // NewApp 创建一个新的 App 实例
@@ -505,7 +521,9 @@ func (a *App) UnlockBitLockerWithMemoryImage(
 		underlying.Close()
 		return err
 	}
-	dec, err := bitlocker.NewDecryptingReader(underlying, sectorCipher, bvolume.OEMID)
+	// 8192 sector cache ≈ 4MB @ 512B / 32MB @ 4096B —— 覆盖 NTFS MFT hot 区，
+	// 加密卷扫描时同 sector 反复解密的代价省掉
+	dec, err := bitlocker.NewDecryptingReaderWithCache(underlying, sectorCipher, bvolume.OEMID, 8192)
 	if err != nil {
 		underlying.Close()
 		return err
@@ -855,6 +873,36 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 				})
 			}
 		}
+	}
+
+	// 3b. LUKS / LUKS2 卷（Linux 全盘加密标准）—— 同时支持本工具内置解锁
+	if h, err := luks.Detect(reader, 0); err == nil && h != nil {
+		note := fmt.Sprintf("LUKS%d 加密卷（%s-%s，UUID=%s）。本工具支持密码解锁；命中 keyslot 后用 NTFS / ext4 等扫描器走原路径",
+			h.Version, h.CipherName, h.CipherMode, h.UUID)
+		if h.Version == 2 {
+			note = fmt.Sprintf("LUKS2 加密卷（label=%q）。本工具支持 Argon2id + AES-XTS 主流配置；密码解锁后走 ext4 / NTFS 等扫描器", h.Label)
+		}
+		out = append(out, EncryptedVolumeInfo{
+			DrivePath: drivePath,
+			Kind:      fmt.Sprintf("luks%d", h.Version),
+			Offset:    h.Offset,
+			UUID:      h.UUID,
+			Name:      h.Label,
+			Encrypted: true,
+			Note:      note,
+		})
+	}
+
+	// 3c. VeraCrypt / TrueCrypt 启发式探针（offset 0 高熵 + 无已知 fs magic）
+	// 注意：VC 容器没有明文 magic，全靠熵 + 排除法；可能假阳性，在 Note 里告诉用户
+	if hint, err := veracrypt.Detect(reader, 0); err == nil && hint != nil {
+		out = append(out, EncryptedVolumeInfo{
+			DrivePath: drivePath,
+			Kind:      "veracrypt",
+			Offset:    hint.Offset,
+			Encrypted: true,
+			Note:      hint.Note + "（本工具内置解锁：用密码尝试 SHA-512 / SHA-256 / RIPEMD-160）",
+		})
 	}
 
 	// 4. 卷管理器成员识别（mdadm / LVM2 / Storage Spaces）— 不是加密卷，但同样会让
@@ -1797,7 +1845,16 @@ func (a *App) ExportDFXML(outputDir string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	return path, forensics.WriteDFXML(f, "DataRecovery", updater.Version, files)
+
+	// 给 DFXML 加上 source —— 取证场景下"数据来自哪块盘"必须在报告里
+	a.mu.Lock()
+	driveLabel := a.currentDrive.Path
+	a.mu.Unlock()
+	source := &forensics.SourceInfo{
+		ImageFilename: driveLabel,
+		SectorSize:    512,
+	}
+	return path, forensics.WriteDFXMLWithSource(f, "DataRecovery", updater.Version, source, files)
 }
 
 // BuildCustody 把 outputDir 下的所有恢复文件打保管链 manifest.json
@@ -2061,6 +2118,23 @@ func (a *App) GetBadSectors() []disk.BadSector {
 	return []disk.BadSector{}
 }
 
+// EncryptedReaderCacheStatsResp 给前端的统一返回（即便没缓存也带 Active 字段）
+type EncryptedReaderCacheStatsResp struct {
+	Active bool             `json:"active"` // false = 当前扫描非加密卷或无缓存
+	Stats  disk.CacheStats `json:"stats"`
+}
+
+// GetEncryptedReaderCacheStats 返回加密卷扫描的 sector 缓存命中率快照。
+//
+// 给 UI 显示"BitLocker / LUKS / VeraCrypt 卷扫描缓存命中率 87%"，让用户
+// 直观看到优化生效。Active=false 时表示当前扫描不是加密卷链路，前端应隐藏该面板。
+//
+// 数据是 Engine 实时维护的，扫描中可定期 poll 看变化。
+func (a *App) GetEncryptedReaderCacheStats() EncryptedReaderCacheStatsResp {
+	stats, ok := a.engine.EncryptedReaderCacheStats()
+	return EncryptedReaderCacheStatsResp{Active: ok, Stats: stats}
+}
+
 // IsKnownBenign 已载入的 NSRL 库里 hash 是否为已知良性
 func (a *App) IsKnownBenign(sha256Hex string) bool {
 	a.mu.Lock()
@@ -2070,4 +2144,451 @@ func (a *App) IsKnownBenign(sha256Hex string) bool {
 		return false
 	}
 	return db.IsKnownBenign(sha256Hex)
+}
+
+// ====================================================================
+// NAS 发现 / 连接 / 扫描（Batch 2）
+// ====================================================================
+
+// DiscoveredNAS 前端 UI 展示用的简化视图（不暴露 net.IP 等内部类型）
+type DiscoveredNAS struct {
+	Kind     string `json:"kind"`     // "smb" | "nfs" | "afp"
+	Host     string `json:"host"`
+	IP       string `json:"ip"`
+	Port     uint16 `json:"port"`
+	Instance string `json:"instance"`
+}
+
+// DiscoverNASServices 在局域网用 mDNS 查找 SMB / NFS / AFP 服务。
+// timeout 秒单位；UI 可以传 3-5 秒。
+func (a *App) DiscoverNASServices(timeoutSecs int) []DiscoveredNAS {
+	if timeoutSecs <= 0 || timeoutSecs > 30 {
+		timeoutSecs = 3
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, time.Duration(timeoutSecs)*time.Second)
+	defer cancel()
+
+	svcs, err := netfs.DiscoverNAS(ctx, time.Duration(timeoutSecs)*time.Second)
+	if err != nil {
+		appLogger.Warn("mDNS NAS 发现失败", "err", err)
+		return nil
+	}
+	out := make([]DiscoveredNAS, 0, len(svcs))
+	for _, s := range svcs {
+		ip := ""
+		if s.IP != nil {
+			ip = s.IP.String()
+		}
+		out = append(out, DiscoveredNAS{
+			Kind:     string(s.Kind),
+			Host:     s.Host,
+			IP:       ip,
+			Port:     s.Port,
+			Instance: s.Instance,
+		})
+	}
+	return out
+}
+
+// SMBListShares 试连 SMB server 并列出 share 名（不扫描文件）。
+// UI 里的"连接 → 让我先看有哪些共享"步骤。返回的 []string 给前端展示选择列表。
+func (a *App) SMBListShares(host string, port int, user, password, domain string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+
+	sess, err := netfs.DialSMB(ctx, netfs.SMBScanConfig{
+		Host: host, Port: port, User: user, Password: password, Domain: domain,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer sess.Close()
+	return sess.ListShares()
+}
+
+// NFSListExports 连 NFS server 并列出 export 点。
+// 多数家用 NAS 开启了 EXPORT；企业 NFS 常关闭，此时会报错，用户需手动填 export 路径。
+func (a *App) NFSListExports(host string, nfsPort, mountPort, uid, gid uint32) ([]string, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+
+	sess, err := netfs.DialNFSSession(ctx, netfs.NFSScanConfig{
+		Host: host, NFSPort: nfsPort, MountPort: mountPort, UID: uid, GID: gid,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer sess.Close()
+	return sess.ListExports(ctx)
+}
+
+// SMBScanRequestWails SMB 扫描的参数（从 UI 过来）
+type SMBScanRequestWails struct {
+	Host     string   `json:"host"`
+	Port     int      `json:"port"`
+	User     string   `json:"user"`
+	Password string   `json:"password"`
+	Domain   string   `json:"domain"`
+	Shares   []string `json:"shares"`
+	MaxDepth int      `json:"maxDepth"`
+	MaxFiles int      `json:"maxFiles"`
+}
+
+// StartSMBScan 后台启动 SMB 扫描，通过 scan:progress / scan:fileFound 事件流式推送结果。
+// 与盘扫描复用同一套事件契约，前端不用特殊处理。
+func (a *App) StartSMBScan(req SMBScanRequestWails) error {
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在进行")
+	}
+	a.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.mu.Lock()
+		a.smbScanCancel = cancel
+		a.mu.Unlock()
+		defer cancel()
+
+		_, err := a.engine.ScanSMBShare(
+			ctx,
+			recovery.SMBScanRequest{
+				Host: req.Host, Port: req.Port,
+				User: req.User, Password: req.Password, Domain: req.Domain,
+				Shares: req.Shares, MaxDepth: req.MaxDepth, MaxFiles: req.MaxFiles,
+			},
+			func(p types.ScanProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			},
+			func(f *types.RecoveredFile) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			},
+		)
+		if err != nil {
+			appLogger.Warn("SMB 扫描出错", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		result := a.engine.Results()
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+	}()
+	return nil
+}
+
+// NFSScanRequestWails NFS 扫描参数
+type NFSScanRequestWails struct {
+	Host      string   `json:"host"`
+	NFSPort   uint32   `json:"nfsPort"`
+	MountPort uint32   `json:"mountPort"`
+	UID       uint32   `json:"uid"`
+	GID       uint32   `json:"gid"`
+	Exports   []string `json:"exports"`
+	MaxDepth  int      `json:"maxDepth"`
+	MaxFiles  int      `json:"maxFiles"`
+}
+
+// StartNFSScan 后台启动 NFS v3 扫描。
+func (a *App) StartNFSScan(req NFSScanRequestWails) error {
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在进行")
+	}
+	a.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.mu.Lock()
+		a.nfsScanCancel = cancel
+		a.mu.Unlock()
+		defer cancel()
+
+		_, err := a.engine.ScanNFSExport(
+			ctx,
+			recovery.NFSScanRequest{
+				Host: req.Host, NFSPort: req.NFSPort, MountPort: req.MountPort,
+				UID: req.UID, GID: req.GID,
+				Exports: req.Exports, MaxDepth: req.MaxDepth, MaxFiles: req.MaxFiles,
+			},
+			func(p types.ScanProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			},
+			func(f *types.RecoveredFile) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			},
+		)
+		if err != nil {
+			appLogger.Warn("NFS 扫描出错", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		result := a.engine.Results()
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+	}()
+	return nil
+}
+
+// StopNASScan 取消正在进行的 SMB/NFS 扫描。
+func (a *App) StopNASScan() {
+	a.mu.Lock()
+	smbC := a.smbScanCancel
+	nfsC := a.nfsScanCancel
+	a.smbScanCancel = nil
+	a.nfsScanCancel = nil
+	a.mu.Unlock()
+	if smbC != nil {
+		smbC()
+	}
+	if nfsC != nil {
+		nfsC()
+	}
+}
+
+// ====================================================================
+// iOS 本地备份（Batch 3）
+// ====================================================================
+
+// DiscoverIOSBackups 列出本机 MobileSync/Backup 下的所有 iOS 备份。
+// UI 展示让用户挑一个；加密的会在前端看到锁标和"需要密码"提示。
+func (a *App) DiscoverIOSBackups() ([]recovery.IOSBackupInfo, error) {
+	return a.engine.DiscoverIOSBackups()
+}
+
+// StartIOSBackupScan 后台扫描指定备份目录。
+//
+//   password == "":  对未加密备份直接扫；对加密备份立即发 scan:error "encrypted"，前端弹密码框。
+//   password 非空:   对加密备份做 keybag unlock + Manifest.db 解密 + 文件 enumerate。
+//
+// 与盘扫描复用同一套 scan:progress / scan:fileFound / scan:completed 事件。
+func (a *App) StartIOSBackupScan(backupPath, password string) error {
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在进行")
+	}
+	a.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.mu.Lock()
+		a.iosScanCancel = cancel
+		a.mu.Unlock()
+		defer cancel()
+
+		_, err := a.engine.ScanIOSBackup(
+			ctx,
+			backupPath, password,
+			func(p types.ScanProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			},
+			func(f *types.RecoveredFile) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			},
+		)
+		if err != nil {
+			// 加密但没给密码：发一个专用 event 让 UI 弹密码框
+			if err == ios.ErrEncrypted {
+				wailsRuntime.EventsEmit(a.ctx, "ios:passwordRequired", backupPath)
+				return
+			}
+			appLogger.Warn("iOS 备份扫描出错", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", a.engine.Results())
+	}()
+	return nil
+}
+
+// StopIOSBackupScan 取消正在进行的 iOS 备份扫描。
+func (a *App) StopIOSBackupScan() {
+	a.mu.Lock()
+	c := a.iosScanCancel
+	a.iosScanCancel = nil
+	a.mu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
+// ====================================================================
+// Android `.ab` 备份（Batch 4）
+// ====================================================================
+
+// SelectAndroidBackup 让用户选一个 .ab 文件。
+func (a *App) SelectAndroidBackup() (string, error) {
+	dir, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "选择 Android 备份 (.ab) 文件",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "Android Backup", Pattern: "*.ab"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// InspectAndroidBackup 仅读 .ab 头部判断是否加密，UI 据此决定是否弹密码框。
+func (a *App) InspectAndroidBackup(path string) (*recovery.AndroidBackupInfo, error) {
+	return a.engine.InspectAndroidBackup(path)
+}
+
+// StartAndroidBackupScan 后台扫描 .ab 备份。事件流和盘扫描共用。
+//   password == ""        非加密：正常扫；加密：发 android:passwordRequired
+//   password 非空         加密：解锁后扫
+func (a *App) StartAndroidBackupScan(backupPath, password string) error {
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在进行")
+	}
+	a.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.mu.Lock()
+		a.androidScanCancel = cancel
+		a.mu.Unlock()
+		defer cancel()
+
+		_, err := a.engine.ScanAndroidBackup(
+			ctx,
+			backupPath, password,
+			func(p types.ScanProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			},
+			func(f *types.RecoveredFile) {
+				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			},
+		)
+		if err != nil {
+			if errors.Is(err, android.ErrEncrypted) {
+				wailsRuntime.EventsEmit(a.ctx, "android:passwordRequired", backupPath)
+				return
+			}
+			appLogger.Warn("Android 备份扫描出错", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "scan:completed", a.engine.Results())
+	}()
+	return nil
+}
+
+// StopAndroidBackupScan 取消正在进行的 Android 备份扫描。
+func (a *App) StopAndroidBackupScan() {
+	a.mu.Lock()
+	c := a.androidScanCancel
+	a.androidScanCancel = nil
+	a.mu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
+// ====================================================================
+// MTP / 手机直连（Batch 8）
+// ====================================================================
+
+// MTPDeviceInfo 是给前端的简化 Android device 描述
+type MTPDeviceInfo struct {
+	Serial  string `json:"serial"`
+	State   string `json:"state"`
+	Model   string `json:"model"`
+	Product string `json:"product"`
+}
+
+// MTPStatus 给前端用来判断是否能用 MTP 功能
+type MTPStatus struct {
+	Available  bool   `json:"available"`
+	Version    string `json:"version,omitempty"`
+	InstallURL string `json:"installURL,omitempty"`
+}
+
+// MTPCheck 返回当前环境的 MTP 直连可用性。前端 WelcomePage 启动时调一次，
+// 决定是否显示"手机直连"入口。
+func (a *App) MTPCheck() MTPStatus {
+	if !mtp.AdbAvailable() {
+		return MTPStatus{
+			Available:  false,
+			InstallURL: "https://developer.android.com/tools/releases/platform-tools",
+		}
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	return MTPStatus{
+		Available: true,
+		Version:   mtp.AdbVersion(ctx),
+	}
+}
+
+// MTPListDevices 列出当前插着的 Android 设备（adb 可见的）。
+// 没装 adb 时返回友好错误，前端据此引导用户。
+func (a *App) MTPListDevices() ([]MTPDeviceInfo, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	devs, err := mtp.ListDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MTPDeviceInfo, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, MTPDeviceInfo{
+			Serial:  d.Serial,
+			State:   d.State,
+			Model:   d.Model,
+			Product: d.Product,
+		})
+	}
+	return out, nil
+}
+
+// MTPPullDirectoryAndScan 把手机端 srcPath（如 "/sdcard/DCIM"）整个目录拉到本地
+// destDir，然后跑一次"扫描本地目录"——上层文件系统扫描器对普通目录原生支持，
+// 不需要懂 MTP。
+//
+// 设计选择：先 pull 后 scan 而不是流式扫描，因为：
+//   1. adb pull 有官方进度，用户能看到拉了多少
+//   2. 拉完一份本地副本后扫描是只读的；万一手机断开也不丢已拉部分
+//   3. 拉到本地后用户可以反复扫不同 mode（fast / full / deep）
+func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) error {
+	if serial == "" || srcPath == "" || destDir == "" {
+		return fmt.Errorf("serial / srcPath / destDir 不能为空")
+	}
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在执行，请先停止当前扫描")
+	}
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(a.ctx)
+
+	go func() {
+		defer cancel()
+		wailsRuntime.EventsEmit(a.ctx, "mtp:pullStarted", map[string]string{
+			"serial": serial, "src": srcPath, "dest": destDir,
+		})
+		appLogger.Info("MTP pull 开始", "serial", serial, "src", srcPath, "dest", destDir)
+
+		if err := mtp.PullDirectory(ctx, serial, srcPath, destDir); err != nil {
+			appLogger.Warn("MTP pull 失败", "err", err)
+			wailsRuntime.EventsEmit(a.ctx, "mtp:pullError", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "mtp:pullCompleted", destDir)
+		appLogger.Info("MTP pull 完成，开始扫描本地副本", "path", destDir)
+
+		// pull 完成后用普通目录扫描接续
+		if err := a.StartScan(destDir, mode); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+		}
+	}()
+	return nil
 }

@@ -83,8 +83,9 @@ func UnlockBitLockerVolumeWithRecoveryKey(
 		return nil, err
 	}
 
-	// 6. 包装成透明解密 reader
-	reader, err := NewDecryptingReader(underlying, sectorCipher, bvolume.OEMID)
+	// 6. 包装成透明解密 reader（开 8192 sector LRU 缓存 ≈ 4MB，
+	//    覆盖 NTFS MFT hot 区，加密卷扫描显著加速）
+	reader, err := NewDecryptingReaderWithCache(underlying, sectorCipher, bvolume.OEMID, 8192)
 	if err != nil {
 		return nil, err
 	}

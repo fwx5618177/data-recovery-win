@@ -53,6 +53,11 @@ type DecryptingReader struct {
 	plainTextHeaderEnd int64
 
 	devicePath string // 用作日志 / DevicePath() 返回
+
+	// 可选 LRU sector 缓存（与 LUKS / VC 共享 disk.SectorCache 实现）。
+	// NTFS scanner 反复读 MFT/boot 区时同 sector 解密几十次，缓存命中
+	// 跳过 AES-XTS 直接复制解密字节，对 BitLocker NTFS 卷扫描显著加速。
+	cache *disk.SectorCache
 }
 
 // NewDecryptingReader 包装一个底层 reader，传入任意 SectorCipher 实现。
@@ -62,6 +67,17 @@ func NewDecryptingReader(
 	c SectorCipher,
 	devicePath string,
 ) (*DecryptingReader, error) {
+	return NewDecryptingReaderWithCache(underlying, c, devicePath, 0)
+}
+
+// NewDecryptingReaderWithCache 同 NewDecryptingReader，多一个 cacheSectors 参数。
+// 0 = 禁用缓存；典型 8192 (= 4MB @ 512B / 32MB @ 4KB) 命中率最佳。
+func NewDecryptingReaderWithCache(
+	underlying disk.DiskReader,
+	c SectorCipher,
+	devicePath string,
+	cacheSectors int,
+) (*DecryptingReader, error) {
 	if underlying == nil || c == nil {
 		return nil, fmt.Errorf("nil underlying / cipher")
 	}
@@ -70,6 +86,7 @@ func NewDecryptingReader(
 		cipher:     c,
 		sectorSize: c.SectorSize(),
 		devicePath: devicePath,
+		cache:      disk.NewSectorCache(cacheSectors),
 	}
 	return r, nil
 }
@@ -101,6 +118,10 @@ func (r *DecryptingReader) DevicePath() string {
 	return r.underlying.DevicePath()
 }
 
+// CacheStats 返回 LRU sector 缓存命中率快照（cache 未启用时所有字段为 0）。
+// 与 luks.DecryptedReader.CacheStats 同型号，便于 UI 统一展示。
+func (r *DecryptingReader) CacheStats() disk.CacheStats { return r.cache.Stats() }
+
 // ReadAt 是核心：按扇区对齐读，逐扇区解密，再裁到调用方要求的范围。
 //
 // 算法：
@@ -125,32 +146,60 @@ func (r *DecryptingReader) ReadAt(p []byte, offset int64) (int, error) {
 	bufLen := int((lastSector - firstSector + 1) * sectorSize64)
 	buf := make([]byte, bufLen)
 
-	// 把 logical offset 翻译成物理盘 offset 再做底层 IO
-	n, err := r.underlying.ReadAt(buf, r.volumeOffset+firstSector*sectorSize64)
-	if err != nil && err != io.EOF && n == 0 {
-		return 0, err
+	// 整段 cache 命中的快路径：跳过 underlying IO + cipher。
+	// 注意：明文区（[0, plainTextHeaderEnd)）不进缓存（数据本来就明文，
+	// 缓存它意义不大且会把 cache 装满 boot 区扇区），所以全段命中要求
+	// firstSector 起的所有 sectorOff ≥ plainTextHeaderEnd。
+	allHit := false
+	if r.cache != nil && firstSector*sectorSize64 >= r.plainTextHeaderEnd {
+		allHit = true
+		for i := int64(0); i*sectorSize64 < int64(bufLen); i++ {
+			sectorNum := uint64(firstSector + i)
+			from := i * sectorSize64
+			to := from + sectorSize64
+			if int64(bufLen) < to {
+				allHit = false
+				break
+			}
+			if !r.cache.Get(sectorNum, buf[from:to]) {
+				allHit = false
+				break
+			}
+		}
 	}
-	buf = buf[:n]
 
-	// 逐扇区解密（卷头明文区直接保持）
-	for i := int64(0); i*sectorSize64 < int64(len(buf)); i++ {
-		sectorOff := (firstSector + i) * sectorSize64
-		from := i * sectorSize64
-		to := from + sectorSize64
-		if int64(len(buf)) < to {
-			break // 最后一段不完整扇区，跳过解密（数据已读，不解密直接给）
+	if !allHit {
+		// 把 logical offset 翻译成物理盘 offset 再做底层 IO
+		n, err := r.underlying.ReadAt(buf, r.volumeOffset+firstSector*sectorSize64)
+		if err != nil && err != io.EOF && n == 0 {
+			return 0, err
 		}
+		buf = buf[:n]
 
-		if sectorOff < r.plainTextHeaderEnd {
-			// 卷头明文区，直接保持
-			continue
-		}
+		// 逐扇区解密（卷头明文区直接保持；cache 命中 sector 跳过 cipher）
+		for i := int64(0); i*sectorSize64 < int64(len(buf)); i++ {
+			sectorOff := (firstSector + i) * sectorSize64
+			from := i * sectorSize64
+			to := from + sectorSize64
+			if int64(len(buf)) < to {
+				break // 最后一段不完整扇区，跳过解密（数据已读，不解密直接给）
+			}
 
-		sectorNum := uint64(firstSector + i)
-		sectorBytes := buf[from:to]
-		// in-place 解密
-		if err := r.cipher.DecryptSector(sectorBytes, sectorBytes, sectorNum); err != nil {
-			return 0, fmt.Errorf("扇区 %d 解密失败: %w", sectorNum, err)
+			if sectorOff < r.plainTextHeaderEnd {
+				// 卷头明文区，直接保持；不缓存（明文区扇区数有限，无解密成本可省）
+				continue
+			}
+
+			sectorNum := uint64(firstSector + i)
+			sectorBytes := buf[from:to]
+			if r.cache.Get(sectorNum, sectorBytes) {
+				continue // cache 命中，跳过 cipher
+			}
+			// in-place 解密
+			if err := r.cipher.DecryptSector(sectorBytes, sectorBytes, sectorNum); err != nil {
+				return 0, fmt.Errorf("扇区 %d 解密失败: %w", sectorNum, err)
+			}
+			r.cache.Put(sectorNum, sectorBytes)
 		}
 	}
 

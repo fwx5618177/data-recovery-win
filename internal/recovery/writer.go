@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"data-recovery/internal/btrfs"
 	"data-recovery/internal/disk"
 	"data-recovery/internal/exfat"
 	"data-recovery/internal/ext4"
@@ -791,6 +792,171 @@ func (w *SafeWriter) WriteEXTFile(
 		"path", outputPath,
 		"size", types.FormatSize(totalWritten),
 		"ranges", len(ranges),
+		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
+	return nil
+}
+
+// WriteBtrfsFile 按 btrfs.FSExtent 列表 + ChunkCatalog 恢复 Btrfs 文件。
+//
+// extent 三种 type：
+//   - inline：数据直接驻留在 EXTENT_DATA item value 里（小文件 < 4KB），原样写
+//   - regular：disk_logical → ChunkCatalog.MapLogical → 物理 offset，读 length 字节写
+//   - prealloc：preallocated 但未写入实际数据，写零填充
+//
+// 限制：压缩 extent (zlib/LZO/ZSTD) 现按 *raw* 字节写出（产物是压缩后的字节
+// 流，需用户用 btrfs-progs / 7zip 二次解压）。完整解压留 TODO。
+func (w *SafeWriter) WriteBtrfsFile(
+	file *types.RecoveredFile,
+	source *btrfs.FSTreeFile,
+	sb *btrfs.ExtendedSuperblock,
+	catalog *btrfs.ChunkCatalog,
+	volStart int64,
+	outputPath string,
+) error {
+	if file == nil || source == nil || sb == nil {
+		return fmt.Errorf("WriteBtrfsFile 参数无效")
+	}
+	if file.Size <= 0 {
+		// 0 字节文件 / 损坏 inode：写空文件
+		dir := filepath.Dir(outputPath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("创建目录失败: %w", err)
+		}
+		f, err := os.Create(outputPath)
+		if err != nil {
+			return err
+		}
+		f.Close()
+		return nil
+	}
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	tmpPath := outputPath + ".tmp"
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writeHasher := sha256.New()
+	totalWritten := int64(0)
+	remaining := file.Size
+
+	for _, ext := range source.Extents {
+		if remaining <= 0 {
+			break
+		}
+		segLen := int64(ext.Length)
+		if segLen > remaining {
+			segLen = remaining
+		}
+
+		var data []byte
+		switch {
+		case ext.IsInline:
+			// inline data 也可能被压缩（小文件 + 高压缩率场景）
+			if ext.Compression != btrfs.BTRFS_COMPRESSION_NONE {
+				dec, err := btrfs.DecompressExtent(ext.InlineData, ext.Compression, ext.Length, ext.ExtentOffset)
+				if err != nil {
+					logger.Warn("Btrfs inline 解压失败 → 写零段", "compression", ext.Compression, "err", err)
+					data = make([]byte, segLen)
+				} else {
+					data = dec
+				}
+			} else {
+				data = ext.InlineData
+			}
+			if int64(len(data)) > segLen {
+				data = data[:segLen]
+			}
+		case ext.IsPrealloc, ext.DiskLogical == 0:
+			// preallocated / hole：写零
+			data = make([]byte, segLen)
+		default:
+			physical, err := catalog.MapLogical(ext.DiskLogical)
+			if err != nil {
+				logger.Warn("Btrfs MapLogical 失败 → 写零段", "logical", ext.DiskLogical, "err", err)
+				data = make([]byte, segLen)
+				break
+			}
+			// 读盘字节数：压缩 extent 读 DiskNumBytes，未压缩读 segLen
+			readBytes := segLen
+			if ext.Compression != btrfs.BTRFS_COMPRESSION_NONE && ext.DiskNumBytes > 0 {
+				readBytes = int64(ext.DiskNumBytes)
+			}
+			raw := make([]byte, readBytes)
+			n, err := w.reader.ReadAt(raw, volStart+physical)
+			if err != nil && n == 0 {
+				return fmt.Errorf("读 btrfs extent @physical %d 失败: %w", physical, err)
+			}
+			raw = raw[:n]
+
+			if ext.Compression != btrfs.BTRFS_COMPRESSION_NONE {
+				dec, err := btrfs.DecompressExtent(raw, ext.Compression, uint64(segLen), ext.ExtentOffset)
+				if err != nil {
+					logger.Warn("Btrfs 解压失败 → 写零段", "compression", ext.Compression, "err", err)
+					data = make([]byte, segLen)
+				} else {
+					data = dec
+				}
+			} else {
+				data = raw
+			}
+		}
+
+		written, err := tmpFile.Write(data)
+		if err != nil {
+			return fmt.Errorf("写临时文件失败: %w", err)
+		}
+		writeHasher.Write(data[:written])
+		totalWritten += int64(written)
+		remaining -= int64(written)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	sizeMismatch := totalWritten != file.Size
+	writeSHA := writeHasher.Sum(nil)
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return err
+	}
+	cleanupTmp = false
+
+	verifySHA, err := fileSHA256(outputPath)
+	if err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+	if !sha256Equal(writeSHA, verifySHA) {
+		os.Remove(outputPath)
+		return fmt.Errorf("btrfs 文件 SHA256 校验失败")
+	}
+
+	if sizeMismatch {
+		return &PartialWriteError{OutputPath: outputPath, Expected: file.Size, Written: totalWritten}
+	}
+
+	file.SHA256 = hex.EncodeToString(writeSHA)
+	applyTimestamps(outputPath, file)
+	logger.Info("btrfs 文件写入成功",
+		"path", outputPath,
+		"size", types.FormatSize(totalWritten),
+		"extents", len(source.Extents),
 		"sha256_prefix", fmt.Sprintf("%x", writeSHA[:8]))
 	return nil
 }

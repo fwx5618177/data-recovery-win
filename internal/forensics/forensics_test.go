@@ -46,9 +46,11 @@ func TestWriteDFXML_ContainsHashAndFile(t *testing.T) {
 			FileName:     "evidence.jpg",
 			OriginalPath: "/Users/x/Desktop/evidence.jpg",
 			Size:         12345,
+			Offset:       65536,
 			ModifiedTime: &tm,
 			SHA256:       "abc123",
 			Source:       "ntfs",
+			IsDeleted:    true,
 		},
 	}
 	var buf bytes.Buffer
@@ -57,14 +59,45 @@ func TestWriteDFXML_ContainsHashAndFile(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"<dfxml version=\"1.0\"",
+		`xmlns="http://www.forensicswiki.org/wiki/Category:DFXML"`,
+		`xmlns:dc="http://purl.org/dc/elements/1.1/"`,
+		`version="1.0"`,
 		"<filename>/Users/x/Desktop/evidence.jpg</filename>",
 		"<filesize>12345</filesize>",
-		"sha256",
+		`<byte_run img_offset="65536" len="12345"></byte_run>`,
+		`<unalloc>1</unalloc>`,
+		`type="sha256"`,
 		"abc123",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("DFXML 输出缺 %q", want)
+		}
+	}
+}
+
+// 含 source 的输出验证：image_filename / image_size 都得在
+func TestWriteDFXMLWithSource_IncludesSource(t *testing.T) {
+	files := []*types.RecoveredFile{
+		{ID: "y", FileName: "x.txt", Size: 100, Offset: 1024},
+	}
+	src := &SourceInfo{
+		ImageFilename: "/dev/sda",
+		ImageSize:     1024 * 1024 * 1024,
+		SectorSize:    512,
+	}
+	var buf bytes.Buffer
+	if err := WriteDFXMLWithSource(&buf, "DataRecovery", "v2", src, files); err != nil {
+		t.Fatalf("WriteDFXMLWithSource: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"<source>",
+		"<image_filename>/dev/sda</image_filename>",
+		"<image_size>1073741824</image_size>",
+		"<sectorsize>512</sectorsize>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("source 区块缺 %q", want)
 		}
 	}
 }

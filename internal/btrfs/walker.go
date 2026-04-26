@@ -41,6 +41,7 @@ type FSTreeFile struct {
 	InoID      uint64
 	ParentID   uint64 // 0 = 根 (objectid 256 是 FS root inode)
 	Name       string
+	FullPath   string // 完整路径（如 "/Documents/photo.jpg"），EnumerateFSTreeFiles 末尾回溯填充
 	Size       uint64
 	IsDir      bool
 	IsSymlink  bool
@@ -52,12 +53,15 @@ type FSTreeFile struct {
 
 // FSExtent 文件的一段 data extent
 type FSExtent struct {
-	FileOffset  uint64 // 在文件内 offset
-	Length      uint64
-	DiskLogical uint64 // Btrfs logical 地址（需 chunk tree 翻译）
-	IsInline    bool
-	InlineData  []byte // IsInline=true 时 inline content
-	IsPrealloc  bool   // preallocated（未写入实际数据）
+	FileOffset    uint64 // 在文件内 offset
+	Length        uint64 // 该 extent 在文件里覆盖的解压后字节数 (num_bytes)
+	DiskLogical   uint64 // Btrfs logical 地址（需 chunk tree 翻译）
+	DiskNumBytes  uint64 // 该 extent 在盘上占的字节数（压缩后大小，未压缩时 = Length）
+	ExtentOffset  uint64 // 在 extent 里的偏移（用于稀疏 / 反向 reflink）
+	IsInline      bool
+	InlineData    []byte // IsInline=true 时 inline content
+	IsPrealloc    bool   // preallocated（未写入实际数据）
+	Compression   uint8  // 0=none, 1=zlib, 2=LZO, 3=ZSTD（per-extent；同一文件可能混用）
 }
 
 // ChunkCatalog chunk tree 完整遍历后得到的全量 logical→physical 映射
@@ -349,6 +353,38 @@ func EnumerateFSTreeFiles(reader disk.DiskReader, volStart int64, sb *ExtendedSu
 		}
 		out = append(out, f)
 	}
+
+	// 5. 完整路径回溯：用 parentOf + nameOf 链 inode → "/dir/sub/file.txt"
+	//    BTRFS root inode = 256；遇到 256 / 0 / 自指都停止。256 层兜底防 loop。
+	pathCache := map[uint64]string{256: ""} // root 路径是空（添加 / 时由调用方拼）
+	const maxDepth = 256
+	var resolve func(id uint64, depth int) string
+	resolve = func(id uint64, depth int) string {
+		if id == 256 || id == 0 {
+			return ""
+		}
+		if depth > maxDepth {
+			return ""
+		}
+		if p, ok := pathCache[id]; ok {
+			return p
+		}
+		name := nameOf[id]
+		if name == "" {
+			return "" // 没文件名 → 不构建路径
+		}
+		parent := parentOf[id]
+		parentPath := resolve(parent, depth+1)
+		full := parentPath + "/" + name
+		pathCache[id] = full
+		return full
+	}
+	for _, f := range out {
+		if p := resolve(f.InoID, 0); p != "" {
+			f.FullPath = p
+		}
+	}
+
 	return out, nil
 }
 
@@ -432,10 +468,10 @@ func parseExtentData(fileOffset uint64, v []byte) *FSExtent {
 	compression := v[16]
 	extentType := v[20]
 	e := &FSExtent{
-		FileOffset: fileOffset,
-		Length:     ramBytes,
+		FileOffset:  fileOffset,
+		Length:      ramBytes,
+		Compression: compression,
 	}
-	_ = compression // 记录到 file 级而非 extent 级
 	switch extentType {
 	case 0: // INLINE
 		e.IsInline = true
@@ -446,14 +482,16 @@ func parseExtentData(fileOffset uint64, v []byte) *FSExtent {
 	case 1: // REGULAR
 		if len(v) >= 53 {
 			e.DiskLogical = binary.LittleEndian.Uint64(v[21:29])
-			// disk_num_bytes v[29:37]
-			// offset v[37:45]
+			e.DiskNumBytes = binary.LittleEndian.Uint64(v[29:37])
+			e.ExtentOffset = binary.LittleEndian.Uint64(v[37:45])
 			e.Length = binary.LittleEndian.Uint64(v[45:53])
 		}
 	case 2: // PREALLOC
 		e.IsPrealloc = true
 		if len(v) >= 53 {
 			e.DiskLogical = binary.LittleEndian.Uint64(v[21:29])
+			e.DiskNumBytes = binary.LittleEndian.Uint64(v[29:37])
+			e.ExtentOffset = binary.LittleEndian.Uint64(v[37:45])
 			e.Length = binary.LittleEndian.Uint64(v[45:53])
 		}
 	}

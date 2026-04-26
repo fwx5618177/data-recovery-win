@@ -88,7 +88,13 @@ func main() {
 }
 
 // flagsAfter 把"位置参数 + flag"的简单解析合并：返回 (positional, kvFlags)。
-// flag 必须形如 --key value 或 --key=value；无 flag 后跟值的 bool 暂不支持。
+//
+// 支持三种形式：
+//   --key=value    显式赋值
+//   --key value    下一个 token 作为值（要求 token 不以 -- 开头）
+//   --key          独立 flag → kvFlags[key] = "true"，bool flag 走这条
+//
+// 不支持 -k 短 flag（保持简单；CLI 入口本来就只暴露少数命令）。
 func flagsAfter(args []string) ([]string, map[string]string) {
 	pos := []string{}
 	kv := map[string]string{}

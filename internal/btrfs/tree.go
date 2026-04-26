@@ -350,8 +350,440 @@ func ReadTreeBlock(reader disk.DiskReader, sb *ExtendedSuperblock, logical uint6
 	return buf, h, nil
 }
 
-// 占位函数 —— 下一阶段要做的：
-//   WalkRootTree(sb): 从 root tree root 遍历找所有 FS tree / DIR / INODE
-//   WalkFSTree(sb, fsTreeRoot): 遍历指定 FS tree，yield 每个 inode + path
-//   ReadInode(sb, inode): 组合 INODE_ITEM + EXTENT_DATA → 文件大小 + data block 位置
-//   ReadExtentData(sb, extent): 对 (logical, length) 读实际文件字节
+// ============================================================================
+// B-tree walker
+// ============================================================================
+
+// LeafCallback 在 leaf 上每个 item 触发。返回 false 表示停止整个 walk。
+// data 是 item 在 leaf block 内的 payload 切片（不要保留引用，遍历继续后会被覆盖）。
+type LeafCallback func(key Key, data []byte) bool
+
+const btrfsMaxTreeDepth = 16 // Btrfs 实际最大深度
+
+// WalkTree 从 logical 地址开始递归走 B-tree，对所有 leaf 上的每个 item 调用 cb。
+//
+// 不做完整 cycle detection（Btrfs CoW 设计上 logical 地址唯一），但用 maxDepth
+// 兜底，防止损坏镜像让 walker 死循环。
+func WalkTree(reader disk.DiskReader, sb *ExtendedSuperblock, logical uint64, cb LeafCallback) error {
+	return walkTree(reader, sb, logical, cb, 0)
+}
+
+func walkTree(reader disk.DiskReader, sb *ExtendedSuperblock, logical uint64, cb LeafCallback, depth int) error {
+	if depth > btrfsMaxTreeDepth {
+		return fmt.Errorf("btrfs tree 深度超过 %d 限制（loop / 损坏？）", btrfsMaxTreeDepth)
+	}
+	block, hdr, err := ReadTreeBlock(reader, sb, logical)
+	if err != nil {
+		return err
+	}
+	if hdr.Level == 0 {
+		// leaf —— 解 items + 调 callback
+		items, err := ParseLeafItems(block, hdr)
+		if err != nil {
+			return err
+		}
+		for _, it := range items {
+			start := int(it.DataOffset) + btrfsHeaderSize
+			end := start + int(it.DataSize)
+			if start < btrfsHeaderSize || end > len(block) || start > end {
+				continue
+			}
+			if !cb(it.Key, block[start:end]) {
+				return nil
+			}
+		}
+		return nil
+	}
+	// inner node —— 遍历 keyptr 数组并递归
+	for i := uint32(0); i < hdr.NumItems; i++ {
+		off := btrfsHeaderSize + int(i)*btrfsKeyPtrSize
+		if off+btrfsKeyPtrSize > len(block) {
+			break
+		}
+		childLogical := binary.LittleEndian.Uint64(block[off+btrfsKeySize : off+btrfsKeySize+8])
+		if err := walkTree(reader, sb, childLogical, cb, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ============================================================================
+// FS-tree 实体类型解析
+// ============================================================================
+
+// INodeItem btrfs INODE_ITEM (key.type == 0x01) 关键字段
+type INodeItem struct {
+	Generation uint64 // 创建时事务号
+	Size       uint64 // 文件字节数
+	NBytes     uint64 // 实际占用字节
+	Mode       uint32 // POSIX mode（含文件类型 high bits）
+	UID        uint32
+	GID        uint32
+	Atime      uint64 // sec since epoch
+	Ctime      uint64
+	Mtime      uint64
+}
+
+// ParseINodeItem 解析 INODE_ITEM data 区。
+//
+// Layout (struct btrfs_inode_item, kernel ctree.h)：
+//
+//	off  size  field
+//	0    8     generation
+//	8    8     transid
+//	16   8     size
+//	24   8     nbytes
+//	32   8     block_group
+//	40   4     nlink
+//	44   4     uid
+//	48   4     gid
+//	52   4     mode
+//	56   8     rdev
+//	64   8     flags
+//	72   8     sequence
+//	80   32    reserved
+//	112  12    atime (struct btrfs_timespec: sec(8) + nsec(4))
+//	124  12    ctime
+//	136  12    mtime
+//	148  12    otime
+func ParseINodeItem(data []byte) (*INodeItem, error) {
+	if len(data) < 160 {
+		return nil, fmt.Errorf("INODE_ITEM 太短: %d", len(data))
+	}
+	return &INodeItem{
+		Generation: binary.LittleEndian.Uint64(data[0:8]),
+		Size:       binary.LittleEndian.Uint64(data[16:24]),
+		NBytes:     binary.LittleEndian.Uint64(data[24:32]),
+		UID:        binary.LittleEndian.Uint32(data[44:48]),
+		GID:        binary.LittleEndian.Uint32(data[48:52]),
+		Mode:       binary.LittleEndian.Uint32(data[52:56]),
+		Atime:      binary.LittleEndian.Uint64(data[112:120]),
+		Ctime:      binary.LittleEndian.Uint64(data[124:132]),
+		Mtime:      binary.LittleEndian.Uint64(data[136:144]),
+	}, nil
+}
+
+// ExtentDataType 文件 extent 的存储模式
+type ExtentDataType uint8
+
+const (
+	ExtentDataInline  ExtentDataType = 0 // 数据直接驻留（小文件）
+	ExtentDataRegular ExtentDataType = 1 // 通常 extent（指向 extent tree）
+	ExtentDataPrealloc ExtentDataType = 2 // 预分配但未写
+)
+
+// ExtentData EXTENT_DATA item 关键字段。
+//
+// EXTENT_DATA Layout (struct btrfs_file_extent_item):
+//
+//	off  size  field
+//	0    8     generation
+//	8    8     ram_bytes (decompressed length)
+//	16   1     compression (0=none, 1=zlib, 2=lzo, 3=zstd)
+//	17   1     encryption
+//	18   2     other_encoding
+//	20   1     type (0=inline, 1=regular, 2=prealloc)
+//	if type == inline：
+//	  21..   inline data (length = ram_bytes; possibly compressed)
+//	if type != inline：
+//	  21   8 disk_bytenr (extent 在 extent tree 的 logical 地址；0 = hole)
+//	  29   8 disk_num_bytes
+//	  37   8 offset (extent 内部偏移)
+//	  45   8 num_bytes (本 extent 在文件里覆盖的字节数)
+type ExtentData struct {
+	RamBytes      uint64
+	Compression   uint8
+	Type          ExtentDataType
+	InlineData    []byte // 仅 Type == ExtentDataInline 时有效
+	DiskByteNr    uint64 // 仅 Type != Inline；0 = hole
+	DiskNumBytes  uint64
+	Offset        uint64
+	NumBytes      uint64
+}
+
+// ParseExtentData 解析 EXTENT_DATA item data 区。
+func ParseExtentData(data []byte) (*ExtentData, error) {
+	if len(data) < 21 {
+		return nil, fmt.Errorf("EXTENT_DATA 太短: %d", len(data))
+	}
+	e := &ExtentData{
+		RamBytes:    binary.LittleEndian.Uint64(data[8:16]),
+		Compression: data[16],
+		Type:        ExtentDataType(data[20]),
+	}
+	if e.Type == ExtentDataInline {
+		e.InlineData = append([]byte{}, data[21:]...)
+		return e, nil
+	}
+	if len(data) < 53 {
+		return nil, fmt.Errorf("non-inline EXTENT_DATA 太短: %d", len(data))
+	}
+	e.DiskByteNr = binary.LittleEndian.Uint64(data[21:29])
+	e.DiskNumBytes = binary.LittleEndian.Uint64(data[29:37])
+	e.Offset = binary.LittleEndian.Uint64(data[37:45])
+	e.NumBytes = binary.LittleEndian.Uint64(data[45:53])
+	return e, nil
+}
+
+// RootItem ROOT_ITEM data 关键字段（root tree 里 keyTypeRootItem item 用）。
+//
+// 真实 Layout 大（439 字节），我们只取需要的：
+//
+//	off  size  field
+//	0    160   inode (struct btrfs_inode_item)
+//	160  8     generation
+//	168  8     root_dirid
+//	176  8     bytenr (← 这棵 tree 的 root block logical 地址)
+//	184  8     byte_limit
+//	192  8     bytes_used
+//	200  8     last_snapshot
+//	208  8     flags
+//	216  4     refs
+//	...
+type RootItem struct {
+	ByteNr     uint64 // 这棵子 tree 的 root logical 地址
+	Generation uint64
+	RootDirID  uint64
+	BytesUsed  uint64
+	Flags      uint64
+}
+
+// ParseRootItem 解析 ROOT_ITEM。最少需要 220 字节才能取到 ByteNr。
+func ParseRootItem(data []byte) (*RootItem, error) {
+	if len(data) < 200 {
+		return nil, fmt.Errorf("ROOT_ITEM 太短: %d", len(data))
+	}
+	return &RootItem{
+		Generation: binary.LittleEndian.Uint64(data[160:168]),
+		RootDirID:  binary.LittleEndian.Uint64(data[168:176]),
+		ByteNr:     binary.LittleEndian.Uint64(data[176:184]),
+		BytesUsed:  binary.LittleEndian.Uint64(data[192:200]),
+	}, nil
+}
+
+// WalkRootTree 走 root tree，对每个 ROOT_ITEM 触发 cb（拿到子 tree 的 logical 入口）。
+//
+// 典型用途：列出所有子卷 / snapshot 的 FS-tree 根，再对每个走 WalkFSTree。
+func WalkRootTree(reader disk.DiskReader, sb *ExtendedSuperblock, cb func(key Key, item *RootItem) bool) error {
+	if sb == nil || sb.RootTreeLogical == 0 {
+		return fmt.Errorf("root tree logical 地址为 0")
+	}
+	return WalkTree(reader, sb, sb.RootTreeLogical, func(k Key, data []byte) bool {
+		if k.Type != keyTypeRootItem {
+			return true
+		}
+		ri, err := ParseRootItem(data)
+		if err != nil {
+			return true
+		}
+		return cb(k, ri)
+	})
+}
+
+// DirEntry btrfs DIR_ITEM (key.type == 0x54) 单条 dir entry。
+//
+// 一个 DIR_ITEM data 区可包含多条（同一 hash 的冲突链），但实际中通常 1 条。
+// Layout (struct btrfs_dir_item)：
+//
+//	off  size  field
+//	0    17    location (struct btrfs_disk_key)：被指向的 inode 的 (objectid, type, offset)
+//	17   8     transid
+//	25   2     data_len   (xattr 才用)
+//	27   2     name_len
+//	29   1     type       (BTRFS_FT_*：0=unknown, 1=regular, 2=dir, 3=chrdev, 4=blkdev,
+//	                                   5=fifo, 6=sock, 7=symlink, 8=xattr)
+//	30   ...   name (UTF-8 if locale supports)
+//	then optional xattr data
+type DirEntry struct {
+	ChildObjectID uint64 // 被指向的 inode objectid（child）
+	ChildType     uint8  // BTRFS_FT_*
+	NameLen       uint16
+	Name          string
+}
+
+// ParseDirItem 解析一段 DIR_ITEM data 区（可能含多个 entry —— hash 冲突链）。
+// data 是 leaf item 的 data 区切片。
+func ParseDirItem(data []byte) ([]DirEntry, error) {
+	var out []DirEntry
+	pos := 0
+	for pos+30 <= len(data) {
+		childObjID := binary.LittleEndian.Uint64(data[pos : pos+8])
+		// type byte at offset 8 of disk_key (we don't need it)
+		dataLen := binary.LittleEndian.Uint16(data[pos+25 : pos+27])
+		nameLen := binary.LittleEndian.Uint16(data[pos+27 : pos+29])
+		ftype := data[pos+29]
+		nameStart := pos + 30
+		nameEnd := nameStart + int(nameLen)
+		if nameEnd > len(data) {
+			break
+		}
+		out = append(out, DirEntry{
+			ChildObjectID: childObjID,
+			ChildType:     ftype,
+			NameLen:       nameLen,
+			Name:          string(data[nameStart:nameEnd]),
+		})
+		pos = nameEnd + int(dataLen) // 跳过可选 xattr data
+	}
+	return out, nil
+}
+
+// FSItem 是 WalkFSTree 给 callback 的统一返回项 —— inode + 它的 extents + 它的 dir entries。
+//
+// 每个 FS tree 里 INODE_ITEM / EXTENT_DATA / DIR_ITEM 都是 leaf item，
+// 按 key 严格排序：(objectid, type, offset)。所以同一 objectid 的所有 item
+// 会聚集出现，objectid 切换时把上一个 batch 一次性报给 callback。
+//
+// 注意：DirEntries 是 *本目录里的子项*（即 ObjectID 是目录 inode 时才有）；
+// 文件本身的 *自己叫什么名字* 在父目录的 DIR_ITEM 里 —— 上层要建立完整路径
+// 需要先收集所有 (parent → children) 边再回溯。
+type FSItem struct {
+	ObjectID   uint64
+	INode      *INodeItem
+	Extents    []*ExtentData
+	DirEntries []DirEntry
+}
+
+// BTRFS file types（DirEntry.ChildType）
+const (
+	BTRFS_FT_UNKNOWN = 0
+	BTRFS_FT_REG     = 1 // 普通文件
+	BTRFS_FT_DIR     = 2 // 目录
+	BTRFS_FT_CHRDEV  = 3
+	BTRFS_FT_BLKDEV  = 4
+	BTRFS_FT_FIFO    = 5
+	BTRFS_FT_SOCK    = 6
+	BTRFS_FT_SYMLINK = 7
+	BTRFS_FT_XATTR   = 8 // 不是真文件类型，是 dir item 内嵌 xattr 的标记
+)
+
+// 根目录 objectid（FS tree 里）
+const FSTreeRootObjectID = 256
+
+// BuildPathMap 走一遍 FS tree，构建 (childObjectID → 完整路径) 映射。
+//
+// 用法：先 BuildPathMap，再 WalkFSTree 第二遍把 inode + extents 关联到路径。
+// 两遍走是因为 dir entry 的"父→子"边只有走完整棵 tree 才能知道任意 inode 的
+// 完整路径。
+//
+// 注意：一个文件可能有多个 hardlink → 多条路径；这里只保留按遍历顺序遇到的
+// 第一条（够大多数恢复场景；hardlink 罕见）。
+func BuildPathMap(reader disk.DiskReader, sb *ExtendedSuperblock, fsTreeLogical uint64) (map[uint64]string, error) {
+	type edge struct {
+		parent uint64
+		name   string
+	}
+	parents := map[uint64]edge{}
+	err := WalkTree(reader, sb, fsTreeLogical, func(k Key, data []byte) bool {
+		if k.Type != keyTypeDirItem && k.Type != keyTypeDirIndex {
+			return true
+		}
+		entries, err := ParseDirItem(data)
+		if err != nil {
+			return true
+		}
+		for _, e := range entries {
+			if e.ChildObjectID == 0 || e.Name == "" {
+				continue
+			}
+			if _, exists := parents[e.ChildObjectID]; exists {
+				continue // 第一条路径优先（hardlink 不重复）
+			}
+			parents[e.ChildObjectID] = edge{parent: k.ObjectID, name: e.Name}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 回溯：每个 child 沿 parents 链回到 root
+	paths := make(map[uint64]string, len(parents)+1)
+	paths[FSTreeRootObjectID] = "/"
+	const maxDepth = 256 // 防异常循环
+	var resolve func(id uint64, depth int) string
+	resolve = func(id uint64, depth int) string {
+		if id == FSTreeRootObjectID {
+			return ""
+		}
+		if depth > maxDepth {
+			return ""
+		}
+		if p, ok := paths[id]; ok {
+			return p
+		}
+		e, ok := parents[id]
+		if !ok {
+			return ""
+		}
+		parentPath := resolve(e.parent, depth+1)
+		if parentPath == "" && e.parent != FSTreeRootObjectID {
+			return ""
+		}
+		full := parentPath + "/" + e.name
+		paths[id] = full
+		return full
+	}
+	for id := range parents {
+		resolve(id, 0)
+	}
+	return paths, nil
+}
+
+// WalkFSTree 走指定 FS tree，按 inode 聚合后调 cb。返回 false 停止。
+func WalkFSTree(reader disk.DiskReader, sb *ExtendedSuperblock, fsTreeLogical uint64, cb func(*FSItem) bool) error {
+	if fsTreeLogical == 0 {
+		return fmt.Errorf("fs tree logical 地址为 0")
+	}
+	var current *FSItem
+	flush := func() bool {
+		if current == nil {
+			return true
+		}
+		ok := cb(current)
+		current = nil
+		return ok
+	}
+
+	err := WalkTree(reader, sb, fsTreeLogical, func(k Key, data []byte) bool {
+		// 切到新 inode 时把上一个推出去
+		if current != nil && current.ObjectID != k.ObjectID {
+			if !flush() {
+				return false
+			}
+		}
+		switch k.Type {
+		case keyTypeInodeItem:
+			ino, err := ParseINodeItem(data)
+			if err != nil {
+				return true
+			}
+			current = &FSItem{ObjectID: k.ObjectID, INode: ino}
+		case keyTypeExtentData:
+			if current == nil || current.ObjectID != k.ObjectID {
+				current = &FSItem{ObjectID: k.ObjectID}
+			}
+			ext, err := ParseExtentData(data)
+			if err != nil {
+				return true
+			}
+			current.Extents = append(current.Extents, ext)
+		case keyTypeDirItem, keyTypeDirIndex:
+			if current == nil || current.ObjectID != k.ObjectID {
+				current = &FSItem{ObjectID: k.ObjectID}
+			}
+			entries, err := ParseDirItem(data)
+			if err != nil {
+				return true
+			}
+			current.DirEntries = append(current.DirEntries, entries...)
+		}
+		return true
+	})
+	if err != nil {
+		return err
+	}
+	flush()
+	return nil
+}

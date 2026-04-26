@@ -1,6 +1,6 @@
 .PHONY: dev build build-windows build-windows-arm64 build-darwin build-darwin-universal \
         build-linux build-linux-arm64 build-all test lint clean deps install-wails check-wails \
-        verify-platforms
+        verify-platforms drift-check drift-check-strict
 
 # Go 代理设置（解决国内/网络不稳定环境下载依赖超时问题）
 # 可通过环境变量覆盖，例如: GOPROXY=https://proxy.golang.org,direct make deps
@@ -65,6 +65,15 @@ test:
 
 lint:
 	go vet ./...
+
+# 扫描"注释声称的保护层在代码里没实现"的漂移（CHANGELOG v2.0.1 里两起 bug 的同源防线）。
+# drift-check: 只报告，exit 0。适合日常 check。
+# drift-check-strict: 发现就 exit 1。CI 用。
+drift-check:
+	@go run ./cmd/drift-check
+
+drift-check-strict:
+	@go run ./cmd/drift-check -strict
 
 # 只跑平台交叉编译冒烟，不依赖 wails CLI（CI 快速验证）
 verify-platforms:

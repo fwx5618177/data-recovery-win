@@ -129,15 +129,11 @@ func EnsureKeyPair(keysDir string) (ed25519.PublicKey, ed25519.PrivateKey, error
 
 // SignCustody 在已填 hash chain 的 Custody 基础上签名 + 申请时间戳。
 //
-// 步骤：
-//  1. Marshal manifest（不含 signature/tsa 字段）
-//  2. Ed25519 sign
-//  3. 把 manifest 的 sha256 发给 TSA → 拿 TimeStampResp
-//  4. 把 signature / TSA response 回填到 SignedCustody
-//  5. 返回 SignedCustody（调用方负责 MarshalIndent 写文件）
+// 这是 LocalEd25519Signer 的 wrapper，向后兼容老调用点。
+// 新代码建议直接用 SignCustodyWithSigner 传任意 Signer（HSM / KMS / external CLI）。
 //
-// privKey 为 nil 时从 $CONFIG_DIR/keys 读（或首次生成）
-// tsaURLs 为 nil 时用 DefaultTSAURLs 依次尝试；全部失败 TST 字段留空（签名仍完成）
+// privKey 为 nil 时从 $CONFIG_DIR/keys 读（或首次生成）。
+// tsaURLs 为 nil 时用 DefaultTSAURLs 依次尝试；全部失败 TST 字段留空（签名仍完成）。
 func SignCustody(c Custody, privKey ed25519.PrivateKey, tsaURLs []string) (*SignedCustody, error) {
 	if privKey == nil {
 		_, pk, err := EnsureKeyPair("")
@@ -146,7 +142,29 @@ func SignCustody(c Custody, privKey ed25519.PrivateKey, tsaURLs []string) (*Sign
 		}
 		privKey = pk
 	}
-	pub := privKey.Public().(ed25519.PublicKey)
+	signer := &LocalEd25519Signer{priv: privKey}
+	return signCustodyCanonical(c, signer, tsaURLs)
+}
+
+// signCustodyCanonical 是 SignCustody 和 SignCustodyWithSigner 共用的核心实现。
+//
+// 所有签名后端走同一 canonical 序列化路径，确保 verify 端不论后端都能用
+// "重 marshal → 比对 signature" 的统一算法。
+//
+// 步骤：
+//  1. base custody（清空 hash + signature 相关字段）→ MarshalIndent → sha256 → ManifestSHA256
+//  2. 装 SignedCustody.SignaturePublicKey + SignatureScheme（来自 signer）
+//  3. 再次 MarshalIndent（含 ManifestSHA256 + pub + scheme，但 Signature / TSA 仍空）→ signBytes
+//  4. signer.Sign(signBytes) → Signature
+//  5. 可选 TSA timestamp
+func signCustodyCanonical(c Custody, signer Signer, tsaURLs []string) (*SignedCustody, error) {
+	if signer == nil {
+		return nil, fmt.Errorf("signer 为 nil")
+	}
+	pub, err := signer.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("读公钥: %w", err)
+	}
 
 	// 清空签名相关字段后做 manifest hash
 	base := c
@@ -158,17 +176,17 @@ func SignCustody(c Custody, privKey ed25519.PrivateKey, tsaURLs []string) (*Sign
 	sum := sha256.Sum256(manifestBytes)
 	c.ManifestSHA256 = hex.EncodeToString(sum[:])
 
-	// Ed25519 签名对象：直接签 manifest 全文（含 ManifestSHA256 字段）
-	// 这样 verify 时只要 unmarshal 出来把 Signature/TSA 置空，重 marshal 算 hash 重 verify 就行
 	signed := SignedCustody{Custody: c}
 	signed.SignaturePublicKey = base64.StdEncoding.EncodeToString(pub)
-	signed.SignatureScheme = "ed25519"
-	// 再做一次 marshal，这次含 ManifestSHA256 + pub + scheme，但 signature / tsa 仍空
+	signed.SignatureScheme = signer.Scheme()
 	signBytes, err := json.MarshalIndent(signed, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal for sign: %w", err)
 	}
-	sig := ed25519.Sign(privKey, signBytes)
+	sig, err := signer.Sign(signBytes)
+	if err != nil {
+		return nil, fmt.Errorf("signer.Sign: %w", err)
+	}
 	signed.Signature = base64.StdEncoding.EncodeToString(sig)
 
 	// 申请 TSA 时间戳（签名内容的 sha256 作为 messageImprint）

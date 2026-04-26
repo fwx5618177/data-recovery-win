@@ -86,6 +86,13 @@ type MFTEntry struct {
 	// 把它们里面的 $DATA DataRun 合并回主条目。
 	attributeListRefs []int64
 
+	// 非 resident $ATTRIBUTE_LIST：当 $ATTRIBUTE_LIST 本身大到塞不进 MFT 记录
+	// （罕见，但确实存在 —— 极极碎片化 + 多 ADS 的"惊人复杂"文件），它会以
+	// non-resident 形式存在。这两个字段在 parseAttributes 阶段填好；
+	// resolveAttributeList 阶段先按 DataRuns 读到内存，再解出真正的 refs。
+	attributeListNonResidentRuns []DataRun
+	attributeListNonResidentSize int64
+
 	// AlternateStreams NTFS ADS 流元数据列表（命名 $DATA 流）。
 	// 主流（匿名 $DATA）仍然走 ResidentData / DataRuns；这里只收集命名流。
 	AlternateStreams []ADSStream
@@ -354,6 +361,12 @@ func (s *Scanner) resolveAttributeList(
 		return
 	}
 
+	// 若 $ATTRIBUTE_LIST 本身是 non-resident：先按 DataRuns 把数据读到内存、
+	// 解出真正的 child refs，再走和 resident 一样的 ref 遍历路径。
+	if len(entry.attributeListNonResidentRuns) > 0 && entry.attributeListNonResidentSize > 0 {
+		s.expandNonResidentAttributeList(entry, boot, partitionOffset)
+	}
+
 	// 防护：每个条目最多处理 64 个子 ref，避免恶意/损坏数据导致无限递归
 	maxRefs := len(entry.attributeListRefs)
 	if maxRefs > 64 {
@@ -408,6 +421,56 @@ func (s *Scanner) resolveAttributeList(
 			entry.ResidentData = append(entry.ResidentData, child.ResidentData...)
 		}
 	}
+}
+
+// expandNonResidentAttributeList 按 entry.attributeListNonResidentRuns 把
+// $ATTRIBUTE_LIST 自身的字节数据从盘上读出来，再喂给 parseAttributeListContent
+// 解出真正的 attributeListRefs。
+//
+// 失败（任何 IO / 数据校验错）保持静默——entry.attributeListRefs 留空，
+// 上层会按"不可解析的 attribute list"处理（可能漏部分 DataRun，但不崩）。
+//
+// 防护：单 entry 的 attribute list 数据上限 1MB（cryptsetup-like 大文件已经
+// 远超合理范围；防止恶意/损坏数据导致 OOM）。
+func (s *Scanner) expandNonResidentAttributeList(entry *MFTEntry, boot *BootSector, partitionOffset int64) {
+	const maxAttributeListBytes = 1 * 1024 * 1024
+	totalSize := entry.attributeListNonResidentSize
+	if totalSize <= 0 || totalSize > maxAttributeListBytes {
+		return
+	}
+
+	buf := make([]byte, totalSize)
+	written := int64(0)
+	for _, run := range entry.attributeListNonResidentRuns {
+		if written >= totalSize {
+			break
+		}
+		runBytes := run.ClusterCount * boot.ClusterSize
+		want := runBytes
+		if written+want > totalSize {
+			want = totalSize - written
+		}
+		if run.Sparse {
+			// 稀疏段：buf 已经是 0，只推进 written
+			written += want
+			continue
+		}
+		diskOffset := partitionOffset + run.ClusterOffset*boot.ClusterSize
+		nr, err := s.reader.ReadAt(buf[written:written+want], diskOffset)
+		if err != nil && err != io.EOF {
+			return
+		}
+		if int64(nr) < want {
+			// 短读：截到实际拿到的字节，仍尝试解析前缀
+			written += int64(nr)
+			break
+		}
+		written += want
+	}
+	if written == 0 {
+		return
+	}
+	parseAttributeListContent(buf[:written], entry)
 }
 
 // FindDeletedFiles 从 MFT 条目中筛选可恢复的已删除文件
@@ -801,11 +864,14 @@ func (s *Scanner) parseAttribute(data []byte, offset int, entry *MFTEntry) (attr
 // 单个 1024 字节 MFT 记录放不下，NTFS 会把多余属性搬到独立的子 MFT 记录，
 // 主记录留一个 $ATTRIBUTE_LIST 属性作为索引。
 //
-// 此处仅处理 resident（最常见）情况：逐条目读出 MFT 引用，收集到
-// `entry.attributeListRefs`；非 resident 情况（$ATTRIBUTE_LIST 本身也被拆散，
-// 极少见）暂不支持，将被上层当作"普通文件"处理，部分 DataRun 可能漏掉。
+// 两种存在形式：
+//   - resident：list entries 直接驻留在 MFT 记录里（绝大多数情况）
+//   - non-resident：$ATTRIBUTE_LIST 自己也大到塞不下 → 它本身有 DataRuns，
+//     真正的 list entries 在那些 cluster 上。这里把 DataRuns + size 存进
+//     entry.attributeListNonResidentRuns/Size，等 resolveAttributeList 阶段
+//     再读。这种"双层间接"在极碎片化 + 多 ADS 的文件上会出现。
 //
-// 每个 list entry 结构：
+// 每个 list entry 结构（两种形式 payload 一致）：
 //
 //	offset 0: attrType   uint32
 //	offset 4: recordLen  uint16
@@ -817,15 +883,53 @@ func (s *Scanner) parseAttribute(data []byte, offset int, entry *MFTEntry) (attr
 //	offset 24: name      UTF-16 (可选)
 func (s *Scanner) handleAttributeListAttr(data []byte, offset int, nonResident uint8, attrLen int, entry *MFTEntry) {
 	if nonResident != 0 {
-		// 非 resident 需要先读 $ATTRIBUTE_LIST 自己的 DataRun，再从中解析 list entries。
-		// 实际磁盘上出现概率极低，这里先标记日志，按"不支持"处理
+		// 非 resident：解出 DataRuns + 真实 size 存起来；resolveAttributeList
+		// 阶段读出来，再按 parseAttributeListContent 解析
+		s.collectNonResidentAttributeList(data, offset, attrLen, entry)
 		return
 	}
 	content := getResidentContent(data, offset)
 	if content == nil {
 		return
 	}
+	parseAttributeListContent(content, entry)
+	_ = attrLen
+}
 
+// collectNonResidentAttributeList 从 non-resident 属性 header 里抽出 DataRuns
+// + 真实数据大小，存到 entry 上等下一步读盘。
+//
+// non-resident 属性 header 关键偏移（相对属性起点）：
+//
+//	+0x10: real size   (uint64 LE) —— 我们要的真实数据字节数
+//	+0x20: data runs offset (uint16 LE)
+func (s *Scanner) collectNonResidentAttributeList(data []byte, offset int, attrLen int, entry *MFTEntry) {
+	if offset+0x42 > len(data) {
+		return
+	}
+	if offset+0x30+8 <= len(data) {
+		entry.attributeListNonResidentSize = int64(binary.LittleEndian.Uint64(data[offset+0x30 : offset+0x38]))
+	}
+	runsOffset := int(binary.LittleEndian.Uint16(data[offset+0x20 : offset+0x22]))
+	if runsOffset <= 0 || offset+runsOffset >= len(data) {
+		return
+	}
+	runEnd := offset + attrLen
+	if runEnd > len(data) {
+		runEnd = len(data)
+	}
+	runStart := offset + runsOffset
+	if runStart >= runEnd {
+		return
+	}
+	if runs, err := parseDataRuns(data[runStart:runEnd]); err == nil && len(runs) > 0 {
+		entry.attributeListNonResidentRuns = runs
+	}
+}
+
+// parseAttributeListContent 从一段连续字节流（resident 或读到内存的 non-resident
+// 数据）里解出 list entry 序列，把每个子 MFT 引用累加到 entry.attributeListRefs。
+func parseAttributeListContent(content []byte, entry *MFTEntry) {
 	for pos := 0; pos+24 <= len(content); {
 		recordLen := int(binary.LittleEndian.Uint16(content[pos+4 : pos+6]))
 		if recordLen < 24 || pos+recordLen > len(content) {
@@ -835,7 +939,6 @@ func (s *Scanner) handleAttributeListAttr(data []byte, offset int, nonResident u
 		rawRef := binary.LittleEndian.Uint64(content[pos+16 : pos+24])
 		childEntry := int64(rawRef & 0x0000FFFFFFFFFFFF)
 		if childEntry != entry.EntryNumber && childEntry >= systemEntryLimit {
-			// 不加入自己，不加入系统保留条目；也去重
 			alreadyListed := false
 			for _, r := range entry.attributeListRefs {
 				if r == childEntry {
@@ -849,7 +952,6 @@ func (s *Scanner) handleAttributeListAttr(data []byte, offset int, nonResident u
 		}
 		pos += recordLen
 	}
-	_ = attrLen
 }
 
 // handleStandardInfoAttr 处理 $STANDARD_INFORMATION 属性

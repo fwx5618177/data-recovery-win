@@ -103,6 +103,14 @@ func BuildAndWrite(outputDir string, c Custody) (string, error) {
 	if err := os.WriteFile(dest, out, 0o644); err != nil {
 		return "", err
 	}
+
+	// 同时写 binary plist 副本（对 macOS 工具链原生兼容）。
+	// 失败不阻塞 —— JSON 仍是 source-of-truth；plist 只是便利副本。
+	if _, err := WriteCustodyPlist(outputDir, c); err != nil {
+		// 静默：plist 是 nice-to-have，不应让 custody 流程失败
+		_ = err
+	}
+
 	return dest, nil
 }
 

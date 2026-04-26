@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"data-recovery/internal/carver"
@@ -135,6 +134,14 @@ type Engine struct {
 	// HFS+ 扫描缓存（每个文件按 fork extents 恢复）
 	hfsplusSources map[string]hfsplusRecoverySource
 
+	// Btrfs 扫描缓存（每个文件按 extent 列表 + chunk catalog 恢复）
+	btrfsSources map[string]btrfsRecoverySource
+
+	// 加密卷 reader 的 sector cache 引用（如果当前扫描走加密卷链路）。
+	// ScanWithReader 时通过类型断言填充；EncryptedReaderCacheStats() 给前端
+	// 取实时命中率展示。
+	cacheStatsReader cacheStatsProvider
+
 	results    []*types.RecoveredFile
 	scanning   bool
 	recovering bool
@@ -156,6 +163,21 @@ type Engine struct {
 	// 下次 Scan 启动时 carver 起点，消费一次即清零（SetResumeCarverOffset 设置）
 	// 避免重复使用同一个 resume 点
 	nextResumeCarverOffset int64
+
+	// NAS 会话池：Batch 2 新增的 SMB/NFS 扫描持有的远端会话
+	// Shutdown 时统一 Close；Recover 阶段按 nasSources[id] 查 session 拷文件
+	nasSMBSessions []*netfsSMBSession // type alias：见 nas_scan.go 的 import
+	nasNFSSessions []*netfsNFSSession
+	nasSources     map[string]NASRecoverySource
+
+	// iOS 备份会话池（Batch 3）：一次扫描对应一个 *ios.Session；Shutdown 时 Close（删临时明文 Manifest.db）
+	iosSessions []*iosSessionAlias
+	iosSources  map[string]iosRecoverySource
+
+	// Android `.ab` 备份池（Batch 4）。Backup 不持有 fd（每次 reopen），但持有 master key 内存
+	// Shutdown 时清密钥
+	androidBackups []*androidBackupAlias
+	androidSources map[string]androidRecoverySource
 }
 
 // NewEngine 创建新的恢复引擎实例
@@ -252,6 +274,7 @@ func (e *Engine) ScanWithReader(
 	e.extSources = make(map[string]extRecoverySource)
 	e.apfsSources = make(map[string]apfsRecoverySource)
 	e.hfsplusSources = make(map[string]hfsplusRecoverySource)
+	e.btrfsSources = make(map[string]btrfsRecoverySource)
 	e.mu.Unlock()
 
 	defer func() {
@@ -265,6 +288,13 @@ func (e *Engine) ScanWithReader(
 
 	e.mu.Lock()
 	e.reader = reader
+	// 如果 reader 实现了 CacheStats（LUKS / VC / BitLocker DecryptedReader / DecryptingReader），
+	// 缓存住引用让 Engine.EncryptedReaderCacheStats() 能取到命中率
+	if cs, ok := reader.(cacheStatsProvider); ok {
+		e.cacheStatsReader = cs
+	} else {
+		e.cacheStatsReader = nil
+	}
 	e.mu.Unlock()
 
 	// 创建可取消的 context
@@ -415,6 +445,20 @@ func (e *Engine) ScanWithReader(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
+		// 阶段1.95: Btrfs 卷文件枚举（Linux 较新发行版 / Synology / Facebook）
+		btrFiles, btrErr := e.runBtrfsScan(ctx, reader, func(p types.ScanProgress) {
+			p.Percent = 14.95 + p.Percent*0.001
+			safeProgress(p)
+		}, safeFound)
+		if btrErr != nil {
+			logger.Warn("Btrfs 扫描失败或未发现 Btrfs", "err", btrErr)
+		} else {
+			allFiles = append(allFiles, btrFiles...)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("扫描已取消")
+		}
+
 		// 阶段2: 深度扫描 (15-95%) — 占 80% 的总进度，与实际耗时比例更接近
 		carverFiles, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), func(p types.ScanProgress) {
 			p.Percent = 15.0 + p.Percent*0.80
@@ -477,492 +521,6 @@ func (e *Engine) ScanWithReader(
 
 	logger.Info("扫描完成", "duration_seconds", duration, "files", len(allFiles))
 	return result, nil
-}
-
-// runEXFATScan 执行 exFAT 扫描 —— 找分区 → 遍历目录（含已删除）→ 产出 RecoveredFile
-//
-// 对 U 盘 / SD 卡 / 移动硬盘这类外接存储设备关键：之前完全"看不见"，本轮新补。
-// 扫描深度：
-//   - 只遍历目录条目里的 in-use + deleted 文件，不走 FAT 链做块级数据重建
-//   - 连续存储（NoFatChain=1）的文件可完整恢复
-//   - 碎片文件被列出但标记为"需要 R-Studio"，FileSize 设为正确值供用户评估
-func (e *Engine) runEXFATScan(
-	ctx context.Context,
-	reader disk.DiskReader,
-	onProgress func(types.ScanProgress),
-	onFound func(*types.RecoveredFile),
-) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 exFAT 扫描")
-
-	scanner := exfat.NewScanner(reader)
-
-	partitions, err := scanner.FindPartitions(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []*types.RecoveredFile
-	for pi, p := range partitions {
-		if ctx.Err() != nil {
-			return files, ctx.Err()
-		}
-		partitionLabel := fmt.Sprintf("exFAT 分区 %d/%d (@0x%X)", pi+1, len(partitions), p.Offset)
-		if onProgress != nil {
-			onProgress(types.ScanProgress{
-				Phase:       "exfat",
-				Percent:     float64(pi) / float64(len(partitions)) * 100,
-				CurrentFile: partitionLabel + ": 扫描目录",
-			})
-		}
-
-		perPartCount := 0
-		err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff exfat.FoundFile) {
-			file := exfatEntryToRecoveredFile(ff, p.BootSector)
-			if file == nil {
-				return
-			}
-			files = append(files, file)
-			// 缓存恢复源（供 Recover 阶段按 ID 查回簇信息）
-			e.cacheEXFATSource(file.ID, exfatRecoverySource{
-				Entry:           ff.Entry,
-				Boot:            p.BootSector,
-				PartitionOffset: p.Offset,
-			})
-			if onFound != nil {
-				onFound(file)
-			}
-			perPartCount++
-		})
-		if err != nil {
-			logger.Warn("exFAT 目录遍历失败", "partition", partitionLabel, "err", err)
-			continue
-		}
-		logger.Info("exFAT 分区扫描完成", "partition", partitionLabel, "files", perPartCount)
-	}
-
-	if onProgress != nil {
-		onProgress(types.ScanProgress{Phase: "exfat", Percent: 100, FilesFound: len(files)})
-	}
-	logger.Info("exFAT 扫描完成", "files", len(files))
-	return files, nil
-}
-
-// exfatEntryToRecoveredFile 把 exFAT 的一条目录发现翻译成统一的 RecoveredFile
-func exfatEntryToRecoveredFile(ff exfat.FoundFile, boot *exfat.BootSector) *types.RecoveredFile {
-	if ff.Entry.Name == "" || ff.Entry.IsDirectory {
-		return nil
-	}
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(ff.Entry.Name), "."))
-	category := categorizeByExtension(ext)
-
-	// 连续文件：Offset 指向 cluster heap 的字节；碎片文件：Offset 仍指向起始簇，
-	// writer 侧根据 Source=="exfat" 决定怎么读
-	var fileOffset int64 = -1
-	if ff.Entry.FirstCluster >= 2 {
-		fileOffset = boot.ClusterToByteOffset(ff.Entry.FirstCluster, ff.PartitionOff)
-	}
-
-	desc := ""
-	if ff.Entry.IsDeleted {
-		desc = "exFAT 已删除"
-	}
-	if !ff.Entry.NoFatChain {
-		if desc != "" {
-			desc += " + "
-		}
-		// 本轮新增 FAT 链遍历，碎片文件已支持恢复（但已删除文件的 FAT 链可能已回收，
-		// 那种情况 FollowFATChain 会拿到 FREE 标记并报错，上层能识别 partial）
-		desc += "碎片文件（走 FAT 链恢复）"
-	}
-
-	file := &types.RecoveredFile{
-		ID:           fmt.Sprintf("exfat_%X_%d", ff.PartitionOff, ff.Entry.DirEntryOffset),
-		Source:       "exfat",
-		FileName:     ff.Entry.Name,
-		Extension:    ext,
-		Category:     category,
-		Size:         ff.Entry.FileSize,
-		SizeHuman:    types.FormatSize(ff.Entry.FileSize),
-		Offset:       fileOffset,
-		Confidence:   0.0, // 由 validator 赋值；连续文件通常给 0.8+
-		IsDeleted:    ff.Entry.IsDeleted,
-		OriginalPath: ff.FullPath,
-		CreatedTime:  ff.Entry.CreatedTime,
-		ModifiedTime: ff.Entry.ModifiedTime,
-		Description:  desc,
-	}
-	return file
-}
-
-func (e *Engine) cacheEXFATSource(id string, src exfatRecoverySource) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.exfatSources == nil {
-		e.exfatSources = make(map[string]exfatRecoverySource)
-	}
-	e.exfatSources[id] = src
-}
-
-// runFATScan 执行 FAT12/16/32 扫描 —— U 盘 / SD 卡 / 老相机常用的文件系统。
-// 已删除文件的 FAT 链大概率被清 0，FileClusterList 会退化成"连续 cluster"启发，
-// 配合 signature validator（JPEG/PNG SOI 检测等）能救回大部分连续存储的用户照片。
-func (e *Engine) runFATScan(
-	ctx context.Context,
-	reader disk.DiskReader,
-	onProgress func(types.ScanProgress),
-	onFound func(*types.RecoveredFile),
-) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 FAT 扫描")
-
-	scanner := fat.NewScanner(reader)
-	parts, err := scanner.FindPartitions(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []*types.RecoveredFile
-	for pi, p := range parts {
-		if ctx.Err() != nil {
-			return files, ctx.Err()
-		}
-		label := fmt.Sprintf("%s 分区 %d/%d (@0x%X)",
-			p.BootSector.FSType.String(), pi+1, len(parts), p.Offset)
-		if onProgress != nil {
-			onProgress(types.ScanProgress{
-				Phase:       "fat",
-				Percent:     float64(pi) / float64(len(parts)) * 100,
-				CurrentFile: label + ": 扫描目录",
-			})
-		}
-		perPart := 0
-		err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff fat.FoundFile) {
-			file := fatEntryToRecoveredFile(ff, p.BootSector)
-			if file == nil {
-				return
-			}
-			files = append(files, file)
-			e.cacheFATSource(file.ID, fatRecoverySource{
-				Entry:           ff.Entry,
-				Boot:            p.BootSector,
-				PartitionOffset: p.Offset,
-			})
-			if onFound != nil {
-				onFound(file)
-			}
-			perPart++
-		})
-		if err != nil {
-			logger.Warn("FAT 目录遍历失败", "partition", label, "err", err)
-			continue
-		}
-		logger.Info("FAT 分区扫描完成", "partition", label, "files", perPart)
-	}
-	if onProgress != nil {
-		onProgress(types.ScanProgress{Phase: "fat", Percent: 100, FilesFound: len(files)})
-	}
-	logger.Info("FAT 扫描完成", "files", len(files))
-	return files, nil
-}
-
-func fatEntryToRecoveredFile(ff fat.FoundFile, boot *fat.BootSector) *types.RecoveredFile {
-	if ff.Entry.Name == "" || ff.Entry.IsDirectory {
-		return nil
-	}
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(ff.Entry.Name), "."))
-	category := categorizeByExtension(ext)
-
-	fileOffset := int64(-1)
-	if ff.Entry.FirstCluster >= 2 {
-		fileOffset = boot.ClusterToByteOffset(ff.Entry.FirstCluster, ff.PartitionOff)
-	}
-
-	desc := boot.FSType.String()
-	if ff.Entry.IsDeleted {
-		desc += " 已删除"
-	}
-
-	return &types.RecoveredFile{
-		ID:           fmt.Sprintf("fat_%X_%s_%d", ff.PartitionOff, ff.Entry.ShortName, ff.Entry.FirstCluster),
-		Source:       "fat",
-		FileName:     ff.Entry.Name,
-		Extension:    ext,
-		Category:     category,
-		Size:         ff.Entry.FileSize,
-		SizeHuman:    types.FormatSize(ff.Entry.FileSize),
-		Offset:       fileOffset,
-		Confidence:   0.0,
-		IsDeleted:    ff.Entry.IsDeleted,
-		OriginalPath: ff.FullPath,
-		ModifiedTime: ff.Entry.ModifiedTime,
-		CreatedTime:  ff.Entry.CreatedTime,
-		Description:  desc,
-	}
-}
-
-func (e *Engine) cacheFATSource(id string, src fatRecoverySource) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.fatSources == nil {
-		e.fatSources = make(map[string]fatRecoverySource)
-	}
-	e.fatSources[id] = src
-}
-
-// runEXTScan 执行 ext2/3/4 扫描 —— Linux/Android 设备的主流文件系统
-func (e *Engine) runEXTScan(
-	ctx context.Context,
-	reader disk.DiskReader,
-	onProgress func(types.ScanProgress),
-	onFound func(*types.RecoveredFile),
-) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 ext2/3/4 扫描")
-
-	scanner := ext4.NewScanner(reader)
-	parts, err := scanner.FindPartitions(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []*types.RecoveredFile
-	for pi, p := range parts {
-		if ctx.Err() != nil {
-			return files, ctx.Err()
-		}
-		label := fmt.Sprintf("%s 分区 %d/%d (@0x%X)", p.SuperBlock.Variant, pi+1, len(parts), p.Offset)
-		if onProgress != nil {
-			onProgress(types.ScanProgress{
-				Phase: "ext", Percent: float64(pi) / float64(len(parts)) * 100,
-				CurrentFile: label + ": 遍历目录树",
-			})
-		}
-		perPart := 0
-		err := scanner.ScanFiles(ctx, p, func(ff ext4.FoundFile) {
-			file := extEntryToRecoveredFile(ff)
-			if file == nil {
-				return
-			}
-			files = append(files, file)
-			e.cacheEXTSource(file.ID, extRecoverySource{
-				Inode:      ff.Inode,
-				SuperBlock: ff.SuperBlock,
-				GroupDescs: ff.GroupDescs,
-			})
-			if onFound != nil {
-				onFound(file)
-			}
-			perPart++
-		})
-		if err != nil {
-			logger.Warn("ext 扫描分区失败", "partition", label, "err", err)
-			continue
-		}
-		logger.Info("ext 分区扫描完成", "partition", label, "files", perPart)
-	}
-	if onProgress != nil {
-		onProgress(types.ScanProgress{Phase: "ext", Percent: 100, FilesFound: len(files)})
-	}
-	logger.Info("ext 扫描完成", "files", len(files))
-	return files, nil
-}
-
-func extEntryToRecoveredFile(ff ext4.FoundFile) *types.RecoveredFile {
-	if ff.Inode == nil {
-		return nil
-	}
-	name := filepath.Base(ff.FullPath)
-	if name == "" || name == "/" {
-		return nil
-	}
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-	category := categorizeByExtension(ext)
-
-	desc := ff.SuperBlock.Variant.String()
-	if ff.IsDeleted {
-		desc += " 已删除"
-	}
-
-	id := fmt.Sprintf("ext_%X_%d", ff.PartitionOff, ff.Inode.Number)
-	return &types.RecoveredFile{
-		ID:           id,
-		Source:       "ext",
-		FileName:     name,
-		Extension:    ext,
-		Category:     category,
-		Size:         ff.Inode.Size,
-		SizeHuman:    types.FormatSize(ff.Inode.Size),
-		Offset:       0, // ext 文件不是连续的，没有"起始字节偏移"概念
-		Confidence:   0.0,
-		IsDeleted:    ff.IsDeleted,
-		OriginalPath: ff.FullPath,
-		ModifiedTime: timePtrIfNonZero(ff.Inode.ModifyTime),
-		CreatedTime:  timePtrIfNonZero(ff.Inode.ChangeTime),
-		Description:  desc,
-	}
-}
-
-func timePtrIfNonZero(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	return &t
-}
-
-func (e *Engine) cacheEXTSource(id string, src extRecoverySource) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.extSources == nil {
-		e.extSources = make(map[string]extRecoverySource)
-	}
-	e.extSources[id] = src
-}
-
-// runNTFSScan 执行 NTFS MFT 扫描
-//
-// 使用 ntfs.Scanner 的回调式 API：
-//   - ParseBootSector 解析引导扇区
-//   - ScanMFT 通过 onEntry 回调收集所有条目
-//   - FindDeletedFiles 筛选可恢复的已删除文件
-//   - RebuildDirectoryTree 为每个条目构建完整路径
-//   - 将 MFTEntry 转换为 RecoveredFile
-func (e *Engine) runNTFSScan(
-	ctx context.Context,
-	reader disk.DiskReader,
-	partitionOffset int64,
-	onProgress func(types.ScanProgress),
-	onFound func(*types.RecoveredFile),
-) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 NTFS MFT 扫描")
-
-	scanner := ntfs.NewScanner(reader)
-	e.mu.Lock()
-	e.ntfsScn = scanner
-	e.mu.Unlock()
-
-	partitions, err := e.resolveNTFSPartitions(ctx, scanner, reader, partitionOffset)
-	if err != nil {
-		return nil, err
-	}
-
-	totalPartitionWeight := float64(0)
-	for _, partition := range partitions {
-		totalPartitionWeight += partitionWeight(partition)
-	}
-	if totalPartitionWeight <= 0 {
-		totalPartitionWeight = float64(len(partitions))
-	}
-
-	var files []*types.RecoveredFile
-	accumulatedWeight := float64(0)
-	partitionScanned := 0
-	var lastErr error
-
-	for index, partition := range partitions {
-		select {
-		case <-ctx.Done():
-			return files, ctx.Err()
-		default:
-		}
-
-		weight := partitionWeight(partition)
-		if weight <= 0 {
-			weight = 1
-		}
-		normalizedWeight := weight / totalPartitionWeight
-		partitionLabel := fmt.Sprintf("NTFS 分区 %d/%d", index+1, len(partitions))
-		filesFoundBefore := len(files)
-
-		partitionFiles, partitionErr := e.scanNTFSPartition(
-			ctx,
-			scanner,
-			partition,
-			partitionLabel,
-			func(p types.ScanProgress) {
-				p.Percent = accumulatedWeight*100 + p.Percent*normalizedWeight
-				if p.FilesFound > 0 {
-					p.FilesFound += filesFoundBefore
-				} else {
-					p.FilesFound = filesFoundBefore
-				}
-				onProgress(p)
-			},
-			onFound,
-		)
-		if partitionErr != nil {
-			if ctx.Err() != nil {
-				return files, ctx.Err()
-			}
-			lastErr = partitionErr
-			logger.Warn("分区扫描失败", "partition", partitionLabel, "err", partitionErr)
-			accumulatedWeight += normalizedWeight
-			continue
-		}
-
-		partitionScanned++
-		files = append(files, partitionFiles...)
-
-		accumulatedWeight += normalizedWeight
-	}
-
-	if partitionScanned == 0 && lastErr != nil {
-		return nil, lastErr
-	}
-
-	logger.Info("NTFS 扫描完成", "partitions", partitionScanned, "files", len(files))
-	return files, nil
-}
-
-// mftEntryToRecoveredFile 将 MFT 条目转换为统一的 RecoveredFile 结构
-//
-// 使用 ntfs.MFTEntry 的实际字段名:
-//   - EntryNumber (非 RecordNumber)
-//   - IsUsed      (非 InUse)
-//   - DataRun.ClusterOffset / ClusterCount (非 OffsetCluster / LengthClusters)
-func mftEntryToRecoveredFile(entry *ntfs.MFTEntry, boot *ntfs.BootSector, partitionOffset int64) *types.RecoveredFile {
-	if entry == nil {
-		return nil
-	}
-
-	// 跳过目录和无名文件
-	if entry.IsDirectory || entry.FileName == "" {
-		return nil
-	}
-
-	// 提取扩展名
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(entry.FileName), "."))
-
-	// 推断文件分类
-	category := categorizeByExtension(ext)
-
-	// 计算文件在磁盘上的绝对偏移。
-	// 物理盘扫描时必须加上分区起始偏移，否则验证和通用回退读取会读错位置。
-	var fileOffset int64
-	if len(entry.DataRuns) > 0 && boot != nil {
-		fileOffset = partitionOffset + entry.DataRuns[0].ClusterOffset*boot.ClusterSize
-	}
-
-	// 确定原始路径
-	originalPath := entry.FullPath
-	if originalPath == "" {
-		originalPath = entry.FileName
-	}
-
-	file := &types.RecoveredFile{
-		ID:           ntfsFileID(partitionOffset, entry.EntryNumber),
-		Source:       "ntfs",
-		FileName:     entry.FileName,
-		Extension:    ext,
-		Category:     category,
-		Size:         entry.FileSize,
-		SizeHuman:    types.FormatSize(entry.FileSize),
-		Offset:       fileOffset,
-		Confidence:   0.0, // 由后续验证阶段设置
-		IsDeleted:    entry.IsDeleted,
-		OriginalPath: originalPath,
-		CreatedTime:  entry.CreatedTime,
-		ModifiedTime: entry.ModifiedTime,
-	}
-
-	return file
 }
 
 // runCarverScan 执行深度扫描
@@ -1076,7 +634,9 @@ func (e *Engine) validateAll(
 		}
 
 		if !residentHandled {
-			result = v.Validate(file)
+			// 扫描阶段批量验证走 Fast：10 万级文件从分钟级降到秒级。
+			// 真解码交给 Recover 阶段（见 recoverValidator.ValidateDeep）。
+			result = v.ValidateFast(file)
 		}
 
 		// Validate 内部已设置 file 的字段，但这里确保一致性
@@ -1288,9 +848,10 @@ func (e *Engine) RecoverWithOptions(
 
 		started := time.Now()
 
-		// 对深度扫描来源文件做即时验证，避免导出明显不可用的数据片段
+		// 对深度扫描来源文件做即时验证，避免导出明显不可用的数据片段。
+		// 这里走 ValidateDeep 做权威判定——用户真要落盘的每一个文件都值得 10-50ms 的真解码。
 		if file.Source == "carver" {
-			verify := recoverValidator.Validate(file)
+			verify := recoverValidator.ValidateDeep(file)
 			file.IsValid = verify.IsValid
 			file.Confidence = verify.Confidence
 			file.ValidationMsg = verify.Message
@@ -1364,6 +925,17 @@ func (e *Engine) RecoverWithOptions(
 			writeErr = e.recoverAPFSFile(file, outputPath)
 		case "hfsplus":
 			writeErr = e.recoverHFSPlusFile(file, outputPath)
+		case "btrfs":
+			writeErr = e.recoverBtrfsFile(file, outputPath)
+		case "smb", "nfs":
+			// NAS 来源（Batch 2）：走 NASRecoverySource 缓存里的 session 拷贝文件
+			writeErr = e.recoverNASFile(file, outputPath)
+		case "ios":
+			// iOS 备份来源（Batch 3）：未加密直接拷；加密走 class key → file key → AES-CBC
+			writeErr = e.recoverIOSFile(file, outputPath)
+		case "android":
+			// Android `.ab` 备份（Batch 4）：tar 流式提取（重扫流到目标 entry）
+			writeErr = e.recoverAndroidFile(file, outputPath)
 		default:
 			// Carver 来源: 直接偏移读取
 			writeErr = writer.WriteFile(file, outputPath)
@@ -1627,106 +1199,7 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 // 从缓存的 NTFS 恢复源中按 ID 查找对应条目，
 // 然后使用 WriteNTFSFile 按 DataRuns 读取。若缓存缺失则直接失败，
 // 不再回退到按 Offset 的 WriteFile——因为碎片化文件的后续段在那里会被忽略。
-func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) error {
-	e.mu.RLock()
-	source, ok := e.ntfsSources[file.ID]
-	writer := e.writer
-	e.mu.RUnlock()
 
-	if writer == nil {
-		return fmt.Errorf("写入器未初始化")
-	}
-
-	if !ok || source.Entry == nil || source.Boot == nil {
-		return fmt.Errorf("NTFS 恢复源已丢失 (ID=%s)，请重新扫描后再恢复", file.ID)
-	}
-
-	return writer.WriteNTFSFile(file, source.Entry, source.Boot, source.PartitionOffset, outputPath)
-}
-
-// recoverEXFATFile 恢复 exFAT 来源的文件。
-//
-// 两种路径：
-//  1. 连续存储（NoFatChain=1）：cluster 号直接递增 → WriteEXFATFile
-//  2. 碎片化（NoFatChain=0）：走 FAT 链拼 cluster 列表 → WriteEXFATFile
-//
-// 两条路径都走 cluster 级恢复（不走 byte offset 的 WriteFile），因为：
-//   - 连续存储如果 FileSize 恰好 ≤ ClusterSize 的边界情况处理复杂
-//   - 统一用 cluster 列表逻辑更简单，性能损失可忽略（磁盘 page cache 兜底）
-func (e *Engine) recoverEXFATFile(file *types.RecoveredFile, outputPath string) error {
-	e.mu.RLock()
-	source, ok := e.exfatSources[file.ID]
-	writer := e.writer
-	reader := e.reader
-	e.mu.RUnlock()
-
-	if writer == nil {
-		return fmt.Errorf("写入器未初始化")
-	}
-	if !ok || source.Boot == nil {
-		return fmt.Errorf("exFAT 恢复源已丢失 (ID=%s)，请重新扫描后再恢复", file.ID)
-	}
-	if reader == nil {
-		return fmt.Errorf("磁盘 reader 未初始化")
-	}
-
-	clusters, err := exfat.FileClusterList(reader, source.Boot, source.PartitionOffset, &source.Entry)
-	if err != nil {
-		// 已删除文件的 FAT 链可能已被回收，典型错误：起始 cluster 标记为 free
-		return fmt.Errorf("构造 cluster 列表失败: %w", err)
-	}
-	return writer.WriteEXFATFile(file, clusters, source.Boot, source.PartitionOffset, outputPath)
-}
-
-// recoverFATFile 恢复 FAT12/16/32 来源的文件。
-// 与 exFAT 路径对称：构造 cluster 列表 → WriteFATFile。
-// 对已删除 FAT 文件，FAT 链经常被清 0，FileClusterList 会退化成连续启发。
-func (e *Engine) recoverFATFile(file *types.RecoveredFile, outputPath string) error {
-	e.mu.RLock()
-	source, ok := e.fatSources[file.ID]
-	writer := e.writer
-	reader := e.reader
-	e.mu.RUnlock()
-
-	if writer == nil {
-		return fmt.Errorf("写入器未初始化")
-	}
-	if !ok || source.Boot == nil {
-		return fmt.Errorf("FAT 恢复源已丢失 (ID=%s)", file.ID)
-	}
-	if reader == nil {
-		return fmt.Errorf("磁盘 reader 未初始化")
-	}
-	clusters, err := fat.FileClusterList(reader, source.Boot, source.PartitionOffset, &source.Entry)
-	if err != nil {
-		return fmt.Errorf("构造 FAT cluster 列表失败: %w", err)
-	}
-	return writer.WriteFATFile(file, clusters, source.Boot, source.PartitionOffset, outputPath)
-}
-
-// recoverEXTFile 恢复 ext2/3/4 来源文件 —— 走 inode → CollectFileBlocks → 写入
-func (e *Engine) recoverEXTFile(file *types.RecoveredFile, outputPath string) error {
-	e.mu.RLock()
-	source, ok := e.extSources[file.ID]
-	writer := e.writer
-	reader := e.reader
-	e.mu.RUnlock()
-
-	if writer == nil {
-		return fmt.Errorf("写入器未初始化")
-	}
-	if !ok || source.Inode == nil || source.SuperBlock == nil {
-		return fmt.Errorf("ext 恢复源已丢失 (ID=%s)", file.ID)
-	}
-	if reader == nil {
-		return fmt.Errorf("磁盘 reader 未初始化")
-	}
-	ranges, err := ext4.CollectFileBlocks(reader, source.SuperBlock, source.Inode)
-	if err != nil {
-		return fmt.Errorf("收集 ext 文件块失败: %w", err)
-	}
-	return writer.WriteEXTFile(file, ranges, source.SuperBlock, outputPath)
-}
 
 // BadSectors 返回本次扫描期间 ResilientReader 跳过的坏扇区清单
 // （没扫描过或 Scan 用自定义 reader 时返回 nil）。
@@ -1856,345 +1329,46 @@ func (e *Engine) Shutdown() {
 	e.valid = nil
 	e.writer = nil
 	e.results = nil
+	e.cacheStatsReader = nil
+
+	// 所有文件系统 sources 释放（防止 Engine 复用时的内存泄漏）。
+	// 这些 map 持有 *MFTEntry / *Inode / *FSTreeFile 等较重的解析对象，
+	// 一次扫描可能积累几十万条；Shutdown 不清空 = 整个 process 生命期都驻留。
 	e.ntfsSources = nil
+	e.exfatSources = nil
+	e.fatSources = nil
+	e.extSources = nil
+	e.apfsSources = nil
+	e.hfsplusSources = nil
+	e.btrfsSources = nil
+
+	// FileVault VEK 是用户密码解出的卷加密密钥 —— 必须显式置 nil，
+	// 否则即便 process exit 也可能在 swap / coredump 里泄露。
+	for k := range e.apfsVEKs {
+		// 先把字节零化再 delete，防止 GC 之前从 dump 里拣回来
+		if k2 := e.apfsVEKs[k]; k2 != nil {
+			for i := range k2 {
+				k2[i] = 0
+			}
+		}
+		delete(e.apfsVEKs, k)
+	}
+	e.apfsVEKs = nil
+
+	// 关闭所有 NAS 会话（Batch 2：SMB/NFS）
+	e.closeNASSessions()
+	e.nasSources = nil
+
+	// 关闭所有 iOS 备份会话（Batch 3；删临时明文 Manifest.db）
+	e.closeIOSSessions()
+	e.iosSources = nil
+
+	// 关闭所有 Android backup（Batch 4；清 master key 内存）
+	e.closeAndroidBackups()
+	e.androidSources = nil
 
 	logger.Info("引擎已关闭")
 }
-
-func (e *Engine) resolveNTFSPartitions(
-	ctx context.Context,
-	scanner *ntfs.Scanner,
-	reader disk.DiskReader,
-	partitionOffset int64,
-) ([]ntfs.Partition, error) {
-	if partitionOffset > 0 {
-		boot, err := scanner.ParseBootSector(partitionOffset)
-		if err != nil {
-			return nil, fmt.Errorf("解析 NTFS 引导扇区失败: %w", err)
-		}
-
-		return []ntfs.Partition{{
-			Offset:     partitionOffset,
-			Size:       boot.TotalSectors * int64(boot.BytesPerSector),
-			Type:       "manual",
-			BootSector: boot,
-		}}, nil
-	}
-
-	if isPhysicalDrivePath(reader.DevicePath()) {
-		partitions, err := scanner.FindPartitions(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("在物理磁盘上未找到可扫描的 NTFS 分区: %w", err)
-		}
-		return partitions, nil
-	}
-
-	boot, err := scanner.ParseBootSector(0)
-	if err != nil {
-		return nil, fmt.Errorf("解析 NTFS 引导扇区失败: %w", err)
-	}
-
-	return []ntfs.Partition{{
-		Offset:     0,
-		Size:       boot.TotalSectors * int64(boot.BytesPerSector),
-		Type:       "logical",
-		BootSector: boot,
-	}}, nil
-}
-
-func (e *Engine) scanNTFSPartition(
-	ctx context.Context,
-	scanner *ntfs.Scanner,
-	partition ntfs.Partition,
-	partitionLabel string,
-	onProgress func(types.ScanProgress),
-	onFound func(*types.RecoveredFile),
-) ([]*types.RecoveredFile, error) {
-	boot := partition.BootSector
-	if boot == nil {
-		var err error
-		boot, err = scanner.ParseBootSector(partition.Offset)
-		if err != nil {
-			return nil, fmt.Errorf("解析 %s 引导扇区失败: %w", partitionLabel, err)
-		}
-	}
-
-	var allEntries []*ntfs.MFTEntry
-	var entriesMu sync.Mutex
-	var liveFilesFound int64
-	startTime := time.Now()
-
-	onProgress(types.ScanProgress{
-		Phase:       "ntfs",
-		Percent:     0,
-		CurrentFile: fmt.Sprintf("%s: 扫描 MFT 记录...", partitionLabel),
-	})
-
-	err := scanner.ScanMFT(ctx, boot, partition.Offset,
-		func(current, total int64) {
-			if total <= 0 {
-				return
-			}
-
-			percent := float64(current) / float64(total) * 60.0
-			bytesScanned := current * boot.MFTRecordSize
-			elapsed := time.Since(startTime).Seconds()
-			var speed int64
-			if elapsed > 0.5 {
-				speed = int64(float64(bytesScanned) / elapsed)
-			}
-			onProgress(types.ScanProgress{
-				Phase:        "ntfs",
-				Percent:      percent,
-				BytesScanned: bytesScanned,
-				TotalBytes:   total * boot.MFTRecordSize,
-				FilesFound:   int(atomic.LoadInt64(&liveFilesFound)),
-				Speed:        speed,
-				Elapsed:      formatElapsed(elapsed),
-				CurrentFile:  fmt.Sprintf("%s: 扫描 MFT 记录 %d/%d", partitionLabel, current, total),
-			})
-		},
-		func(entry *ntfs.MFTEntry) {
-			if entry == nil {
-				return
-			}
-			entriesMu.Lock()
-			allEntries = append(allEntries, entry)
-			entriesMu.Unlock()
-
-			// 实时推送：已删除且看起来可恢复 → 立即转 RecoveredFile 发给前端，
-			// 不等整个 MFT 扫完（那需要好几分钟，用户以为卡死了）。
-			// 最终的 scan:completed 会带完整 files 覆盖，这里是为了让用户在扫描
-			// 进行中就能看到结果陆续冒出来。
-			if onFound != nil && isLikelyRecoverable(entry) {
-				f := mftEntryToRecoveredFile(entry, boot, partition.Offset)
-				if f != nil {
-					onFound(f)
-					atomic.AddInt64(&liveFilesFound, 1)
-				}
-			}
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("%s 扫描 MFT 失败: %w", partitionLabel, err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	onProgress(types.ScanProgress{
-		Phase:       "ntfs",
-		Percent:     65.0,
-		CurrentFile: fmt.Sprintf("%s: 查找已删除文件...", partitionLabel),
-		FilesFound:  len(allEntries),
-	})
-	deletedEntries := scanner.FindDeletedFiles(allEntries)
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	onProgress(types.ScanProgress{
-		Phase:       "ntfs",
-		Percent:     75.0,
-		CurrentFile: fmt.Sprintf("%s: 重建目录树...", partitionLabel),
-		FilesFound:  len(deletedEntries),
-	})
-	scanner.RebuildDirectoryTree(allEntries)
-
-	// 用 $UsnJrnl 找出"被删除文件的原文件名"清单 —— 即使 MFT entry 已被覆盖，
-	// USN journal 里仍保留删除事件 + 原名 + 时间戳。给用户作为"参考线索"输出。
-	usnDeletedNames := map[string]ntfs.DeletedFileEvent{} // FileName → event
-	e.mu.RLock()
-	rdr := e.reader
-	e.mu.RUnlock()
-	if events, _ := ntfs.ScanDeletedFileNames(rdr, boot, allEntries, 64*1024*1024); len(events) > 0 {
-		logger.Info("USN journal 找回删除文件名", "count", len(events), "partition", partitionLabel)
-		for _, ev := range events {
-			usnDeletedNames[ev.FileName] = ev
-		}
-	}
-	// 给已知 MFT entry 的恢复条目"补"上 USN 删除时间（如果 MFT 没有更准的时间）
-	// + 把 USN 里有但 MFT 已不可恢复的文件作为"提示条目"加进结果
-
-	files := make([]*types.RecoveredFile, 0, len(deletedEntries))
-	for index, entry := range deletedEntries {
-		select {
-		case <-ctx.Done():
-			return files, ctx.Err()
-		default:
-		}
-
-		file := mftEntryToRecoveredFile(entry, boot, partition.Offset)
-		if file == nil {
-			continue
-		}
-
-		files = append(files, file)
-		e.cacheNTFSSource(file.ID, ntfsRecoverySource{
-			Entry:           entry,
-			Boot:            boot,
-			PartitionOffset: partition.Offset,
-		})
-		if onFound != nil {
-			onFound(file)
-		}
-
-		if len(deletedEntries) > 0 {
-			percent := 75.0 + float64(index+1)/float64(len(deletedEntries))*25.0
-			onProgress(types.ScanProgress{
-				Phase:       "ntfs",
-				Percent:     percent,
-				FilesFound:  len(files),
-				CurrentFile: fmt.Sprintf("%s: %s", partitionLabel, file.FileName),
-			})
-		}
-	}
-
-	// 把"USN journal 里有但 MFT 已经枚举不到"的删除事件作为"线索条目"加入结果
-	mftSeenNames := make(map[string]bool, len(files))
-	for _, f := range files {
-		mftSeenNames[f.FileName] = true
-	}
-	for _, ev := range usnDeletedNames {
-		if mftSeenNames[ev.FileName] {
-			continue
-		}
-		// 这种条目无法直接恢复（没数据 run），但用户可以在 carved 文件里按"原名"找
-		// 配对（比如 carved 文件 file042.heic 大小匹配 IMG_3492.HEIC 的某次删除时间）
-		hint := &types.RecoveredFile{
-			ID:           fmt.Sprintf("usn_%d_%d", partition.Offset, ev.MFTEntry),
-			Source:       "ntfs-usn-hint",
-			FileName:     ev.FileName,
-			Extension:    strings.ToLower(strings.TrimPrefix(filepath.Ext(ev.FileName), ".")),
-			Category:     categorizeByExtension(strings.ToLower(strings.TrimPrefix(filepath.Ext(ev.FileName), "."))),
-			Size:         0,
-			SizeHuman:    "—",
-			Offset:       0,
-			Confidence:   0.0,
-			IsDeleted:    true,
-			OriginalPath: ev.FileName,
-			ModifiedTime: timePtrIfNonZero(ev.DeletedAt),
-			Description:  fmt.Sprintf("USN journal 提示：此文件曾于 %s 被删除（数据可能在 carved 列表里）", ev.DeletedAt.Format("2006-01-02 15:04:05")),
-			IsValid:      false,
-			ValidationMsg: "USN-only 提示：无 MFT 数据 run，无法直接恢复；只是告诉你曾经存在过这个文件名",
-		}
-		files = append(files, hint)
-		if onFound != nil {
-			onFound(hint)
-		}
-	}
-
-	logger.Info("分区扫描完成",
-		"partition", partitionLabel,
-		"entries", len(allEntries),
-		"deleted", len(deletedEntries),
-		"usn_hints", len(usnDeletedNames),
-		"recoverable", len(files))
-	return files, nil
-}
-
-func isPhysicalDrivePath(path string) bool {
-	return strings.Contains(strings.ToLower(path), "physicaldrive")
-}
-
-// isLikelyRecoverable 复用 ntfs.FindDeletedFiles 的判断条件，用在 MFT 扫描的 onEntry
-// 实时回调里 —— 收到一个 entry 时立即判断能否恢复，能就转 RecoveredFile 推给前端。
-// 保持与 FindDeletedFiles 逻辑同步，避免扫完筛选和实时筛选两套标准漂移。
-func isLikelyRecoverable(e *ntfs.MFTEntry) bool {
-	if e == nil || !e.IsDeleted || e.IsDirectory {
-		return false
-	}
-	if e.FileSize <= 0 {
-		return false
-	}
-	if e.FileName == "" || strings.HasPrefix(e.FileName, "$") {
-		return false
-	}
-	hasDataRuns := len(e.DataRuns) > 0
-	hasResidentData := e.IsResident && len(e.ResidentData) > 0
-	return hasDataRuns || hasResidentData
-}
-
-// formatElapsed 把秒数格式化为 "12s" / "3m45s" / "1h02m" 便于前端展示
-func formatElapsed(seconds float64) string {
-	if seconds < 60 {
-		return fmt.Sprintf("%ds", int(seconds))
-	}
-	if seconds < 3600 {
-		m := int(seconds / 60)
-		s := int(seconds) - m*60
-		return fmt.Sprintf("%dm%02ds", m, s)
-	}
-	h := int(seconds / 3600)
-	m := int((seconds - float64(h)*3600) / 60)
-	return fmt.Sprintf("%dh%02dm", h, m)
-}
-
-func partitionWeight(partition ntfs.Partition) float64 {
-	if partition.Size > 0 {
-		return float64(partition.Size)
-	}
-
-	if partition.BootSector != nil && partition.BootSector.TotalSectors > 0 {
-		return float64(partition.BootSector.TotalSectors) * float64(partition.BootSector.BytesPerSector)
-	}
-
-	return 1
-}
-
-func ntfsFileID(partitionOffset int64, entryNumber int64) string {
-	return fmt.Sprintf("ntfs_%X_%d", partitionOffset, entryNumber)
-}
-
-// ntfsFirstLess 让 NTFS 来源排在其它来源（carver 等）之前。
-// 用于 sort.SliceStable 的 less 函数，确保跨源 SHA-256 去重时保留带元数据的 NTFS 版本。
-//
-// 注意：不能依赖字母序 —— "carver" < "ntfs" 会让 carver 跑在前面，与去重意图相反。
-func ntfsFirstLess(a, b string) bool {
-	if a == "ntfs" && b != "ntfs" {
-		return true
-	}
-	if a != "ntfs" && b == "ntfs" {
-		return false
-	}
-	return false
-}
-
-// openPreviewReader 为 ReadFilePreview 开一个短生命周期的 reader。
-//
-// 必须包 TimeoutReader：否则 preview 去读一个 bad sector 时，Windows 驱动层的
-// ReadFile 会在内核 queue 里无限 hang（见 internal/disk/timeout.go 的说明），
-// preview goroutine 永远不返回，前端用户体验就是"卡死"。扫描 reader 在
-// engine.runScan 里用了 Resilient+Timeout，preview 路径历史上漏掉了这层包装。
-//
-// 这里刻意不用 ResilientReader —— preview 是 UX 路径，bad sector 应该 fail-fast
-// 让用户看到"预览超时/失败"，而不是静默返回一张 zero-fill 的花屏图。
-// 3s/read + 5s Open 的组合对绝大多数健康盘都够，对坏盘也不会让用户等太久。
-func openPreviewReader(devicePath string) (disk.DiskReader, error) {
-	base := disk.NewReader(devicePath)
-	reader := disk.NewTimeoutReader(base, 3*time.Second)
-	if err := disk.OpenWithTimeout(reader, 5*time.Second); err != nil {
-		return nil, err
-	}
-	return reader, nil
-}
-
-func (e *Engine) cacheNTFSSource(fileID string, source ntfsRecoverySource) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.ntfsSources == nil {
-		e.ntfsSources = make(map[string]ntfsRecoverySource)
-	}
-	e.ntfsSources[fileID] = source
-}
-
 // categorizeByExtension 根据文件扩展名推断分类
 func categorizeByExtension(ext string) types.FileCategory {
 	switch ext {
@@ -2216,4 +1390,23 @@ func categorizeByExtension(ext string) types.FileCategory {
 	default:
 		return types.CategoryOther
 	}
+}
+
+// cacheStatsProvider 是任何带 sector cache 的 reader 的能力契约。
+// luks.DecryptedReader / bitlocker.DecryptingReader 都实现了这个签名。
+type cacheStatsProvider interface {
+	CacheStats() disk.CacheStats
+}
+
+// EncryptedReaderCacheStats 返回当前扫描所用加密 reader 的 sector 缓存命中率。
+// 当前 reader 不是加密类型（NTFS 直扫物理盘等）时返回 (CacheStats{}, false)。
+//
+// 给前端 UI 显示"加密卷扫描缓存命中率 87%（4MB / 32MB 容量）"用。
+func (e *Engine) EncryptedReaderCacheStats() (disk.CacheStats, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cacheStatsReader == nil {
+		return disk.CacheStats{}, false
+	}
+	return e.cacheStatsReader.CacheStats(), true
 }

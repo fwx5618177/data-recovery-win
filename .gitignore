@@ -1,6 +1,9 @@
 # Build output
 build/bin/
 .gocache/
+/drift-check
+/data-recovery
+/data-recovery-cli
 
 # Frontend
 frontend/node_modules/
