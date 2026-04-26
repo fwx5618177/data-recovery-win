@@ -6,31 +6,27 @@ import (
 	"testing"
 )
 
-// v2 header parse —— 验证 44 字节固定布局解码正确
+// v2 header parse smoke 测试（详细布局验证见 TestParseV2Header_FieldPositions）
 func TestParseV2Header(t *testing.T) {
 	buf := make([]byte, 64)
 	copy(buf[0:4], []byte("bvx2"))
-	binary.LittleEndian.PutUint32(buf[4:8], 1024)       // n_raw_bytes
-	binary.LittleEndian.PutUint32(buf[8:12], 200)       // n_payload_bytes
-	binary.LittleEndian.PutUint32(buf[12:16], 500)      // n_literals
-	binary.LittleEndian.PutUint32(buf[16:20], 30)       // n_matches
-	binary.LittleEndian.PutUint16(buf[20:22], 100)      // lit state 0
-	binary.LittleEndian.PutUint16(buf[22:24], 200)
-	binary.LittleEndian.PutUint16(buf[24:26], 300)
-	binary.LittleEndian.PutUint16(buf[26:28], 400)
-	buf[28] = 5                                         // literal_bits
-	binary.LittleEndian.PutUint16(buf[29:31], 10)       // l_state
-	binary.LittleEndian.PutUint16(buf[31:33], 20)       // m_state
-	binary.LittleEndian.PutUint16(buf[33:35], 30)       // d_state
-	buf[35] = 7                                         // lmd_bits
-	binary.LittleEndian.PutUint32(buf[36:40], 100)      // literal_payload_len
-	binary.LittleEndian.PutUint32(buf[40:44], 80)       // lmd_payload_len
+	binary.LittleEndian.PutUint32(buf[4:8], 1024)
+	// pf0 = n_literals=500, n_matches=30, n_lit_payload=100, literal_bits=-2 (= 5 stored)
+	pf0 := uint64(500) | (uint64(30) << 20) | (uint64(100) << 40) | (uint64(5) << 60)
+	binary.LittleEndian.PutUint64(buf[8:16], pf0)
+	// pf1 = literal_states 100..400 (10-bit each), n_lmd_payload=80, lmd_bits=0 (= 7 stored)
+	pf1 := uint64(100) | (uint64(200) << 10) | (uint64(300) << 20) |
+		(uint64(400) << 30) | (uint64(80) << 40) | (uint64(7) << 60)
+	binary.LittleEndian.PutUint64(buf[16:24], pf1)
+	// pf2 = header_size=64, lState=10, mState=20, dState=30
+	pf2 := uint64(64) | (uint64(10) << 32) | (uint64(20) << 42) | (uint64(30) << 52)
+	binary.LittleEndian.PutUint64(buf[24:32], pf2)
 
 	h, err := parseV2Header(buf)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if h.nRawBytes != 1024 || h.nLiterals != 500 || h.lmdBits != 7 {
+	if h.nRawBytes != 1024 || h.nLiterals != 500 || h.lmdBits != 0 {
 		t.Errorf("header: %+v", h)
 	}
 	if h.literalStates[0] != 100 || h.literalStates[3] != 400 {
@@ -116,10 +112,17 @@ func TestLog2Funcs(t *testing.T) {
 }
 
 // DecompressLZFSEv2Block 当前实现对复杂场景返回 ErrLZFSEFSEPartial；上层正确退化
+//
+// 用一个语法上合法但语义不可解的 bvx2 block：headerSize=32（最小），
+// freq payload 0 字节但 nLiterals=100。decoder 试图解但因 freq 表全为零
+// 必然失败，最终返回 ErrLZFSEFSEPartial（pure-Go fail + macOS fallback fail）。
 func TestDecompressLZFSEv2Block_PartialReturnsExpectedError(t *testing.T) {
 	hdr := make([]byte, 64)
 	copy(hdr[0:4], []byte("bvx2"))
 	binary.LittleEndian.PutUint32(hdr[4:8], 100)
+	// pf2 with header_size=32，让 freq payload = 0 字节但其他字段都是 0
+	pf2 := uint64(32)
+	binary.LittleEndian.PutUint64(hdr[24:32], pf2)
 	_, err := DecompressLZFSEv2Block(hdr, make([]byte, 200))
 	if !errors.Is(err, ErrLZFSEFSEPartial) {
 		t.Errorf("应返回 ErrLZFSEFSEPartial，实际 %v", err)

@@ -80,10 +80,14 @@ func decodeV2BlockPureGo(block []byte, dst []byte) (int, error) {
 
 	// --- 1. 解析 frequency 表 ---
 	freqStart := h.freqTableStart
-	if freqStart >= len(block) {
-		return 0, fmt.Errorf("freq 表起点越界")
+	freqEnd := int(h.headerSize)
+	if freqStart >= len(block) || freqEnd > len(block) || freqStart > freqEnd {
+		return 0, fmt.Errorf("freq 表区间越界 [%d,%d), block %d", freqStart, freqEnd, len(block))
 	}
-	lFreqs, mFreqs, dFreqs, litFreqs, freqConsumed, err := parseAllFrequencies(block[freqStart:])
+	// 关键：只把 freq payload (= headerSize - 32 字节) 传给解析器，
+	// 不能给整个 block —— 否则 peek/advance 越过 freq 末尾会读到 literal payload 字节，
+	// 产生伪 codeword 累加 freq 总和 ≠ numStates。
+	lFreqs, mFreqs, dFreqs, litFreqs, freqConsumed, err := parseAllFrequencies(block[freqStart:freqEnd])
 	if err != nil {
 		return 0, fmt.Errorf("解 frequency 表: %w", err)
 	}
@@ -107,10 +111,14 @@ func decodeV2BlockPureGo(block []byte, dst []byte) (int, error) {
 	}
 
 	// --- 3. 划分 payload ---
-	// freq payload 之后是 literal payload，再是 lmd payload
-	payloadStart := freqStart + freqConsumed
-	litPayloadEnd := payloadStart + int(h.literalPayloadLen)
-	lmdPayloadEnd := litPayloadEnd + int(h.lmdPayloadLen)
+	// freq payload 完整长度 = headerSize - 32（Apple 定义），所以
+	// literal payload 的起点 = headerSize（不是按 freq parser 实际消费字节算）。
+	// 这一点容易踩坑：freq decoder 是 bit-stream，结尾可能有 byte-padding bits
+	// 不被消费，但 spec 规定 literal payload 紧贴 headerSize 字节边界。
+	_ = freqConsumed
+	payloadStart := int(h.headerSize)
+	litPayloadEnd := payloadStart + int(h.nLiteralPayloadBytes)
+	lmdPayloadEnd := litPayloadEnd + int(h.nLMDPayloadBytes)
 	if lmdPayloadEnd > len(block) {
 		return 0, fmt.Errorf("payload 越界 (need %d, block %d)", lmdPayloadEnd, len(block))
 	}

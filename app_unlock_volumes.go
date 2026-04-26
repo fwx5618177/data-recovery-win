@@ -44,6 +44,29 @@ func (a *App) UnlockVeraCryptAndScan(drivePath, volumeOffsetHex, password, mode 
 	return a.UnlockVeraCryptAndScanWithPIM(drivePath, volumeOffsetHex, password, 0, mode)
 }
 
+// UnlockVeraCryptSystemEncryptionAndScan 解锁 VeraCrypt **系统加密**卷
+// （Windows 全盘加密 boot 盘）后扫描。
+//
+// 与容器路径区别：卷头在 offset 31744 而非 0；KDF 走 IterationsForPIMSystem
+// （SHA 系列固定 200000；RIPEMD = pim*2048）；boot loader 区 [0, 31744) 透传。
+func (a *App) UnlockVeraCryptSystemEncryptionAndScan(drivePath, volumeOffsetHex, password string, pim int, mode string) error {
+	return a.unlockVCWithFunc("system", drivePath, volumeOffsetHex, password, pim, mode,
+		veracrypt.OpenAndUnlockSystemEncryption)
+}
+
+// UnlockVeraCryptAutoAndScan 自动尝试两种 layout（容器 → 系统加密），
+// 任一成功即扫描。给前端"我也不知道是什么 VC 卷"的一键路径。
+//
+// 性能：先试容器（占 95% 用户场景）失败后再试系统加密；最坏情况双倍 KDF 等待。
+// 想避开这个开销，知道是哪种 layout 时直接调对应专属方法。
+func (a *App) UnlockVeraCryptAutoAndScan(drivePath, volumeOffsetHex, password string, pim int, mode string) error {
+	return a.unlockVCWithFunc("auto", drivePath, volumeOffsetHex, password, pim, mode,
+		veracrypt.OpenAndUnlockAuto)
+}
+
+// vcUnlockFunc 是三种 VC unlock 路径的统一签名（容器 / 系统 / auto）。
+type vcUnlockFunc func(reader disk.DiskReader, volStart int64, password string, pim int, progress veracrypt.UnlockProgress) (*veracrypt.UnlockedVolume, error)
+
 // UnlockVeraCryptAndScanWithPIM 同 UnlockVeraCryptAndScan 但允许指定 PIM。
 //
 // PIM (Personal Iterations Multiplier) 是 VeraCrypt 高级用户在创建容器时可
@@ -53,6 +76,13 @@ func (a *App) UnlockVeraCryptAndScan(drivePath, volumeOffsetHex, password, mode 
 //
 // 用 PIM 创建的卷必须用同一 PIM 解开 —— PIM 错跟密码错都返回 ErrWrongPassword。
 func (a *App) UnlockVeraCryptAndScanWithPIM(drivePath, volumeOffsetHex, password string, pim int, mode string) error {
+	return a.unlockVCWithFunc("container", drivePath, volumeOffsetHex, password, pim, mode,
+		veracrypt.OpenAndUnlockWithPIM)
+}
+
+// unlockVCWithFunc 是三种 VC 入口共享的核心实现 —— 拿走 unlock 函数 + label，
+// 其它 wails 事件 / 扫描调度全部一致。kind 用于日志和事件 payload 区分。
+func (a *App) unlockVCWithFunc(kind, drivePath, volumeOffsetHex, password string, pim int, mode string, unlockFn vcUnlockFunc) error {
 	if drivePath == "" || password == "" {
 		return fmt.Errorf("drivePath / password 不能为空")
 	}
@@ -82,7 +112,7 @@ func (a *App) UnlockVeraCryptAndScanWithPIM(drivePath, volumeOffsetHex, password
 		return fmt.Errorf("打开磁盘失败: %w", err)
 	}
 
-	appLogger.Info("VC 解锁开始", "drive", drivePath, "offset", volumeOffset, "pim", pim)
+	appLogger.Info("VC 解锁开始", "kind", kind, "drive", drivePath, "offset", volumeOffset, "pim", pim)
 
 	progressCb := func(tried, total int, currentAlgo string) {
 		wailsRuntime.EventsEmit(a.ctx, "vc:trying", map[string]any{
@@ -90,10 +120,11 @@ func (a *App) UnlockVeraCryptAndScanWithPIM(drivePath, volumeOffsetHex, password
 			"total":   total,
 			"current": currentAlgo,
 			"pim":     pim,
+			"kind":    kind, // "container" / "system" / "auto"
 		})
 	}
 
-	uv, err := veracrypt.OpenAndUnlockWithPIM(underlying, volumeOffset, password, pim, progressCb)
+	uv, err := unlockFn(underlying, volumeOffset, password, pim, progressCb)
 	if err != nil {
 		underlying.Close()
 		appLogger.Warn("VC 解锁失败", "err", err)

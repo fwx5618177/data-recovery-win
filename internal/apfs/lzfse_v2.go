@@ -3,33 +3,44 @@ package apfs
 // LZFSE v2 (bvx2 block) 解码器 —— Apple 原 lzfse v2 的 Go 端口。
 //
 // bvx2 = LZ77 back-ref + FSE (Finite State Entropy / tANS) 熵编码。
-// v2 block 布局（从 Apple lzfse 源码 lzfse_fse.h + lzfse_decode_v2_block.c 反推）：
 //
-//	v2 packed header (28 bytes 前 4 bytes 是 magic "bvx2"):
-//	  +0x00  magic (4)
-//	  +0x04  n_raw_bytes (uint32)
-//	  +0x08  n_payload_bytes (uint32)
-//	  +0x0C  n_literals (uint32)
-//	  +0x10  n_matches (uint32)
-//	  +0x14  literal_state (4 × uint16 - 4 literal FSE 初始 state)
-//	  +0x1C  literal_bits (uint8)          literal bit stream 头部 bit offset
-//	  +0x1D  l_state / m_state / d_state (3 × uint16)   LMD FSE 初始 state
-//	  +0x23  lmd_bits (uint8)
-//	  +0x24  literal_payload_size (uint32)
-//	  +0x28  lmd_payload_size (uint32)
-//	  +0x2C  freq table 开始
+// 真实 v2 block 布局（按 Apple `lzfse_internal.h` lzfse_compressed_block_header_v2
+// 的 v1 解码 helper `lzfse_compressed_block_decode_v2_header_to_v1`，共 32 字节
+// 固定 header + 变长 freq payload）：
+//
+//	+0x00  magic (uint32 LE)             = 0x32787662 ("bvx2")
+//	+0x04  n_raw_bytes (uint32 LE)        解压后字节数
+//	+0x08  packed_fields[0] (uint64 LE)
+//	         bits  0..19  n_literals
+//	         bits 20..39  n_matches
+//	         bits 40..59  n_literal_payload_bytes
+//	         bits 60..62  literal_bits + 7  (signed [-7, 0]; 末位 padding bit 数)
+//	+0x10  packed_fields[1] (uint64 LE)
+//	         bits  0..9   literal_state[0]    (10 bits each)
+//	         bits 10..19  literal_state[1]
+//	         bits 20..29  literal_state[2]
+//	         bits 30..39  literal_state[3]
+//	         bits 40..59  n_lmd_payload_bytes
+//	         bits 60..62  lmd_bits + 7
+//	+0x18  packed_fields[2] (uint64 LE)
+//	         bits  0..31  header_size (含 freq payload 总字节数)
+//	         bits 32..41  l_state
+//	         bits 42..51  m_state
+//	         bits 52..61  d_state
+//	+0x20  freq payload (变长，长度 = header_size - 32)
 //
 // 5 个 FSE 流：
-//   literal:     256 个 symbol
-//   L (match length header):   20 symbol
-//   M (match length extension): 20 symbol
-//   D (offset / distance):      64 symbol（含 foot bits）
+//   literal:     256 symbol，1024 states
+//   L:           20 symbol，64 states
+//   M:           20 symbol，64 states
+//   D:           64 symbol，64 states
 //   literal_state: 4 个流交织
 //
-// 完整实现很复杂；我做"能解标准 macOS 生成的 bvx2 block"版本。不支持非标准 v1 / v1.5 变体。
+// **注意**：Apple lzfse 源码是 BSD-3 授权；本端口按算法结构 + 常量表移植
+// （algorithmic facts 不受版权保护），注释引用来源合规。
 //
-// **注意**：Apple lzfse 源码是 BSD-3 授权；本端口按算法结构而非字面 copy，注释引用
-// 来源不冲突。
+// **真实性验证**：见 lzfse_v2_e2e_test.go —— 用 macOS /usr/bin/compression_tool
+// 生成真 bvx2 block 后跑 round-trip。任何回归都会被该测试抓到。
 
 import (
 	"encoding/binary"
@@ -44,50 +55,67 @@ const (
 	lmdSymbolMax      = 64 // D；L/M 上限 20
 )
 
-// V2Header 解出来的 v2 block header
+// V2Header 解出来的 v2 block header（Apple lzfse_compressed_block_header_v2 移植）
 type v2Header struct {
 	nRawBytes         uint32
-	nPayloadBytes     uint32
 	nLiterals         uint32
+	nLiteralPayloadBytes uint32
 	nMatches          uint32
-	literalStates     [4]uint16 // 4 个初始 state（literal stream 交织）
-	literalBits       uint8
-	lState            uint16
-	mState            uint16
-	dState            uint16
-	lmdBits           uint8
-	literalPayloadLen uint32
-	lmdPayloadLen     uint32
+	literalBits       int8 // 0..7
+	literalStates     [4]uint16
 
-	// 频率表原始字节位置（freq tables 跟在 header 后，用变长 RLE 编码）
+	nLMDPayloadBytes uint32
+	lmdBits          int8 // 0..7
+
+	headerSize uint32 // 32 + freq payload 长度
+	lState     uint16
+	mState     uint16
+	dState     uint16
+
+	// 频率表原始字节位置（紧接 32 字节固定 header 之后）
 	freqTableStart int
 }
 
-// parseV2Header 解 v2 block 头 44 字节
+// parseV2Header 解 v2 block 头 32 字节固定区 + 解释 freq payload 起点。
+//
+// 字段全部从 Apple `lzfse_compressed_block_header_v2` 的 3 个 packed uint64 解出。
+// `literal_bits` / `lmd_bits` 在编码时是 [0,7]，但磁盘上存 +7（保证 4-bit 字段非负）。
 func parseV2Header(b []byte) (*v2Header, error) {
-	if len(b) < 0x2C {
+	if len(b) < 0x20 {
 		return nil, fmt.Errorf("bvx2 header 太短: %d", len(b))
 	}
 	if string(b[0:4]) != "bvx2" {
 		return nil, fmt.Errorf("非 bvx2 magic")
 	}
+
+	pf0 := binary.LittleEndian.Uint64(b[8:16])
+	pf1 := binary.LittleEndian.Uint64(b[16:24])
+	pf2 := binary.LittleEndian.Uint64(b[24:32])
+
 	h := &v2Header{
-		nRawBytes:     binary.LittleEndian.Uint32(b[4:8]),
-		nPayloadBytes: binary.LittleEndian.Uint32(b[8:12]),
-		nLiterals:     binary.LittleEndian.Uint32(b[12:16]),
-		nMatches:      binary.LittleEndian.Uint32(b[16:20]),
+		nRawBytes:            binary.LittleEndian.Uint32(b[4:8]),
+		nLiterals:            uint32(pf0 & 0xFFFFF),
+		nMatches:             uint32((pf0 >> 20) & 0xFFFFF),
+		nLiteralPayloadBytes: uint32((pf0 >> 40) & 0xFFFFF),
+		literalBits:          int8((pf0>>60)&0x7) - 7, // 3 位 [-7,0]
 	}
-	for i := 0; i < 4; i++ {
-		h.literalStates[i] = binary.LittleEndian.Uint16(b[20+i*2 : 22+i*2])
+
+	h.literalStates[0] = uint16(pf1 & 0x3FF)
+	h.literalStates[1] = uint16((pf1 >> 10) & 0x3FF)
+	h.literalStates[2] = uint16((pf1 >> 20) & 0x3FF)
+	h.literalStates[3] = uint16((pf1 >> 30) & 0x3FF)
+	h.nLMDPayloadBytes = uint32((pf1 >> 40) & 0xFFFFF)
+	h.lmdBits = int8((pf1>>60)&0x7) - 7 // 3 位 [-7,0]
+
+	h.headerSize = uint32(pf2 & 0xFFFFFFFF)
+	h.lState = uint16((pf2 >> 32) & 0x3FF)
+	h.mState = uint16((pf2 >> 42) & 0x3FF)
+	h.dState = uint16((pf2 >> 52) & 0x3FF)
+
+	if h.headerSize < 32 {
+		return nil, fmt.Errorf("bvx2 header_size %d < 32 固定头", h.headerSize)
 	}
-	h.literalBits = b[28]
-	h.lState = binary.LittleEndian.Uint16(b[29:31])
-	h.mState = binary.LittleEndian.Uint16(b[31:33])
-	h.dState = binary.LittleEndian.Uint16(b[33:35])
-	h.lmdBits = b[35]
-	h.literalPayloadLen = binary.LittleEndian.Uint32(b[36:40])
-	h.lmdPayloadLen = binary.LittleEndian.Uint32(b[40:44])
-	h.freqTableStart = 44
+	h.freqTableStart = 32
 	return h, nil
 }
 

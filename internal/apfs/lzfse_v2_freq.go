@@ -19,39 +19,27 @@ import (
 	"fmt"
 )
 
-// freqDecodeEntry 4-bit tag 对应的 base 和 extra bits
-type freqDecodeEntry struct {
-	base      uint16
-	extraBits uint8
-}
-
-// freqDecodeTable Apple lzfse 的 frequency tag table（移植自开源参考）
+// Apple LZFSE v2 真实 frequency decoder 表（来自 lzfse_decode_v2_block.c BSD-3）
 //
-// 索引是前 4 bits；对每个 tag：
-//   tag 0..3: 低频率值区（0, 2, 1, 4+extraBits）
-//   tag 4..7: 中频率值区（0, 3, 1, 8+extraBits）
-//   tag 8..11: 高频率值区（0, 2, 1, 12+extraBits）
-//   tag 12..15: 特殊（0, 3, 1, 16+extraBits 其中 15 是"长编码"）
-var freqDecodeTable = [16]freqDecodeEntry{
-	{base: 0, extraBits: 2}, // tag 0: 0..3
-	{base: 2, extraBits: 0}, // tag 1: 2
-	{base: 1, extraBits: 0}, // tag 2: 1
-	{base: 4, extraBits: 5}, // tag 3: 4..35
-
-	{base: 0, extraBits: 2}, // tag 4: 0..3
-	{base: 3, extraBits: 0}, // tag 5: 3
-	{base: 1, extraBits: 0}, // tag 6: 1
-	{base: 8, extraBits: 8}, // tag 7: 8..263
-
-	{base: 0, extraBits: 2}, // tag 8
-	{base: 2, extraBits: 0}, // tag 9
-	{base: 1, extraBits: 0}, // tag 10
-	{base: 12, extraBits: 14}, // tag 11: 12..16395
-
-	{base: 0, extraBits: 2}, // tag 12
-	{base: 3, extraBits: 0}, // tag 13
-	{base: 1, extraBits: 0}, // tag 14
-	{base: 16, extraBits: 14}, // tag 15: 16..16399
+// 算法（Apple `decode_v1_freq_value`）：
+//   - 从 bit stream peek 14 bits buffered
+//   - 取低 5 bits 作为索引 b （范围 0..31）
+//   - nbits = lzfseFreqNBitsTable[b]      —— 这个 codeword 总长度
+//   - 如果 nbits == 8：value = 8 + ((bits >> 4) & 0xF)        (4 extra bits)
+//   - 如果 nbits == 14：value = 24 + ((bits >> 4) & 0x3FF)   (10 extra bits)
+//   - 否则：value = lzfseFreqValueTable[b]
+//   - 然后 stream.advance(nbits)
+//
+// 注意 5-bit index 但 tables 设计成 32 项（高 4 项是低 4 项的镜像，无关索引高位）。
+//
+// 这是 algorithmic fact，BSD-3 允许移植；本表与 Apple lzfse 源同。
+var lzfseFreqNBitsTable = [32]uint8{
+	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
+	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
+}
+var lzfseFreqValueTable = [32]uint16{
+	0, 2, 1, 4, 0, 3, 1, 8, 0, 2, 1, 5, 0, 3, 1, 24,
+	0, 2, 1, 4, 0, 3, 1, 7, 0, 2, 1, 5, 0, 3, 1, 24,
 }
 
 // bitStreamForward 从字节流正向读 bit（LSB-first per byte）
@@ -90,32 +78,84 @@ func (b *bitStreamForward) readBits(n uint8) (uint32, error) {
 	return out, nil
 }
 
+// peekBits 不消耗，返回低 n bits（n <= 14）。EOF 时把没有的高位补 0（保守）。
+func (b *bitStreamForward) peekBits(n uint8) uint32 {
+	if n == 0 {
+		return 0
+	}
+	if n > 14 {
+		n = 14
+	}
+	saveBytePos := b.bytePos
+	saveBitPos := b.bitPos
+	var out uint32
+	for i := uint8(0); i < n; i++ {
+		if b.bytePos >= len(b.data) {
+			break
+		}
+		bit := (b.data[b.bytePos] >> b.bitPos) & 1
+		out |= uint32(bit) << i
+		b.bitPos++
+		if b.bitPos == 8 {
+			b.bitPos = 0
+			b.bytePos++
+		}
+	}
+	b.bytePos = saveBytePos
+	b.bitPos = saveBitPos
+	return out
+}
+
+// advance 消耗 n bits（不读值），peekBits + advance 是 LZFSE freq decode 的标准模式
+func (b *bitStreamForward) advance(n uint8) {
+	for i := uint8(0); i < n; i++ {
+		if b.bytePos >= len(b.data) {
+			return
+		}
+		b.bitPos++
+		if b.bitPos == 8 {
+			b.bitPos = 0
+			b.bytePos++
+		}
+	}
+}
+
 // decodeFrequencies 从 bit-packed stream 解出一个 freq 数组。
+//
+// Apple LZFSE v2 算法（lzfse_decode_v2_block.c `decode_v1_freq_value`）：
+//   1. peek 14 bits buffered
+//   2. 取低 5 bits 作 codeword index
+//   3. nbits = lzfseFreqNBitsTable[idx], val = lzfseFreqValueTable[idx]
+//   4. nbits == 8: val = 8 + ((peek14 >> 4) & 0xF)
+//   5. nbits == 14: val = 24 + ((peek14 >> 4) & 0x3FF)
+//   6. stream.advance(nbits)
+//
 // totalSymbols = 20 (L) / 20 (M) / 64 (D) / 256 (literal)
 // 约束：sum(freq) == numStates（由调用方传入 literalStates / lmdStates）
 func decodeFrequencies(stream *bitStreamForward, totalSymbols int, numStates int) ([]int, error) {
 	freqs := make([]int, totalSymbols)
 	total := 0
 	for i := 0; i < totalSymbols; i++ {
-		// 读 4-bit tag
-		tag, err := stream.readBits(4)
-		if err != nil {
-			return nil, fmt.Errorf("freq tag for symbol %d: %w", i, err)
+		// peek 14 bits（够最长 codeword）
+		bits := stream.peekBits(14)
+		idx := bits & 0x1F
+		nbits := lzfseFreqNBitsTable[idx]
+		var freq int
+		switch nbits {
+		case 8:
+			freq = 8 + int((bits>>4)&0xF)
+		case 14:
+			freq = 24 + int((bits>>4)&0x3FF)
+		default:
+			freq = int(lzfseFreqValueTable[idx])
 		}
-		entry := freqDecodeTable[tag]
-		freq := int(entry.base)
-		if entry.extraBits > 0 {
-			extra, err := stream.readBits(entry.extraBits)
-			if err != nil {
-				return nil, fmt.Errorf("freq extra bits for symbol %d: %w", i, err)
-			}
-			freq += int(extra)
-		}
+		stream.advance(nbits)
+
 		freqs[i] = freq
 		total += freq
 		if total > numStates {
-			return nil, fmt.Errorf("freq 累计超限 @symbol %d: total %d > numStates %d",
-				i, total, numStates)
+			return nil, fmt.Errorf("freq 累计超限 @symbol %d: total %d > numStates %d (idx=%d nbits=%d freq=%d)",
+				i, total, numStates, idx, nbits, freq)
 		}
 	}
 	if total != numStates {

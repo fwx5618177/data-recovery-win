@@ -12,11 +12,27 @@ import (
 
 	"data-recovery/internal/testutil"
 
+	"encoding/hex"
+
+	"github.com/aead/serpent"
 	"golang.org/x/crypto/pbkdf2"
 	//lint:ignore SA1019 legacy VC compatibility
 	"golang.org/x/crypto/twofish"
 	"golang.org/x/crypto/xts"
 )
+
+// serpentEncrypt256Zeros 跑 NESSIE Set 4 vector 0：256-bit zero key + 128-bit zero PT
+// → 返回 hex 形式 CT，期望 "49672ba898d98df95019180445491089"。
+func serpentEncrypt256Zeros() string {
+	c, err := serpent.NewCipher(make([]byte, 32))
+	if err != nil {
+		return ""
+	}
+	pt := make([]byte, 16)
+	ct := make([]byte, 16)
+	c.Encrypt(ct, pt)
+	return hex.EncodeToString(ct)
+}
 
 // 端到端 VC：构造一个完整的 VeraCrypt 卷镜像（salt + encrypted header + payload），
 // 用 OpenAndUnlock 解锁验证。
@@ -126,6 +142,9 @@ func buildVCVolumeImageGeneric(t *testing.T, password string, masterKey []byte, 
 	cipherFactory := func(k []byte) (cipher.Block, error) { return aes.NewCipher(k) }
 	if cipherName == "twofish" {
 		cipherFactory = func(k []byte) (cipher.Block, error) { return twofish.NewCipher(k) }
+	}
+	if cipherName == "serpent" {
+		cipherFactory = func(k []byte) (cipher.Block, error) { return serpent.NewCipher(k) }
 	}
 
 	totalSize := payloadStart + int64(len(plaintextPayload))
@@ -283,6 +302,51 @@ func TestOpenAndUnlock_VC_AESTwofishCascade(t *testing.T) {
 	}
 	if !bytes.Equal(got[:8], []byte("CASCADE!")) {
 		t.Errorf("cascade 解出 payload 不对: %q", got[:8])
+	}
+}
+
+// Serpent 单 cipher 端到端 + NESSIE KAT 顺便验证 cipher 接入正确。
+//
+// NESSIE Serpent-256 Set 4 vector 0:
+//   key = 256-bit zeros
+//   PT  = 128-bit zeros
+//   CT  = 49672BA898D98DF95019180445491089
+// 这个向量来自 Anderson/Biham/Knudsen 1998 NIST AES 提交，是 Serpent 最权威 KAT。
+func TestSerpent_NESSIE_KAT(t *testing.T) {
+	got := serpentEncrypt256Zeros()
+	want := "49672ba898d98df95019180445491089"
+	if got != want {
+		t.Errorf("Serpent NESSIE KAT 失败:\n  got  %s\n  want %s\n→ 引入的第三方 serpent 包不正确，不应用于生产", got, want)
+	}
+}
+
+// 用 Serpent 加密的 fixture 解锁
+func TestOpenAndUnlock_VC_Serpent(t *testing.T) {
+	const password = "SerpentPwd"
+	masterKey := bytes.Repeat([]byte{0x33}, 64)
+	for i := range masterKey {
+		masterKey[i] = byte((i*19 + 1) & 0xFF)
+	}
+	plaintext := make([]byte, 1024)
+	copy(plaintext[:8], "SERPENT!")
+
+	img := buildVCVolumeImageWithCipher(t, password, masterKey, plaintext, 131072, "serpent")
+	underlying := testutil.NewMemReader(img)
+
+	uv, err := OpenAndUnlock(underlying, 0, password, nil)
+	if err != nil {
+		t.Fatalf("OpenAndUnlock (serpent): %v", err)
+	}
+	defer uv.Close()
+	if uv.Cipher != "serpent-xts" {
+		t.Errorf("Cipher 应为 serpent-xts, got %s", uv.Cipher)
+	}
+	got := make([]byte, len(plaintext))
+	if _, err := uv.Reader.ReadAt(got, 0); err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if !bytes.Equal(got[:8], []byte("SERPENT!")) {
+		t.Errorf("Serpent 解出 payload 不对: %q", got[:8])
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 	"data-recovery/internal/disk"
 	"data-recovery/internal/luks"
 
+	"github.com/aead/serpent"
 	//lint:ignore SA1019 legacy VC compatibility
 	"golang.org/x/crypto/twofish"
 	"golang.org/x/crypto/xts"
@@ -99,6 +100,28 @@ func OpenAndUnlockSystemEncryption(reader disk.DiskReader, partitionStart int64,
 // 表现为 ErrWrongPassword。
 func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password string, pim int, progress UnlockProgress) (*UnlockedVolume, error) {
 	return openAndUnlockInternal(reader, volStart, password, pim, progress, false)
+}
+
+// OpenAndUnlockAuto 自动识别 layout：先试容器卷头（offset 0），再试系统加密
+// 头（offset 31744）。任一成功即返回。
+//
+// 用户无法 / 不愿区分卷类型时（GUI 一键解锁）走这个；需要给前端 UI 显示"正在
+// 尝试容器卷格式…正在尝试系统加密格式…"两段进度。
+//
+// 性能影响：每条路径都跑一次完整 KDF 枚举（每条 ~5-30s 取决于 PIM 和 cipher
+// 数）。先试容器（用户场景占 95%）→ 失败再试系统加密。也就是说"系统加密用户"
+// 会等容器路径跑完才进系统路径，多 ~5-30s 等待；可接受。
+func OpenAndUnlockAuto(reader disk.DiskReader, volStart int64, password string, pim int, progress UnlockProgress) (*UnlockedVolume, error) {
+	uv, err := openAndUnlockInternal(reader, volStart, password, pim, progress, false)
+	if err == nil {
+		return uv, nil
+	}
+	if !errors.Is(err, ErrWrongPassword) {
+		// 容器路径出现非密码错（例如读盘错）—— 系统加密路径大概率也错，直接报
+		return nil, err
+	}
+	// 容器路径密码错 → 试系统加密路径
+	return openAndUnlockInternal(reader, volStart, password, pim, progress, true)
 }
 
 // openAndUnlockInternal 是容器卷与系统加密卷共用的解锁实现。
@@ -303,36 +326,38 @@ type cipherSpec struct {
 
 func aesFactory(k []byte) (cipher.Block, error)     { return aes.NewCipher(k) }
 func twofishFactory(k []byte) (cipher.Block, error) { return twofish.NewCipher(k) }
+func serpentFactory(k []byte) (cipher.Block, error) { return serpent.NewCipher(k) }
 
 // supportedCiphers 返回我们解头部时枚举的 cipher 集合，按真实命中频率排序。
 //
-// 覆盖：
-//   - AES-XTS（80% 用户）
-//   - Twofish-XTS（5%）
-//   - AES-Twofish cascade（5%；VC 默认 cascade 选项）
+// 覆盖（VC 默认 cipher 集合的 95%+）：
+//   - AES-XTS（默认；~80% 用户）
+//   - Twofish-XTS / Serpent-XTS（单 cipher，~5% 各）
+//   - AES-Twofish / Twofish-Serpent / Serpent-AES (2-cipher cascade)
+//   - AES-Twofish-Serpent / Serpent-Twofish-AES (3-cipher cascade，最高强度档)
 //
-// 没覆盖：Serpent、Camellia、Kuznyechik、3-cipher cascade —— Serpent 没现成
-// Go impl，其它更冷门。
+// 没覆盖：Camellia、Kuznyechik、Streebog 等冷门选项；Whirlpool/Streebog hash。
+//
+// 排序策略：单 cipher 在前（多数用户场景），cascade 在后（每个 cascade 测试比单
+// cipher 慢 2-3×，但只在错密码 / cascade 用户场景才会跑完）。
 func supportedCiphers() []cipherSpec {
 	return []cipherSpec{
-		{
-			Name:      "aes",
-			Factories: []func([]byte) (cipher.Block, error){aesFactory},
-			KeyBytes:  64,
-		},
-		{
-			Name:      "twofish",
-			Factories: []func([]byte) (cipher.Block, error){twofishFactory},
-			KeyBytes:  64,
-		},
-		{
-			// 2-cipher cascade "AES-Twofish"：加密顺序 pt→AES→Twofish→ct
-			// Factories 按加密顺序：[AES, Twofish]
-			// 解密时 tryUnlockWithCipher 自动逆序遍历
-			Name:      "aes-twofish",
-			Factories: []func([]byte) (cipher.Block, error){aesFactory, twofishFactory},
-			KeyBytes:  128,
-		},
+		{Name: "aes", Factories: []func([]byte) (cipher.Block, error){aesFactory}, KeyBytes: 64},
+		{Name: "twofish", Factories: []func([]byte) (cipher.Block, error){twofishFactory}, KeyBytes: 64},
+		{Name: "serpent", Factories: []func([]byte) (cipher.Block, error){serpentFactory}, KeyBytes: 64},
+
+		// 2-cipher cascade（Factories 按加密顺序；解密 reverse 自动）
+		{Name: "aes-twofish", Factories: []func([]byte) (cipher.Block, error){aesFactory, twofishFactory}, KeyBytes: 128},
+		{Name: "twofish-serpent", Factories: []func([]byte) (cipher.Block, error){twofishFactory, serpentFactory}, KeyBytes: 128},
+		{Name: "serpent-aes", Factories: []func([]byte) (cipher.Block, error){serpentFactory, aesFactory}, KeyBytes: 128},
+
+		// 3-cipher cascade（最高强度档；用户极少但 spec 支持）
+		{Name: "aes-twofish-serpent",
+			Factories: []func([]byte) (cipher.Block, error){aesFactory, twofishFactory, serpentFactory},
+			KeyBytes:  192},
+		{Name: "serpent-twofish-aes",
+			Factories: []func([]byte) (cipher.Block, error){serpentFactory, twofishFactory, aesFactory},
+			KeyBytes:  192},
 	}
 }
 

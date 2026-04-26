@@ -125,25 +125,39 @@ func TestBitStreamForward_ReadTags(t *testing.T) {
 	}
 }
 
-// parseV2Header 字段精确位置 round-trip
+// parseV2Header 字段精确位置 round-trip（用 Apple bit-packed v2 真实格式）
 func TestParseV2Header_FieldPositions(t *testing.T) {
-	buf := make([]byte, 64)
+	// bit-pack 一组已知值，验证 parser 各字段拿对位
+	buf := make([]byte, 32)
 	copy(buf[0:4], []byte("bvx2"))
-	binary.LittleEndian.PutUint32(buf[4:8], 0xDEADBEEF)   // n_raw
-	binary.LittleEndian.PutUint32(buf[8:12], 0xCAFE0000)  // n_payload
-	binary.LittleEndian.PutUint32(buf[12:16], 0x11111111) // n_literals
-	binary.LittleEndian.PutUint32(buf[16:20], 0x22222222) // n_matches
-	binary.LittleEndian.PutUint16(buf[20:22], 0x3333)     // lit state 0
-	binary.LittleEndian.PutUint16(buf[22:24], 0x4444)
-	binary.LittleEndian.PutUint16(buf[24:26], 0x5555)
-	binary.LittleEndian.PutUint16(buf[26:28], 0x6666)
-	buf[28] = 7 // literal_bits
-	binary.LittleEndian.PutUint16(buf[29:31], 0x8888) // l_state
-	binary.LittleEndian.PutUint16(buf[31:33], 0x9999) // m_state
-	binary.LittleEndian.PutUint16(buf[33:35], 0xAAAA) // d_state
-	buf[35] = 11
-	binary.LittleEndian.PutUint32(buf[36:40], 0xBBBBBBBB) // literal_payload_len
-	binary.LittleEndian.PutUint32(buf[40:44], 0xCCCCCCCC) // lmd_payload_len
+	binary.LittleEndian.PutUint32(buf[4:8], 0xDEADBEEF) // n_raw
+
+	// packed_fields[0]:
+	//   bits 0..19  n_literals = 0x12345
+	//   bits 20..39 n_matches = 0x67890
+	//   bits 40..59 n_lit_payload = 0xABCDE
+	//   bits 60..62 literal_bits + 7 = 4 (3-bit; → bits=-3)
+	pf0 := uint64(0x12345) | (uint64(0x67890) << 20) | (uint64(0xABCDE) << 40) | (uint64(4) << 60)
+	binary.LittleEndian.PutUint64(buf[8:16], pf0)
+
+	// packed_fields[1]:
+	//   bits 0..9   literal_state[0] = 0x111
+	//   bits 10..19 literal_state[1] = 0x222
+	//   bits 20..29 literal_state[2] = 0x333
+	//   bits 30..39 literal_state[3] = 0x3FF
+	//   bits 40..59 n_lmd_payload = 0xFEDCB
+	//   bits 60..62 lmd_bits + 7 = 7 (3-bit; → bits=0)
+	pf1 := uint64(0x111) | (uint64(0x222) << 10) | (uint64(0x333) << 20) |
+		(uint64(0x3FF) << 30) | (uint64(0xFEDCB) << 40) | (uint64(7) << 60)
+	binary.LittleEndian.PutUint64(buf[16:24], pf1)
+
+	// packed_fields[2]:
+	//   bits 0..31 header_size = 200
+	//   bits 32..41 l_state = 0x123
+	//   bits 42..51 m_state = 0x234
+	//   bits 52..61 d_state = 0x345
+	pf2 := uint64(200) | (uint64(0x123) << 32) | (uint64(0x234) << 42) | (uint64(0x345) << 52)
+	binary.LittleEndian.PutUint64(buf[24:32], pf2)
 
 	h, err := parseV2Header(buf)
 	if err != nil {
@@ -152,19 +166,31 @@ func TestParseV2Header_FieldPositions(t *testing.T) {
 	if h.nRawBytes != 0xDEADBEEF {
 		t.Errorf("nRawBytes: 0x%X", h.nRawBytes)
 	}
-	if h.nPayloadBytes != 0xCAFE0000 {
-		t.Errorf("nPayloadBytes: 0x%X", h.nPayloadBytes)
+	if h.nLiterals != 0x12345 {
+		t.Errorf("nLiterals: 0x%X", h.nLiterals)
 	}
-	if h.literalStates[0] != 0x3333 || h.literalStates[3] != 0x6666 {
+	if h.nMatches != 0x67890 {
+		t.Errorf("nMatches: 0x%X", h.nMatches)
+	}
+	if h.nLiteralPayloadBytes != 0xABCDE {
+		t.Errorf("nLiteralPayloadBytes: 0x%X", h.nLiteralPayloadBytes)
+	}
+	if h.literalBits != -3 { // 4 - 7 (3-bit field)
+		t.Errorf("literalBits: %d want -3", h.literalBits)
+	}
+	if h.literalStates[0] != 0x111 || h.literalStates[3] != 0x3FF {
 		t.Errorf("literalStates: %+v", h.literalStates)
 	}
-	if h.literalBits != 7 || h.lmdBits != 11 {
-		t.Errorf("bits: lit=%d lmd=%d", h.literalBits, h.lmdBits)
+	if h.nLMDPayloadBytes != 0xFEDCB {
+		t.Errorf("nLMDPayloadBytes: 0x%X", h.nLMDPayloadBytes)
 	}
-	if h.lState != 0x8888 || h.mState != 0x9999 || h.dState != 0xAAAA {
-		t.Errorf("lmd states: %x %x %x", h.lState, h.mState, h.dState)
+	if h.lmdBits != 0 { // 7 - 7
+		t.Errorf("lmdBits: %d want 0", h.lmdBits)
 	}
-	if h.literalPayloadLen != 0xBBBBBBBB || h.lmdPayloadLen != 0xCCCCCCCC {
-		t.Errorf("payload lens: %x %x", h.literalPayloadLen, h.lmdPayloadLen)
+	if h.headerSize != 200 {
+		t.Errorf("headerSize: %d", h.headerSize)
+	}
+	if h.lState != 0x123 || h.mState != 0x234 || h.dState != 0x345 {
+		t.Errorf("LMD states: %x %x %x", h.lState, h.mState, h.dState)
 	}
 }
