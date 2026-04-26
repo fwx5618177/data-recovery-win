@@ -61,24 +61,23 @@ func TestBuildFSEDecoderTable_StateTransitionBounds(t *testing.T) {
 	}
 }
 
-// reverseBitReader round-trip: 反向写入 + 反向读回 = 原值
+// reverseBitReader round-trip: 反向 pull 顺序与 encoder 反向 push 镜像
+//
+// 新语义（Apple 模型）：HIGH 位 = 最近 encoder 写；pull 从 HIGH 端取。
+// padBits = 0 表示无 encoder 末尾 padding。
 func TestReverseBitReader_PullRoundTrip(t *testing.T) {
-	// 构造一个 8 字节 stream，模拟 encoder 往末尾推位
-	// encoder: push 0x1A (5 bit) 后 push 0x2B (7 bit) 后 ...
-	// 简化：直接写 12 字节测流，预期 reader 从尾部 pull 的顺序
 	data := []byte{
 		0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
 		0xAA, 0xBB, 0xCC, 0xDD,
 	}
-	br, err := newReverseBitReader(data, 0)
+	br, err := newReverseBitReader(data, len(data), 0)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	// pull 几次，确认不 panic + 得到合理值
 	for i := 0; i < 10; i++ {
 		v, err := br.pull(4)
 		if err != nil {
-			return // EOF 是合理的
+			return // EOF 合理
 		}
 		if v > 15 {
 			t.Errorf("pull(4) 值 %d 超出 4-bit 范围", v)
@@ -86,25 +85,35 @@ func TestReverseBitReader_PullRoundTrip(t *testing.T) {
 	}
 }
 
-// reverseBitReader 头部 padding 消费：headBits > 0 应先扔掉
-func TestReverseBitReader_HeadBitsConsumed(t *testing.T) {
+// reverseBitReader padding 自检：encoder 在末尾 padding 0 bit 时，accum 高位必须为 0
+func TestReverseBitReader_PaddingZero(t *testing.T) {
+	// 16 字节 buf，最后字节 = 0x0F（高 4 bit = 0，低 4 bit = 1111）
+	// padBits = -4 表示 encoder 在末尾留 4 bit padding（高 4 bit）
 	data := make([]byte, 16)
-	// 最后一个字节设 0xFF，倒数第二个字节设 0xAA
-	data[14] = 0xAA
-	data[15] = 0xFF
+	data[15] = 0x0F
 
-	// headBits=4 应先消费掉末尾 4 bit（0xFF 的低 4 bit）
-	br, err := newReverseBitReader(data, 4)
+	br, err := newReverseBitReader(data, 16, -4)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	// 下一个 pull(4) 应得到 0xFF 的高 4 bit = 0xF
+	// pull 4 bit → 应是 0x0F 的低 4 bit = 0xF（HIGH 端的有效部分）
+	// 注：accum HIGH 端 padding 4 个 0 已被排除，accum_nbits = -4+64 = 60
+	// pull(4) 取最高有效 4 bit = 0xF 的低 4 bit
 	v, err := br.pull(4)
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	if v != 0xF {
-		t.Errorf("headBits=4 后 pull(4) 应是 0xFF 高 4 bit = 0xF，got 0x%X", v)
+		t.Errorf("pull(4) 应是 0xF，got 0x%X", v)
+	}
+}
+
+// padding 高位非零 → 应失败（encoder padding 必须是 0）
+func TestReverseBitReader_PaddingNonzero_Fails(t *testing.T) {
+	data := make([]byte, 16)
+	data[15] = 0xFF // 高 4 bit = 1111，不是合法 padding
+	if _, err := newReverseBitReader(data, 16, -4); err == nil {
+		t.Error("encoder padding 非零应被拒，got nil err")
 	}
 }
 
@@ -134,8 +143,8 @@ func TestParseV2Header_FieldPositions(t *testing.T) {
 
 	// packed_fields[0]:
 	//   bits 0..19  n_literals = 0x12345
-	//   bits 20..39 n_matches = 0x67890
-	//   bits 40..59 n_lit_payload = 0xABCDE
+	//   bits 20..39 n_lit_payload = 0x67890   ← Apple 真实顺序：lit_payload 在前
+	//   bits 40..59 n_matches = 0xABCDE
 	//   bits 60..62 literal_bits + 7 = 4 (3-bit; → bits=-3)
 	pf0 := uint64(0x12345) | (uint64(0x67890) << 20) | (uint64(0xABCDE) << 40) | (uint64(4) << 60)
 	binary.LittleEndian.PutUint64(buf[8:16], pf0)
@@ -169,11 +178,11 @@ func TestParseV2Header_FieldPositions(t *testing.T) {
 	if h.nLiterals != 0x12345 {
 		t.Errorf("nLiterals: 0x%X", h.nLiterals)
 	}
-	if h.nMatches != 0x67890 {
-		t.Errorf("nMatches: 0x%X", h.nMatches)
+	if h.nLiteralPayloadBytes != 0x67890 {
+		t.Errorf("nLiteralPayloadBytes: 0x%X want 0x67890", h.nLiteralPayloadBytes)
 	}
-	if h.nLiteralPayloadBytes != 0xABCDE {
-		t.Errorf("nLiteralPayloadBytes: 0x%X", h.nLiteralPayloadBytes)
+	if h.nMatches != 0xABCDE {
+		t.Errorf("nMatches: 0x%X want 0xABCDE", h.nMatches)
 	}
 	if h.literalBits != -3 { // 4 - 7 (3-bit field)
 		t.Errorf("literalBits: %d want -3", h.literalBits)

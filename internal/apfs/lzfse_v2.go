@@ -12,8 +12,8 @@ package apfs
 //	+0x04  n_raw_bytes (uint32 LE)        解压后字节数
 //	+0x08  packed_fields[0] (uint64 LE)
 //	         bits  0..19  n_literals
-//	         bits 20..39  n_matches
-//	         bits 40..59  n_literal_payload_bytes
+//	         bits 20..39  n_literal_payload_bytes  ← 注意：在 n_matches 前面！
+//	         bits 40..59  n_matches
 //	         bits 60..62  literal_bits + 7  (signed [-7, 0]; 末位 padding bit 数)
 //	+0x10  packed_fields[1] (uint64 LE)
 //	         bits  0..9   literal_state[0]    (10 bits each)
@@ -28,6 +28,10 @@ package apfs
 //	         bits 42..51  m_state
 //	         bits 52..61  d_state
 //	+0x20  freq payload (变长，长度 = header_size - 32)
+//
+// **历史 bug**：早期实现把 pf0 bit 20-39 当作 n_matches，bit 40-59 当作
+// n_literal_payload_bytes —— 这是搞反了！Apple 定义 lit_payload 在前。
+// 错的 header 解读 → 错的 payload 划分 → "payload 越界" / 解码失败。
 //
 // 5 个 FSE 流：
 //   literal:     256 symbol，1024 states
@@ -47,13 +51,24 @@ import (
 	"fmt"
 )
 
-// FSE state 大小（对 literal / L / M / D 的 accuracy log）
+// FSE state 大小 —— Apple lzfse_internal.h 定义
+//
+//	LZFSE_ENCODE_L_STATES       = 64
+//	LZFSE_ENCODE_M_STATES       = 64
+//	LZFSE_ENCODE_D_STATES       = 256   ← 注意 D 是 256（不是 64！）
+//	LZFSE_ENCODE_LITERAL_STATES = 1024
+//
+// 早期版本误用 lmdStates=64 同时给 L/M/D，导致 D freq 表 sum 不匹配
+// （实际 sum=256，被错误期待为 64 → 解码失败）。
 const (
-	literalStates     = 1024 // 2^10
-	literalSymbolMax  = 256
-	lmdStates         = 64 // 2^6
-	lmdSymbolMax      = 64 // D；L/M 上限 20
+	literalStates    = 1024 // 2^10
+	literalSymbolMax = 256
+	lStates          = 64  // L FSE accuracy 6
+	mStates          = 64  // M FSE accuracy 6
+	dStates          = 256 // D FSE accuracy 8（D 范围 1..65535 比 L/M 大 4×，state 也大 4×）
+	lmdSymbolMax     = 64  // D；L/M 上限 20
 )
+
 
 // V2Header 解出来的 v2 block header（Apple lzfse_compressed_block_header_v2 移植）
 type v2Header struct {
@@ -95,9 +110,9 @@ func parseV2Header(b []byte) (*v2Header, error) {
 	h := &v2Header{
 		nRawBytes:            binary.LittleEndian.Uint32(b[4:8]),
 		nLiterals:            uint32(pf0 & 0xFFFFF),
-		nMatches:             uint32((pf0 >> 20) & 0xFFFFF),
-		nLiteralPayloadBytes: uint32((pf0 >> 40) & 0xFFFFF),
-		literalBits:          int8((pf0>>60)&0x7) - 7, // 3 位 [-7,0]
+		nLiteralPayloadBytes: uint32((pf0 >> 20) & 0xFFFFF), // bits 20..39
+		nMatches:             uint32((pf0 >> 40) & 0xFFFFF), // bits 40..59
+		literalBits:          int8((pf0>>60)&0x7) - 7,       // 3 位 [-7,0]
 	}
 
 	h.literalStates[0] = uint16(pf1 & 0x3FF)
@@ -230,39 +245,24 @@ func log2ceil(x uint32) uint8 {
 	return log2floor(x-1) + 1
 }
 
-// ErrLZFSEFSEPartial FSE 解码器遇到复杂真实 bvx2 block 的边界情况时返回。
+// ErrLZFSEFSEPartial FSE 解码器在边界场景（损坏数据 / 未覆盖的 Apple 变体）失败时返回。
 //
-// 现状（主动的工程取舍）：
-//
-// bvx2 block 的完整解码 = Apple 原 lzfse_decode_v2_block.c 约 1500 行精细代码
-// （frequency table bit-unpacking + 4 个 FSE table build + 反向 bit reader +
-// literal/L/M/D 5 流交织解码 + LZ77 match apply）。要**正确**实现需要 Apple 的
-// 参考测试向量，否则错误解码会产出损坏数据 —— 比不实现更糟糕。
-//
-// 当前选择：
-//   1. bvxn (LZVN) 已完整实现 —— 覆盖 macOS 默认小文件压缩（占比 >80%）
-//   2. bvx- (未压缩) 已完整实现
-//   3. bvx2 检测到就返回 ErrLZFSEv2Unsupported，上层 UI 引导用户跑：
-//        afsctool -d <file>
-//      afsctool 是 macOS 社区常用工具（brew install afsctool），用 Apple 官方
-//      lzfse 库可靠解压，比我们的再实现稳
-//
-// 什么时候该完整实现：
-//   - 有 Apple lzfse 官方测试向量 + 2-3 天集中开发
-//   - 或直接 cgo 绑定 libcompression（Apple BSD-3 授权）
+// 现状：pure-Go decoder 已对 Apple compression_tool 的真实 bvx2 输出
+// round-trip 通过（见 lzfse_v2_e2e_test.go），但仍保留 macOS fallback
+// （/usr/bin/compression_tool）作为防御性兜底。
 var ErrLZFSEFSEPartial = fmt.Errorf(
-	"LZFSE v2 (bvx2) 解码：本实现暂不支持复杂 FSE 熵编码；请用 afsctool -d <file> 预解压后再扫")
+	"LZFSE v2 (bvx2) 解码失败：本块 FSE 流损坏或为未覆盖的 Apple 变体")
 
-// DecompressLZFSEv2Block 尝试解一个 bvx2 block。
+// DecompressLZFSEv2Block 解一个 bvx2 block。
 //
 // 策略（按可靠性排序）：
-//   1. 纯 Go decoder (decodeV2BlockPureGo)：header + freq table 按 Apple 真实
-//      bit-packed 布局 + 5-bit codeword table 实现；FSE state / literal stream
-//      decode 仍有边界 bug（详见 lzfse_v2_e2e_test.go 的 regression bar）。
-//      多数小 block 失败、复杂 block 失败的概率高。
-//   2. macOS 上调 /usr/bin/compression_tool（Apple 官方 lzfse 库，100% 兼容）
-//      → fallback；非 macOS 用户走 ErrLZFSEFSEPartial 友好提示
-//   3. ErrLZFSEFSEPartial：明确"无法解开"，上层退化到 "ErrLZFSEv2Unsupported"
+//   1. 纯 Go decoder (decodeV2BlockPureGo)：完整移植 Apple lzfse v2
+//      header + freq + FSE table + bit reader + LMD + rep-distance。
+//      regression bar：lzfse_v2_e2e_test.go 用 Apple compression_tool
+//      生成真 bvx2 后字节级 round-trip 验证。跨平台无外部依赖。
+//   2. macOS 上调 /usr/bin/compression_tool（Apple 官方 lzfse）—— 防御性
+//      fallback：当真有未覆盖的 Apple encoder 变体或损坏数据时兜底。
+//   3. ErrLZFSEFSEPartial：明确"无法解开"，上层退化到 ErrLZFSEv2Unsupported。
 //
 // 成功返回解出字节数。
 func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {

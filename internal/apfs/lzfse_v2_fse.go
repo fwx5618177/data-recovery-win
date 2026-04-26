@@ -27,32 +27,30 @@ import (
 	"fmt"
 )
 
-// buildFSEDecoderTable 构造 FSE 解码器 table
+// buildFSEDecoderTable 构造 FSE 解码器 table —— **严格** 移植 Apple
+// lzfse_fse.c 的 fse_init_decoder_table（BSD-3）。
 //
 // freqs[i] = symbol i 的频率（累计 = numStates）
 // numStates 必须是 2 的幂
 //
-// 返回 [numStates]fseEntry；entry 格式：
-//   symbol: 解出的 symbol
-//   nbits: 下次读多少 bit
-//   deltaState: 读出的 raw_bits + delta 组合成 nextState（已计算好）
+// 关键算法（Apple 不用 Yann Collet 的 spread 函数！）：
 //
-// **算法（Apple lzfse 实际做法）**：
+//	for each symbol i with freq f != 0:
+//	    k = clz(f) - clz(numStates)    // 满足 N <= (f<<k) < 2*N
+//	    j0 = (2*N >> k) - f
+//	    // **states 按 symbol 顺序连续分配**（不 spread）
+//	    for j = 0..f-1:
+//	        if j < j0:
+//	            entry.k     = k
+//	            entry.delta = ((f+j) << k) - N
+//	        else:
+//	            entry.k     = k - 1
+//	            entry.delta = (j - j0) << (k - 1)
+//	        *t++ = entry
 //
-// Step 1: compute nbits threshold per symbol
-//   k = floor(log2(numStates)) - floor(log2(freq))  -- "base nbits"
-//   threshold = (freq << (k+1)) - numStates
-//   前 threshold 个 state: nbits = k+1
-//   其余 freq - threshold 个 state: nbits = k
-//
-// Step 2: spread symbols across [0, numStates) using a coprime step
-//   Apple step = (numStates >> 1) + (numStates >> 3) + 3
-//   也就是 5/8 * numStates + 3；和 numStates 的 gcd = 1（常见 numStates=1024/64 都成立）
-//   state_i = (state_{i-1} + step) mod numStates
-//
-// Step 3: compute delta for each state
-//   每个 symbol 的 state 按 spread 顺序分配给 (symbol, nbits)
-//   delta = (destState << nbits) - numStates  — 保证 (delta + raw_bits) 恰好落回 [0, numStates)
+// 早期实现错用 Yann Collet 的 spread 函数 + 不同 delta 计算 → encoder/decoder
+// state 转移不一致 → L/M/D 解出错值。Apple 的 encoder 也按这个布局产 state，
+// decoder 必须严格匹配。
 func buildFSEDecoderTable(freqs []int, numStates int) ([]fseEntry, error) {
 	if numStates == 0 || (numStates&(numStates-1)) != 0 {
 		return nil, fmt.Errorf("numStates 必须是 2 的幂: %d", numStates)
@@ -69,85 +67,47 @@ func buildFSEDecoderTable(freqs []int, numStates int) ([]fseEntry, error) {
 	}
 
 	table := make([]fseEntry, numStates)
-	logNS := log2floor(uint32(numStates))
+	nClzNumStates := clz32(uint32(numStates))
 
-	// Apple spread step
-	step := (numStates >> 1) + (numStates >> 3) + 3
-	mask := numStates - 1
-
-	// Step 2: spread symbols —— 确定每个 state 的 symbol
 	pos := 0
 	for sym, f := range freqs {
+		if f == 0 {
+			continue
+		}
+		k := int(clz32(uint32(f))) - int(nClzNumStates) // shift: N <= (f<<k) < 2*N
+		j0 := ((2 * numStates) >> uint(k)) - f
 		for j := 0; j < f; j++ {
-			table[pos].symbol = int16(sym)
-			pos = (pos + step) & mask
+			var entry fseEntry
+			entry.symbol = int16(sym)
+			if j < j0 {
+				entry.nbits = uint8(k)
+				entry.deltaState = int32(((f + j) << uint(k)) - numStates)
+			} else {
+				entry.nbits = uint8(k - 1)
+				entry.deltaState = int32((j - j0) << uint(k-1))
+			}
+			table[pos] = entry
+			pos++
 		}
 	}
-	if pos != 0 {
-		// step 与 numStates 不互质（gcd != 1）→ spread 有空洞，某些 symbol 会
-		// 无解码路径 → 解出错 symbol。当前支持的 numStates (1024/64) 已验证互质，
-		// 这里加 assertion 防止未来改动引入非互质组合（老 iOS 格式 / 未来 lzfse 变体）
-		return nil, fmt.Errorf("FSE spread 不完全 (pos=%d numStates=%d step=%d 非互质)",
-			pos, numStates, step)
-	}
-
-	// Step 3: 按 symbol 聚合 state，计算 (nbits, delta)
-	// 每个 symbol 的 freq 个 state 按它们被分配到的顺序（原 state index 升序）编号 0..freq-1
-	//   - 前 threshold 个使用 nbits = baseNBits + 1
-	//   - 其余使用 nbits = baseNBits
-	// 其中 baseNBits = logNS - floor(log2(freq))
-	// threshold = (freq << (baseNBits + 1)) - numStates
-	//
-	// delta 规则：
-	//   对 symbol s 已分配到的第 i 个 state（按 state index 升序），
-	//   destination = (numStates + cumulativeSoFar) / 2^nbits  （这是 Apple 预计算）
-	//   本实现采用更通用的 tANS delta 计算：
-	//     delta = (destinationNext << nbits) - numStates
-	//     destinationNext 从 0..freq-1 逐个编号
-	//
-	// 这部分直接借 Yann Collet FSE 参考实现（算法非版权保护）：
-
-	indicesPerSymbol := make(map[int16][]int, len(freqs))
-	for i, e := range table {
-		indicesPerSymbol[e.symbol] = append(indicesPerSymbol[e.symbol], i)
-	}
-
-	// 标准 tANS 算法（Yann Collet FSE）：
-	//   对每个 symbol s 维护 next[s] 计数器，初值 freq[s]
-	//   按 state 在 table 里的升序遍历：
-	//     sym = table[i].symbol
-	//     nbits = log2(numStates) - floor(log2(next[sym]))
-	//     destState = next[sym] << nbits - numStates  （落在 [0, numStates)）
-	//     delta = (next[sym] << nbits) - numStates
-	//     next[sym]++
-	//
-	// 保证 nextState ∈ [0, numStates) 对任何 raw_bits ∈ [0, 2^nbits)
-	//
-	// 数学要点：next[sym] 从 freq 到 2*freq-1，其 log2 floor 在 numStates 的
-	// log2 内保持单调递减 nbits；destState << nbits - numStates 落在合法范围
-	next := make(map[int16]uint32, len(freqs))
-	for sym, f := range freqs {
-		next[int16(sym)] = uint32(f)
-	}
-
-	for stateIdx := 0; stateIdx < numStates; stateIdx++ {
-		sym := table[stateIdx].symbol
-		if sym < 0 {
-			continue
-		}
-		ns := next[sym]
-		if ns == 0 {
-			continue
-		}
-		nbits := logNS - log2floor(ns)
-		// delta = (ns << nbits) - numStates；nextState = delta + raw_bits ∈ [0, numStates)
-		delta := int32(ns<<nbits) - int32(numStates)
-		table[stateIdx].nbits = nbits
-		table[stateIdx].deltaState = delta
-		next[sym] = ns + 1
+	if pos != numStates {
+		return nil, fmt.Errorf("table init: pos=%d ≠ numStates=%d", pos, numStates)
 	}
 
 	return table, nil
+}
+
+// clz32 count leading zeros for uint32（用 32-bit 等价 Apple `__builtin_clz`）
+func clz32(x uint32) uint8 {
+	if x == 0 {
+		return 32
+	}
+	n := uint8(0)
+	for (x & 0x80000000) == 0 {
+		x <<= 1
+		n++
+	}
+	return n
 }
 
 // fseDecodeOne 从 bit stream 解码一个 symbol；state 原地更新

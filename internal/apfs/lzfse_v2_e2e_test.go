@@ -41,11 +41,7 @@ func TestLZFSEv2_RoundTrip_AgainstAppleEncoder(t *testing.T) {
 	dst := make([]byte, len(original)+1024)
 	n, err := decodeV2BlockPureGo(encoded, dst)
 	if err != nil {
-		// 当前 pure-Go decoder 在某些 freq 表 / FSE state 边界仍有未解决 bug；
-		// macOS 上 fallback 到 /usr/bin/compression_tool 仍可用。
-		// 这个测试是 LZFSE v2 主 decode loop 完整修复的 regression bar：
-		// 任何修复必须让本测试通过 + 把 t.Skipf 改回 t.Fatalf。
-		t.Skipf("LZFSE v2 pure-Go decoder 未完全可用：%v\n→ macOS fallback (compression_tool) 仍工作", err)
+		t.Fatalf("LZFSE v2 pure-Go decoder 失败：%v", err)
 	}
 	if n != len(original) {
 		t.Errorf("解出长度 %d ≠ 原始 %d", n, len(original))
@@ -94,8 +90,7 @@ func TestLZFSEv2_RoundTrip_LargerVariedInput(t *testing.T) {
 	dst := make([]byte, len(original)+1024)
 	n, err := decodeV2BlockPureGo(encoded, dst)
 	if err != nil {
-		t.Logf("LZFSE v2 pure-Go decoder fail：%v\n→ macOS 兼容 fallback 路径仍可用", err)
-		t.Skip("pure-Go decoder 在更大变化输入上有 bug，保留为 fallback 路径")
+		t.Fatalf("LZFSE v2 pure-Go decoder 失败：%v", err)
 	}
 	if n != len(original) || !bytes.Equal(dst[:n], original[:n]) {
 		t.Errorf("更大输入 round-trip 不一致 (got %d bytes)", n)

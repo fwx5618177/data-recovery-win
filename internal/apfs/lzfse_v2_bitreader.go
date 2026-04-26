@@ -1,120 +1,138 @@
 package apfs
 
-// LZFSE v2 backward bit reader —— Apple lzfse 的 bit stream 是**从末尾向前读**。
+// LZFSE v2 backward FSE bit reader —— 严格移植 Apple `lzfse_fse.h`
+// 的 fse_in_stream / fse_in_init / fse_in_flush / fse_in_pull 语义。
 //
-// 理由（FSE/ANS 熵编码的固有特性）：
-//   encoder 按正向产生 symbols，但每次把新 bits 推到 accumulator 的**高位**；
-//   decoder 必须**反向**取出：从流末尾开始，累加器每次右移 N bits 消费。
-//   这样每个 symbol decode 的 "pull N bits" 刚好对应 encoder 的 "push N bits"。
+// 关键约定（Apple 模型，与朴素 LSB-bit-stream 不同）：
 //
-// 参考：Apple lzfse_decode_v2_block.c 的 bitStreamRev 结构 + Yann Collet 的
-//      FSE paper "Asymmetric Numeral Systems"。
+//	accum 是 64-bit 累加器
+//	bits [0..accum_nbits-1] 是有效数据，bits [accum_nbits..63] 必须为 0
+//	**HIGH 位 = 最近推入的 bit**（即 encoder 最后写的）
+//	**LOW 位 = 最早推入的 bit**
+//	pull(N): result = accum >> (accum_nbits - N)，然后 accum &= mask, nbits -= N
+//	→ 从 HIGH 端取 N bit，符合 FSE encoder→decoder 反向 LIFO 语义
 //
-// 本实现的 bit reader 按 64-bit accumulator 缓冲，每次从流末尾填充 64 bit。
-// 位顺序按 little-endian（Apple 格式）。
+// 关键陷阱（**容易踩**）：Apple init 时**总是**装载 8 字节（不论 payload 大小），
+// 即使 payload 只有 6 字节。Apple 借助 `buf_start` = 整个 source 起点 来允许 init
+// 倒退超出 payload 边界（payload 前面的 header 字节作为"无关 garbage" 装到 accum
+// 低位，会被 pull 自动消费掉）。
+//
+// 所以本 reader 接受 `data` = 整个 source slice + `payloadEnd` = payload 结束位置。
+// init 从 payloadEnd 倒退 8 字节装 accum；padBits 作为 accumNBits 的"扣除量"
+// （= encoder 末尾对齐填充的 0 bit 数 |padBits|，∈ [0, 7]）。
 
 import "fmt"
 
-// reverseBitReader 从字节流末尾向前读 bit
-//
-// 字节序约定（与 Apple lzfse 一致）：
-//   流是 little-endian；每 8 字节合成一个 uint64；从 accumulator 的**低位**读出 bits。
-//   fill 后，accumulator 的低 64-bitPos 位是可用数据（bitPos 是已消费的 bit 数）。
 type reverseBitReader struct {
-	data    []byte
-	bytePos int     // 当前"下一个读回 accumulator 的字节位置"（从末尾 - 8 起）
-	accum   uint64  // 64 位累加器
-	bitPos  int     // accum 已消费的 bit 数（0..63）
+	data       []byte // 整个 source slice（**包含** payload 前面的 bytes）
+	bufPos     int    // 下一次从 buf 读时的指针位置（指向当前未消费的字节后一位）
+	accum      uint64 // 64-bit 累加器，bits [0..accumNBits-1] 有效
+	accumNBits int    // 有效 bit 数
 }
 
-// newReverseBitReader 创建一个从 data 末尾开始反向读的 reader。
+// newReverseBitReader 从 data[0:payloadEnd] 末尾反向初始化 bit reader。
 //
-// headBits 是流开头要保留的 unused bits（Apple header 里 literal_bits / lmd_bits 字段）
-// 这是 encoder 对齐 accumulator 时留下的"padding bit"数量；decode 开始前要先 pull 掉。
-func newReverseBitReader(data []byte, headBits int) (*reverseBitReader, error) {
-	// bitPos 初始化为 64 = accum 完全消费状态，首次 fill() 不会把空 accum 当 leftover
-	r := &reverseBitReader{data: data, bytePos: len(data), bitPos: 64}
-	if err := r.fill(); err != nil {
-		return nil, err
+// data: 整个 source buffer（必须 ≥ 8 字节，否则 init 失败）
+// payloadEnd: payload 结束位置（exclusive），从这里向前读
+// padBits: literal_bits 或 lmd_bits（Apple header 字段，∈ [-7, 0]）
+//
+//	|padBits| = encoder 末尾对齐填充的 0 bit 数
+//
+// **要求 data 必须 ≥ 8 字节**（Apple 不支持 64-bit FSE 流 < 8 字节装载；
+// LZFSE block 格式保证 header ≥ 32 字节，total source 总是远超 8）。
+func newReverseBitReader(data []byte, payloadEnd int, padBits int) (*reverseBitReader, error) {
+	if padBits < -7 || padBits > 0 {
+		return nil, fmt.Errorf("padBits %d 不在 [-7, 0]", padBits)
 	}
-	// 先消费掉 encoder padding bit
-	if headBits > 0 {
-		if _, err := r.pull(uint8(headBits)); err != nil {
-			return nil, err
+	if payloadEnd > len(data) {
+		return nil, fmt.Errorf("payloadEnd %d > len %d", payloadEnd, len(data))
+	}
+	if payloadEnd < 8 {
+		return nil, fmt.Errorf("source 总长 %d < 8（Apple 64-bit FSE init 不支持）", payloadEnd)
+	}
+	r := &reverseBitReader{data: data, bufPos: payloadEnd}
+	// Apple fse_in_checked_init64：n != 0 装 8 字节 (accum_nbits = n+64)，
+	// n == 0 装 7 字节 (accum_nbits = n+56)
+	var loadBytes int
+	if padBits != 0 {
+		loadBytes = 8
+		r.accumNBits = padBits + 64
+	} else {
+		loadBytes = 7
+		r.accumNBits = padBits + 56
+	}
+	r.bufPos -= loadBytes
+	r.accum = readLE(data[r.bufPos : r.bufPos+loadBytes])
+
+	// 有效性自检：bits 高于 accumNBits 必须为 0（encoder padding）
+	if r.accumNBits < 0 || r.accumNBits >= 64 {
+		return nil, fmt.Errorf("init: accumNBits %d 越界", r.accumNBits)
+	}
+	if r.accumNBits == 0 {
+		if r.accum != 0 {
+			return nil, fmt.Errorf("init: accum 非零但 accumNBits=0")
 		}
+	} else if (r.accum >> uint(r.accumNBits)) != 0 {
+		return nil, fmt.Errorf("init: encoder padding 非零 (accum=%016x nbits=%d)",
+			r.accum, r.accumNBits)
 	}
 	return r, nil
 }
 
-// fill 从流末尾拉 1..8 字节进 accumulator。
-// 每次 fill 完后保证 accum 里有至少 56 bit 可供读（只要流还没读完）。
-func (r *reverseBitReader) fill() error {
-	// bitPos 已消费的 bit 数；accum 剩余 (64 - bitPos) bit
-	// 如果已消费 >= 8 bit，可拉一个字节补进来（从低位推进，但因为反向所以从流末尾拉）
-	// 实际策略：每次 fill 拉 8 字节（若流还够），重置 bitPos
-	if r.bytePos == 0 {
-		// 流耗尽
-		if r.bitPos >= 64 {
-			return fmt.Errorf("bit stream EOF")
-		}
-		return nil
+// readLE 把 bytes 当 little-endian 64-bit 装载（不够 8 字节高位补 0）
+func readLE(b []byte) uint64 {
+	var x uint64
+	for i, c := range b {
+		x |= uint64(c) << uint(i*8)
 	}
-	// 从末尾拉 8 字节（或剩余所有）
-	take := 8
-	if r.bytePos < take {
-		take = r.bytePos
-	}
-	// 先把当前 accum 里剩余的 bits 暂存起来，放到新数据的"高位"之上
-	//
-	// 反向 bit stream：流末尾的字节包含最后写入的 bit（按 encoder 视角）；
-	// decoder 要先读那些 bit。所以 fill 流程：
-	//   newBytes = data[bytePos-take : bytePos]
-	//   把这 take 字节看作 uint64（little-endian），和已剩余 accum 拼接：
-	//   leftover = accum >> bitPos （高位是 "还未 pull 的 bit"）
-	//   accum = newBytes + (leftover << (take*8))
-	//   bitPos -= take * 8
-	leftover := r.accum >> uint(r.bitPos)
-	leftoverBits := 64 - r.bitPos
-	startIdx := r.bytePos - take
-
-	// 反向 bit stream：stream 末尾的字节是"最近 encoder 写入"，decoder 要先读它。
-	// 所以末尾字节进 accum 的**低位**（下次 pull 从低位取）；次末尾进稍高位...
-	// 这意味着拼 newBytes 时顺序是 data[bytePos-1] → byte[0], data[bytePos-2] → byte[1]...
-	var newBytes uint64
-	for i := 0; i < take; i++ {
-		// r.data[bytePos-1-i] 放在 newBytes 的第 i 个 byte（低→高）
-		newBytes |= uint64(r.data[r.bytePos-1-i]) << (uint(i) * 8)
-	}
-	// 填入 accum：低 take*8 bit 是新数据，其上是 leftover
-	r.accum = newBytes | (leftover << uint(take*8))
-	r.bytePos = startIdx
-	r.bitPos = 64 - (take*8 + leftoverBits)
-	if r.bitPos < 0 {
-		return fmt.Errorf("bit reader overflow")
-	}
-	return nil
+	return x
 }
 
-// pull 从 accumulator 低位读 n bit，右对齐返回。n 最多 32（足够 Apple 的 FSE + extra bits）。
+// flush 在每次需要更多 bits 之前调用。从 buf 装载 0..7 字节使 accum_nbits 接近 64。
+func (r *reverseBitReader) flush() {
+	// nbits 是要装载的 bit 数（按字节对齐，即 (63 - accumNBits) 向下到 8 倍数）
+	nbits := (63 - r.accumNBits) & ^7
+	if nbits <= 0 {
+		return
+	}
+	loadBytes := nbits >> 3
+	if r.bufPos < loadBytes {
+		loadBytes = r.bufPos
+		nbits = loadBytes * 8
+	}
+	if loadBytes == 0 {
+		return
+	}
+	r.bufPos -= loadBytes
+	incoming := readLE(r.data[r.bufPos : r.bufPos+loadBytes])
+	// 旧 accum 左移让位，新 bytes 填低位
+	r.accum = (r.accum << uint(nbits)) | incoming
+	r.accumNBits += nbits
+}
+
+// pull 从 accum HIGH 端取 N bit，返回值在低 N bit。
 func (r *reverseBitReader) pull(n uint8) (uint32, error) {
 	if n == 0 {
 		return 0, nil
 	}
 	if n > 32 {
-		return 0, fmt.Errorf("pull n=%d 超过 32", n)
+		return 0, fmt.Errorf("pull n=%d > 32", n)
 	}
-	// 如果 accum 剩余不足，先 fill
-	if 64-r.bitPos < int(n) {
-		if err := r.fill(); err != nil {
-			return 0, err
-		}
-		if 64-r.bitPos < int(n) {
-			return 0, fmt.Errorf("pull: 数据不足（请求 %d bit，剩 %d）", n, 64-r.bitPos)
+	if int(n) > r.accumNBits {
+		// 需要更多 bits → 先 flush
+		r.flush()
+		if int(n) > r.accumNBits {
+			return 0, fmt.Errorf("pull: 数据不足（请求 %d bit，剩 %d）", n, r.accumNBits)
 		}
 	}
-	mask := (uint64(1) << uint(n)) - 1
-	out := (r.accum >> uint(r.bitPos)) & mask
-	r.bitPos += int(n)
-	return uint32(out), nil
+	// 取 HIGH N bit
+	r.accumNBits -= int(n)
+	result := r.accum >> uint(r.accumNBits)
+	// 清掉刚取走的 high N bit
+	if r.accumNBits == 0 {
+		r.accum = 0
+	} else {
+		r.accum &= (uint64(1) << uint(r.accumNBits)) - 1
+	}
+	return uint32(result), nil
 }
-

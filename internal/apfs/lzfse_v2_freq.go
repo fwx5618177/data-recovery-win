@@ -37,9 +37,20 @@ var lzfseFreqNBitsTable = [32]uint8{
 	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
 	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
 }
+// Apple `lzfse_decode_base.c` lzfse_freq_value_table（精确移植 BSD-3）：
+//
+//	{0, 2, 1, 4, 0, 3, 1, -1, 0, 2, 1, 5, 0, 3, 1, -1,
+//	 0, 2, 1,  6, 0, 3, 1, -1, 0, 2, 1, 7, 0, 3, 1, -1};
+//
+// 注意：
+//   - idx 7 / 15 / 23 / 31 在 Apple 源里是 -1（哨兵）；这些 idx 对应 nbits=8 或 14，
+//     由 `n == 8` / `n == 14` 提前 return 处理，永远不会查到 -1，所以填什么都不影响
+//     正确性；这里填 0 占位（uint16 不能装 -1）。
+//   - **关键修正**：idx 19 = 6（不是 4），idx 27 = 7（不是 5）—— 早期版本错把这两个
+//     位置和 idx 3/11 重复，导致 freq value 6 和 7 解码错误。
 var lzfseFreqValueTable = [32]uint16{
-	0, 2, 1, 4, 0, 3, 1, 8, 0, 2, 1, 5, 0, 3, 1, 24,
-	0, 2, 1, 4, 0, 3, 1, 7, 0, 2, 1, 5, 0, 3, 1, 24,
+	0, 2, 1, 4, 0, 3, 1, 0, 0, 2, 1, 5, 0, 3, 1, 0,
+	0, 2, 1, 6, 0, 3, 1, 0, 0, 2, 1, 7, 0, 3, 1, 0,
 }
 
 // bitStreamForward 从字节流正向读 bit（LSB-first per byte）
@@ -167,25 +178,29 @@ func decodeFrequencies(stream *bitStreamForward, totalSymbols int, numStates int
 // parseAllFrequencies 从 freq block 起点解出 4 套频率表。
 // 返回 (lFreqs, mFreqs, dFreqs, litFreqs, consumedBytes, err)
 //
-// 布局约定（Apple lzfse v2）：
-//   L freqs (20 symbols, 总和 = 64)   → lmd states
+// 布局（Apple `lzfse_decode_v1` 函数）：
+//   L freqs (20 symbols, 总和 = 64)
 //   M freqs (20 symbols, 总和 = 64)
-//   D freqs (64 symbols, 总和 = 64)
+//   D freqs (64 symbols, 总和 = 256)   ← 早期 bug：以为 D 也是 64
 //   literal freqs (256 symbols, 总和 = 1024)
+//
+// **关键**：D states = 256（不是 64）。Apple 给 D 用 8-bit accuracy
+// （L/M 是 6-bit accuracy）因为 D 的 symbol 范围 1..65535 比 L/M 的 0..max
+// 大 4×，需要更多 state。
 //
 // freq_table_payload_bytes = header 提供的字段；由调用方传入作为 stream 上界。
 func parseAllFrequencies(freqBytes []byte) (lFreqs, mFreqs, dFreqs, litFreqs []int, consumed int, err error) {
 	stream := newBitStreamForward(freqBytes)
 
-	lFreqs, err = decodeFrequencies(stream, 20, lmdStates)
+	lFreqs, err = decodeFrequencies(stream, 20, lStates)
 	if err != nil {
 		return nil, nil, nil, nil, 0, fmt.Errorf("l freqs: %w", err)
 	}
-	mFreqs, err = decodeFrequencies(stream, 20, lmdStates)
+	mFreqs, err = decodeFrequencies(stream, 20, mStates)
 	if err != nil {
 		return nil, nil, nil, nil, 0, fmt.Errorf("m freqs: %w", err)
 	}
-	dFreqs, err = decodeFrequencies(stream, 64, lmdStates)
+	dFreqs, err = decodeFrequencies(stream, 64, dStates)
 	if err != nil {
 		return nil, nil, nil, nil, 0, fmt.Errorf("d freqs: %w", err)
 	}

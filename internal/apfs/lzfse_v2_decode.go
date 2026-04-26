@@ -27,33 +27,33 @@ import (
 	"fmt"
 )
 
-// LMD extra bits tables —— Apple lzfse 里 L/M/D 的 "header symbol" 不是最终值，
-// 还要加 extra bits + base：
-//   L_sym ∈ [0, 20) → (L_base[sym], L_extra_bits[sym]) → pull extra bits + base = 最终 L
-//   M_sym ∈ [0, 20) → 类似
-//   D_sym ∈ [0, 64) → 类似（D 范围更大，覆盖 0..65535）
+// LMD extra bits / base value 表 —— **严格** 移植 Apple `lzfse_internal.h`（BSD-3）。
 //
-// 这些常量直接来自 Apple lzfse_fse.h（BSD-3）
+//	L_sym ∈ [0, 20) → L = l_base_value[sym] + pull(l_extra_bits[sym])
+//	M_sym ∈ [0, 20) → M = m_base_value[sym] + pull(m_extra_bits[sym])
+//	D_sym ∈ [0, 64) → D = d_base_value[sym] + pull(d_extra_bits[sym])
+//
+// **早期 bug**：L sym 16-19 / M sym 16-19 的 base/extra 与 Apple 不符：
+//   L sym 19 早期：base 30, extra 5 → 范围 30..61（错）
+//                 Apple：base 60, extra 8 → 范围 60..315
+//   M sym 19 早期：base 30, extra 8 → 范围 30..285（错）
+//                 Apple：base 312, extra 11 → 范围 312..2359  ← 关键！
+//                 9000 字节高度重复输入用 6 个长 match 才合理（每 ~1500 byte）
 var lzfseLExtraBits = [20]uint8{
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 1, 2, 3, 5,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 8,
 }
 var lzfseLBaseValue = [20]uint16{
-	0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-	10, 11, 12, 13, 14, 15, 16, 18, 22, 30,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 28, 60,
 }
 
 var lzfseMExtraBits = [20]uint8{
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 1, 2, 3, 8,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 8, 11,
 }
 var lzfseMBaseValue = [20]uint16{
-	0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-	10, 11, 12, 13, 14, 15, 16, 18, 22, 30,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 56, 312,
 }
 
-// D 的 extra bits/base 是 16-bit 分段线性：
-//   symbols 0..63 编码 1..65535
+// D 的 extra bits/base 是 16-bit 分段线性：symbols 0..63 编码 0..229372+(2^15-1)
 var lzfseDExtraBits = [64]uint8{
 	0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
 	4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7,
@@ -93,15 +93,17 @@ func decodeV2BlockPureGo(block []byte, dst []byte) (int, error) {
 	}
 
 	// --- 2. 构造 4 个 FSE decoder table ---
-	lTable, err := buildFSEDecoderTable(lFreqs, lmdStates)
+	// 注意每个 FSE 流的 state 数量不同（Apple `LZFSE_ENCODE_*_STATES`）：
+	//   L=64, M=64, D=256, literal=1024
+	lTable, err := buildFSEDecoderTable(lFreqs, lStates)
 	if err != nil {
 		return 0, fmt.Errorf("build L table: %w", err)
 	}
-	mTable, err := buildFSEDecoderTable(mFreqs, lmdStates)
+	mTable, err := buildFSEDecoderTable(mFreqs, mStates)
 	if err != nil {
 		return 0, fmt.Errorf("build M table: %w", err)
 	}
-	dTable, err := buildFSEDecoderTable(dFreqs, lmdStates)
+	dTable, err := buildFSEDecoderTable(dFreqs, dStates)
 	if err != nil {
 		return 0, fmt.Errorf("build D table: %w", err)
 	}
@@ -122,17 +124,18 @@ func decodeV2BlockPureGo(block []byte, dst []byte) (int, error) {
 	if lmdPayloadEnd > len(block) {
 		return 0, fmt.Errorf("payload 越界 (need %d, block %d)", lmdPayloadEnd, len(block))
 	}
-	litPayload := block[payloadStart:litPayloadEnd]
-	lmdPayload := block[litPayloadEnd:lmdPayloadEnd]
 
 	// --- 4. Decode literal stream (4 个并行 FSE) ---
+	// 注意：传整个 block + payload 结束位置；reverse bit reader 会借助 header 字节
+	// 作为"无关 garbage" 占据 accum 低位（详见 lzfse_v2_bitreader.go 的"关键陷阱"）
 	literals := make([]byte, h.nLiterals)
-	if err := decodeLiterals(litPayload, int(h.literalBits), h.literalStates, litTable, literals); err != nil {
+	if err := decodeLiterals(block, litPayloadEnd, int(h.literalBits),
+		h.literalStates, litTable, literals); err != nil {
 		return 0, fmt.Errorf("decode literals: %w", err)
 	}
 
 	// --- 5. Decode LMD stream + 按 (L,M,D) 生成输出 ---
-	outLen, err := decodeLMD(lmdPayload, int(h.lmdBits),
+	outLen, err := decodeLMD(block, lmdPayloadEnd, int(h.lmdBits),
 		h.lState, h.mState, h.dState,
 		lTable, mTable, dTable,
 		literals, dst, int(h.nRawBytes), int(h.nMatches))
@@ -142,152 +145,157 @@ func decodeV2BlockPureGo(block []byte, dst []byte) (int, error) {
 	return outLen, nil
 }
 
-// decodeLiterals 4 个 FSE 流并行 decode，每轮产 8 bytes（每 stream 2 bytes）
-func decodeLiterals(payload []byte, padBits int, initialStates [4]uint16,
+// decodeLiterals 4 个并行 FSE 流解码 literal stream
+//
+// Apple 算法（lzfse_decode_base.c 行 454-481）：
+//
+//	for i = 0; i < n_literals; i += 4:
+//	    literals[i+0] = fse_decode(&state0, table, &in)
+//	    literals[i+1] = fse_decode(&state1, table, &in)
+//	    literals[i+2] = fse_decode(&state2, table, &in)
+//	    literals[i+3] = fse_decode(&state3, table, &in)
+//
+// 关键：output 是**正向 index 顺序**（i, i+1, ...），但 bit 流是**从末尾反向 pull**。
+// FSE 的固有不对称：encoder 倒序产 bit，decoder 反向 pull bit + 正序 emit symbol。
+//
+// 早期实现把 idx 从末尾倒着填，导致输出顺序颠倒（解出乱字节再被 LMD 复制 → 损坏数据）。
+func decodeLiterals(block []byte, payloadEnd int, padBits int, initialStates [4]uint16,
 	table []fseEntry, out []byte) error {
 
-	if len(out)%4 != 0 {
-		// Apple encoder 保证 n_literals 是 4 的倍数；不是的话是损坏
-		// 允许少量不齐（尾部补零）
-	}
-
-	br, err := newReverseBitReader(payload, padBits)
+	br, err := newReverseBitReader(block, payloadEnd, padBits)
 	if err != nil {
 		return err
 	}
 
 	states := initialStates // 4 个状态 copy
-	// 每轮 decode 8 literals：stream3、stream2、stream1、stream0 各 2 次
-	// 实际 Apple lzfse 按 encoder 写入的倒序 pull；decoder 顺序：
-	//   for i = n_literals-1; i >= 0; i -= 4:
-	//     pull stream3 → out[i], then stream2 → out[i-1], ...
-	//
-	// 简化（正确）版本：pull 顺序与 encoder 相反
 	total := len(out)
-	idx := total - 1
-	for idx >= 0 {
-		for s := 3; s >= 0 && idx >= 0; s-- {
+	for i := 0; i+3 < total; i += 4 {
+		for s := 0; s < 4; s++ {
 			sym, err := fseDecodeOne(table, &states[s], br)
 			if err != nil {
-				return fmt.Errorf("literal fse @ idx %d stream %d: %w", idx, s, err)
+				return fmt.Errorf("literal fse @ idx %d stream %d: %w", i+s, s, err)
 			}
-			out[idx] = byte(sym)
-			idx--
+			out[i+s] = byte(sym)
 		}
 	}
+	// Apple 保证 n_literals 是 4 的倍数；尾部不齐留 0。
 	return nil
 }
 
-// decodeLMD 1 个 FSE stream 解 (L,M,D) 三元组 × nMatches，同时生成 output
-func decodeLMD(payload []byte, padBits int,
+// decodeLMD 1 个 FSE stream 解 (L,M,D) 三元组 × nMatches，同时正向 emit output。
+//
+// Apple 算法（lzfse_decode_base.c lzfse_decode_lmd 行 156-243）：
+//
+//	D = -1  // illegal init，触发首次 D=0 时报错
+//	for i = 0; i < nMatches; i++:
+//	    L_sym, L_extra → L value (one combined fse_value_decode pull)
+//	    M_sym, M_extra → M value
+//	    new_D = D_value
+//	    D = new_D ? new_D : D    ← rep-distance: D=0 means "reuse previous D"
+//	    emit L literals from `lit` cursor
+//	    emit M bytes back-ref at distance D
+//
+// 关键修正（vs 旧实现）：
+//   1. 正向迭代 i = 0..nMatches-1（旧版反向 → match 顺序颠倒，output 错位）
+//   2. 三元组 pull 顺序：(L state + L extra) (M state + M extra) (D state + D extra)
+//      —— Apple 把每对 state+extra 放一个 fse_value_decode 调用里。我们拆成两个 pull
+//      但顺序必须匹配。旧版 L state → M state → D state → L extra → M extra → D extra
+//      错乱了 bit 流。
+//   3. D=0 → 复用 prev D（rep-distance optimization）。Apple 在编码端把高频出现的
+//      "重复上一次距离" 编码为单 symbol D=0 节省 bits。
+func decodeLMD(block []byte, payloadEnd int, padBits int,
 	lStateIn, mStateIn, dStateIn uint16,
 	lTable, mTable, dTable []fseEntry,
 	literals []byte, dst []byte, nRaw int, nMatches int) (int, error) {
 
-	br, err := newReverseBitReader(payload, padBits)
+	br, err := newReverseBitReader(block, payloadEnd, padBits)
 	if err != nil {
 		return 0, err
 	}
-
-	// state 按 Apple 约定：decode 顺序是反向，但 (L, M, D) 每组先 decode D 后 M 后 L
-	// 这里按正向逻辑产出：每轮从状态读 L/M/D（每轮前状态代表"下一组" 的）
-	//
-	// 实际 decoder 流程（参考 Apple lzfse_decode_v2_block.c）:
-	//   for i = nMatches-1 down to 0:
-	//     L_sym = decode(L_table, L_state)   // updates L_state
-	//     M_sym = decode(M_table, M_state)
-	//     D_sym = decode(D_table, D_state)
-	//     L_i = L_base[L_sym] + pull(L_extra[L_sym])
-	//     M_i = M_base[M_sym] + pull(M_extra[M_sym])
-	//     D_i = D_base[D_sym] + pull(D_extra[D_sym])
-	//
-	// output 生成（正向）：我们只能在 decode 完所有三元组后一次 emit。
-	// 为简化：先把 (L, M, D) 全存一个数组，再正向 emit。
-
-	// 所有 L/M/D 值（最终数值，已加 extra bits）
-	Ls := make([]uint16, nMatches)
-	Ms := make([]uint16, nMatches)
-	Ds := make([]uint32, nMatches)
 
 	lS := lStateIn
 	mS := mStateIn
 	dS := dStateIn
 
-	// 反向 decode（Apple 约定：bit stream 末尾对应 match 0）
-	for i := nMatches - 1; i >= 0; i-- {
+	litCursor := 0
+	outCursor := 0
+	D := uint32(0) // rep-distance，第一次 D=0 是非法（Apple 用 -1 init）
+
+	for i := 0; i < nMatches; i++ {
+		// L: state + extra
 		lSym, err := fseDecodeOne(lTable, &lS, br)
 		if err != nil {
-			return 0, fmt.Errorf("LMD L decode i=%d: %w", i, err)
+			return outCursor, fmt.Errorf("LMD L state i=%d: %w", i, err)
 		}
-		mSym, err := fseDecodeOne(mTable, &mS, br)
-		if err != nil {
-			return 0, fmt.Errorf("LMD M decode i=%d: %w", i, err)
-		}
-		dSym, err := fseDecodeOne(dTable, &dS, br)
-		if err != nil {
-			return 0, fmt.Errorf("LMD D decode i=%d: %w", i, err)
-		}
-
-		// pull extra bits
 		lExtra, err := br.pull(lzfseLExtraBits[lSym])
 		if err != nil {
-			return 0, err
+			return outCursor, fmt.Errorf("LMD L extra i=%d: %w", i, err)
+		}
+		L := uint32(lzfseLBaseValue[lSym]) + lExtra
+
+		// M: state + extra
+		mSym, err := fseDecodeOne(mTable, &mS, br)
+		if err != nil {
+			return outCursor, fmt.Errorf("LMD M state i=%d: %w", i, err)
 		}
 		mExtra, err := br.pull(lzfseMExtraBits[mSym])
 		if err != nil {
-			return 0, err
+			return outCursor, fmt.Errorf("LMD M extra i=%d: %w", i, err)
+		}
+		M := uint32(lzfseMBaseValue[mSym]) + mExtra
+
+		// D: state + extra；D=0 → 复用 prev D
+		dSym, err := fseDecodeOne(dTable, &dS, br)
+		if err != nil {
+			return outCursor, fmt.Errorf("LMD D state i=%d: %w", i, err)
 		}
 		dExtra, err := br.pull(lzfseDExtraBits[dSym])
 		if err != nil {
-			return 0, err
+			return outCursor, fmt.Errorf("LMD D extra i=%d: %w", i, err)
+		}
+		newD := lzfseDBaseValue[dSym] + dExtra
+		if newD != 0 {
+			D = newD
 		}
 
-		Ls[i] = lzfseLBaseValue[lSym] + uint16(lExtra)
-		Ms[i] = lzfseMBaseValue[mSym] + uint16(mExtra)
-		Ds[i] = lzfseDBaseValue[dSym] + dExtra
-	}
-
-	// 正向 emit 输出：每组 L_i 个 literal + M_i 字节回溯
-	litCursor := 0
-	outCursor := 0
-	for i := 0; i < nMatches; i++ {
 		// emit L literals
-		L := int(Ls[i])
-		if litCursor+L > len(literals) {
-			return outCursor, fmt.Errorf("literal 越界 @i=%d: need %d+%d > %d", i, litCursor, L, len(literals))
+		if litCursor+int(L) > len(literals) {
+			return outCursor, fmt.Errorf("literal 越界 @i=%d: cursor %d + L %d > total %d",
+				i, litCursor, L, len(literals))
 		}
-		if outCursor+L > len(dst) {
+		if outCursor+int(L) > len(dst) {
 			return outCursor, fmt.Errorf("dst 溢出 @L-emit i=%d", i)
 		}
-		copy(dst[outCursor:outCursor+L], literals[litCursor:litCursor+L])
-		litCursor += L
-		outCursor += L
+		copy(dst[outCursor:outCursor+int(L)], literals[litCursor:litCursor+int(L)])
+		litCursor += int(L)
+		outCursor += int(L)
 
-		// emit M byte backref at distance D
-		M := int(Ms[i])
-		D := int(Ds[i])
-		if D <= 0 || D > outCursor {
-			return outCursor, fmt.Errorf("非法 back-ref distance D=%d @i=%d outCursor=%d", D, i, outCursor)
+		// emit M-byte back-ref at distance D
+		if D == 0 || int(D) > outCursor {
+			return outCursor, fmt.Errorf("非法 back-ref distance D=%d @i=%d outCursor=%d (newD=%d)",
+				D, i, outCursor, newD)
 		}
-		if outCursor+M > len(dst) {
-			return outCursor, fmt.Errorf("dst 溢出 @M-emit i=%d", i)
+		if outCursor+int(M) > len(dst) {
+			return outCursor, fmt.Errorf("dst 溢出 @M-emit i=%d (need %d+%d, dst %d)",
+				i, outCursor, M, len(dst))
 		}
-		// 字节级复制（允许 overlap → 必须逐字节，不能 memcpy 整段）
-		src := outCursor - D
-		for j := 0; j < M; j++ {
-			dst[outCursor+j] = dst[src+j]
+		src := outCursor - int(D)
+		for j := uint32(0); j < M; j++ {
+			dst[outCursor+int(j)] = dst[src+int(j)]
 		}
-		outCursor += M
+		outCursor += int(M)
 	}
 
-	// trailing literals（不对应任何 match）
+	// trailing literals（最后一组 match 之后的剩余 literal，不对应任何 back-ref）
 	remain := nRaw - outCursor
 	if remain > 0 {
 		if litCursor+remain > len(literals) {
-			return outCursor, fmt.Errorf("trailing literals 越界")
+			return outCursor, fmt.Errorf("trailing literals 越界 (need %d+%d, total %d)",
+				litCursor, remain, len(literals))
 		}
 		if outCursor+remain > len(dst) {
-			return outCursor, fmt.Errorf("dst 溢出 @trailing")
+			return outCursor, fmt.Errorf("dst 溢出 @trailing (need %d+%d, dst %d)",
+				outCursor, remain, len(dst))
 		}
 		copy(dst[outCursor:outCursor+remain], literals[litCursor:litCursor+remain])
 		outCursor += remain

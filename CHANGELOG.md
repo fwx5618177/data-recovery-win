@@ -4,6 +4,62 @@
 
 ---
 
+## v2.1.5 (2026-04-26)
+
+LZFSE v2 (bvx2) 纯 Go decoder 完整修复 —— Apple compression_tool round-trip 通过。
+
+### Fixed (修复 6 个独立的 LZFSE v2 实现 bug)
+
+1. **header pf0 字段位置错位**（`internal/apfs/lzfse_v2.go`）
+   - 早期把 `n_matches` 放在 bits 20..39，`n_literal_payload_bytes` 放在 40..59
+   - Apple 真实顺序相反：`n_literal_payload_bytes` 在 20..39，`n_matches` 在 40..59
+   - 错位导致 lit_payload / lmd_payload 边界错算 → 解码越界
+
+2. **freq value table idx 19/27 错值**（`internal/apfs/lzfse_v2_freq.go`）
+   - 表里 `value_table[19]` 应是 6（不是 4），`value_table[27]` 应是 7（不是 5）
+   - 早期复制粘贴时把第二半段当作第一半段镜像，丢了 freq 6 / 7
+
+3. **D 状态数错把 64 当 256**（`internal/apfs/lzfse_v2.go`）
+   - Apple `LZFSE_ENCODE_D_STATES = 256`（D 范围 0..229372 比 L/M 大 4×，需要 4× state）
+   - 早期 `lmdStates = 64` 同时给 L/M/D，D freq 表 sum 期待 64 实际 256 → 累计超限
+
+4. **FSE table 构造算法错用 Yann Collet spread**（`internal/apfs/lzfse_v2_fse.go`）
+   - Apple **不**用 spread 函数：states 按 symbol 顺序连续分配
+   - 算法：`k = clz(f) - clz(N); j0 = (2N >> k) - f; for j: delta = (j<j0) ? ((f+j)<<k) - N : (j-j0) << (k-1)`
+   - 早期用 step 互质 spread + Yann Collet delta 计算 → encoder/decoder state 转移不对应
+
+5. **L/M base/extra arrays 错值**（`internal/apfs/lzfse_v2_decode.go`）
+   - L sym 19 真值：base=60, extra=8 bits（早期：base=30, extra=5 → 范围只到 61）
+   - M sym 19 真值：base=312, extra=11 bits（早期：base=30, extra=8 → 范围只到 285）
+   - Apple sym 16-19 的 base/extra 全部需要修正
+   - **关键**：M=2359 max 让 9000-byte 高度重复输入用 6 个长 match 才正常
+
+6. **bit reader / 解码顺序与 Apple 不符**（`internal/apfs/lzfse_v2_bitreader.go` + `lzfse_v2_decode.go`）
+   - 反向 bit reader：HIGH 位 = 最近 encoder 写（Apple `fse_in_pull` 语义），早期反过来
+   - init 必须从整个 source buffer 倒退装 8 字节（不仅仅 payload slice），借助 header 字节占 accum 低位
+   - literal 解码：output 正向 index（i, i+1, i+2, i+3），不是反向
+   - LMD 解码：正向迭代 i = 0..nMatches-1（早期反向）
+   - LMD pull 顺序：(L state + L extra) (M state + M extra) (D state + D extra) ——
+     必须每对 state+extra 紧接，不能 L state → M state → D state → L extra... 错乱
+   - rep-distance 优化：D=0 时复用 prev D（Apple 编码端高频"重复上一次距离"压缩）
+
+### Added
+- `TestLZFSEv2_RoundTrip_AgainstAppleEncoder` —— 9KB 重复输入字节级 round-trip ✓
+- `TestLZFSEv2_RoundTrip_LargerVariedInput` —— 32KB 变化输入 round-trip ✓
+- 这两个测试现在是真正的 regression bar（macOS-only，CI skip 是因为 runner 没 compression_tool）
+- `TestReverseBitReader_PaddingZero` / `TestReverseBitReader_PaddingNonzero_Fails`
+
+### Why this matters
+
+LZFSE v2 (bvx2) 是 Apple APFS 默认压缩格式之一。早期实现号称"完整"但实际 round-trip 全部失败，
+所有 bvx2 数据要靠 macOS-only `/usr/bin/compression_tool` shell-out fallback。这意味着：
+- 非 macOS 平台（Windows/Linux）扫描 APFS 镜像时 bvx2 块**全部解不出来**
+- macOS 上每个 bvx2 块要 fork 一次 compression_tool，性能低 100×
+
+修复后纯 Go decoder 在所有平台都能正确解 bvx2，无需外部依赖。
+
+---
+
 ## v2.1.2 (2026-04-27)
 
 VeraCrypt Serpent + 完整 cascade 集合 + 系统加密自动识别 + APFS LZFSE v2 重构（部分）。
