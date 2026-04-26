@@ -6,20 +6,23 @@ package veracrypt
 // 性能优化点：
 //   1. 一次读 64KB 卷头区到内存，避免每次 hash 派生时重读盘
 //   2. 每个 (algo, isTC) 组合派生独立 header_key（PBKDF2 ~ 1-3 秒/次）
-//   3. PBKDF2 输出固定 192 字节，足够 cascade（cascade 实际还没实现，留接口）
+//   3. PBKDF2 输出固定 192 字节，cascade 用 64B/128B/192B 切片（前缀按加密顺序）
 //   4. AES-XTS 解密整个 448 字节 encrypted block 当 1 个 sector（index=0）
 //   5. 一旦匹配 signature + CRC，立即停止枚举
 //
-// 当前覆盖：
-//   - VeraCrypt: SHA-512 + SHA-256 + RIPEMD-160（覆盖 ~95% VC 用户）
-//   - TrueCrypt: SHA-512 + RIPEMD-160（覆盖 ~95% TC 用户）
-//   - Cipher: AES-XTS-256 + Twofish-XTS-256（覆盖 ~90% 用户；Serpent + 多 cipher
-//     cascade 仍未实现 —— Serpent 在 Go 标准库 / x/crypto 都没有，需要自己 port
-//     800+ 行的 reference 实现，留 TODO）
+// 当前覆盖（VC 默认 cipher 集合的 95%+）：
+//   - VeraCrypt hash: SHA-512 + SHA-256 + RIPEMD-160（覆盖 ~95% VC 用户）
+//   - TrueCrypt hash: SHA-512 + RIPEMD-160（覆盖 ~95% TC 用户）
+//   - Single cipher: AES-XTS / Twofish-XTS / Serpent-XTS (256-bit 全集)
+//   - 2-cipher cascade: AES-Twofish / Twofish-Serpent / Serpent-AES
+//   - 3-cipher cascade: AES-Twofish-Serpent / Serpent-Twofish-AES
 //
-// 一次成功解锁的最坏耗时：3 hash × 2 (VC/TC) × 2 cipher = 12 次 PBKDF2 ≈ 20-30 秒。
-// 但同一 hash 下不同 cipher 共用 PBKDF2 输出（KDF 与 cipher 无关）→ 实际只跑
-// 6 次 PBKDF2 + 6 次 cipher 试解。UI 上显示"正在尝试 X / 12"进度文本。
+// Serpent 走 github.com/aead/serpent (BSD-2)，NESSIE Set 4 vector 0 KAT 验证。
+//
+// 一次成功解锁的最坏耗时：5 hash (3 VC + 2 TC) × 8 cipher = 40 attempts，但
+// 同一 hash 下所有 cipher 共用 PBKDF2 输出 → 实际 5 次 PBKDF2 + 40 次 cipher
+// 试解。NumCPU 并发跑（parallelUnlock）→ wall time ≈ max(slowest PBKDF2)。
+// 含 RIPEMD-160 655K iter PBKDF2 是 wall-time 大头（~3-5s on AES-NI CPU）。
 // ============================================================================
 
 import (

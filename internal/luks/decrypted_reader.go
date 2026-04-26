@@ -32,7 +32,8 @@ type DecryptedReader struct {
 	payloadOff  int64  // 密文起点（在 underlying 上的字节偏移）
 	payloadSize int64  // 解密后可见的总字节数（dynamic 时传 0 表示直到 underlying 末尾）
 	devicePath  string // 透传，便于上层提示"现在扫的是 unlocked-XXX"
-	// IV tweak / sector_size 都按 LUKS 默认（512）；其它 sector_size 暂不支持
+	// sector_size：512 (LUKS1 / 老 LUKS2) 或 4096 (现代 LUKS2 + Advanced Format / NVMe)
+	// 由 cipher.SectorSize() 决定，与 SectorCipher 的 4K-aware 实现联动
 	sectorSize int
 	// ivBase 是 LUKS2 segment.iv_tweak 字段（LUKS1 一律 0）。
 	// XTS 的 sector tweak = ivBase + (offset / sectorSize)
@@ -125,7 +126,7 @@ func (d *DecryptedReader) CacheStats() disk.CacheStats { return d.cache.Stats() 
 // Size 返回解密后可见区域的字节数
 func (d *DecryptedReader) Size() (int64, error) { return d.payloadSize, nil }
 
-// SectorSize 返回固定 512（cryptsetup 默认；4K sector 卷暂不支持）
+// SectorSize 返回 cipher 的扇区粒度：512 或 4096，由 LUKS2 segment.sector_size 决定
 func (d *DecryptedReader) SectorSize() int { return d.sectorSize }
 
 // DevicePath 返回上层带前缀的虚拟设备路径

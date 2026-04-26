@@ -256,9 +256,13 @@ var ErrLZFSEFSEPartial = fmt.Errorf(
 // DecompressLZFSEv2Block 尝试解一个 bvx2 block。
 //
 // 策略（按可靠性排序）：
-//   1. macOS 上调 /usr/bin/compression_tool（Apple 官方库，100% 兼容）→ 首选
-//   2. 未来：纯 Go FSE decoder（当前 freq decoder 已就绪；主 decode loop 未实现）
-//   3. fallback：返回 ErrLZFSEFSEPartial，上层退化到 "ErrLZFSEv2Unsupported"
+//   1. 纯 Go decoder (decodeV2BlockPureGo)：header + freq table 按 Apple 真实
+//      bit-packed 布局 + 5-bit codeword table 实现；FSE state / literal stream
+//      decode 仍有边界 bug（详见 lzfse_v2_e2e_test.go 的 regression bar）。
+//      多数小 block 失败、复杂 block 失败的概率高。
+//   2. macOS 上调 /usr/bin/compression_tool（Apple 官方 lzfse 库，100% 兼容）
+//      → fallback；非 macOS 用户走 ErrLZFSEFSEPartial 友好提示
+//   3. ErrLZFSEFSEPartial：明确"无法解开"，上层退化到 "ErrLZFSEv2Unsupported"
 //
 // 成功返回解出字节数。
 func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {

@@ -53,13 +53,13 @@
 | **ext2 / ext3 / ext4** | ✅ | ✅ extent tree | ✅ | Linux 系统 / Android |
 | **APFS** | ✅ | ✅ omap + fs B-tree | ✅ | macOS 10.13+ / iOS |
 | **HFS+ / HFSX** | ✅ | ✅ Catalog B-tree | ⚠️ 残留 | Time Machine 备份 |
-| **Btrfs** | ✅ | ✅ B-tree walker | ⚠️ | openSUSE / Synology NAS |
+| **Btrfs** | ✅ | ✅ FS-tree + chunk catalog + 路径回溯 | ✅ | openSUSE / Synology NAS |
 | **XFS** | ✅ | ✅ inobt + bmbt | ⚠️ | RHEL / CentOS |
 | **F2FS** | ✅ | ✅ NAT + inode | ⚠️ | Android / 嵌入式 |
 | **ZFS** | ✅ | ✅ dnode + ZAP micro | ⚠️ | TrueNAS / FreeBSD |
 | **ReFS** | ✅ | 🔶 启发式提取 | ⚠️ | Windows Server / Win11 Pro |
-| **LUKS / LUKS2** | ✅ 识别 | ❌ 需挂载后扫 | — | Linux 加密盘 |
-| **VeraCrypt / TrueCrypt** | ✅ 高熵识别 | ❌ 需挂载后扫 | — | 跨平台加密 |
+| **LUKS / LUKS2** | ✅ | ✅ 真解锁后扫（PBKDF2 + Argon2id + AFsplitter + AES-XTS / CBC-ESSIV） | ✅ | Linux 加密盘 |
+| **VeraCrypt / TrueCrypt** | ✅ | ✅ 真解锁后扫（PBKDF2-SHA512/256/RIPEMD-160 + AES/Twofish/Serpent + cascade + PIM） | ✅ | 跨平台加密 |
 
 ---
 
@@ -74,6 +74,8 @@
 | **BitLocker** (AES-CBC + Elephant Diffuser) | Vista / Win7 老格式 | ✅ |
 | **FileVault** (APFS 加密卷) | 用户密码 | ✅ 完整链：keybag → PBKDF2 → AES-KeyWrap → VEK |
 | **ZFS native encryption** | 用户密码 | ✅ PBKDF2-SHA512 + AES-KeyWrap + HKDF + AES-GCM |
+| **LUKS1 / LUKS2** | 用户密码 | ✅ PBKDF2 + Argon2id KDF + AFsplitter + AES-XTS-plain64 / CBC-ESSIV / CBC-plain；4K sector + sha1/sha512 csum + 跨 keyslot 进度回调 |
+| **VeraCrypt / TrueCrypt** | 用户密码 [+ PIM] | ✅ PBKDF2-{SHA-512/256/RIPEMD-160} × {AES-XTS, Twofish-XTS, Serpent-XTS, AES-Twofish/Twofish-Serpent/Serpent-AES cascade, AES-Twofish-Serpent/Serpent-Twofish-AES 3-cipher cascade}；含系统加密 layout (offset 31744) + auto-detect 路径 |
 
 **BitLocker TPM 卷**：自动扫描挂载盘内 `C:\hiberfil.sys` / `C:\Windows\MEMORY.DMP` 等作为候选 memory image。
 

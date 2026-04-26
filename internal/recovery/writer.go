@@ -803,8 +803,9 @@ func (w *SafeWriter) WriteEXTFile(
 //   - regular：disk_logical → ChunkCatalog.MapLogical → 物理 offset，读 length 字节写
 //   - prealloc：preallocated 但未写入实际数据，写零填充
 //
-// 限制：压缩 extent (zlib/LZO/ZSTD) 现按 *raw* 字节写出（产物是压缩后的字节
-// 流，需用户用 btrfs-progs / 7zip 二次解压）。完整解压留 TODO。
+// 压缩 extent 解压：通过 btrfs.DecompressExtent 支持 zlib + zstd（zip-bomb 防御
+// + ExtentOffset 切片）；LZO 明确 ErrCompressionUnsupported（无现成纯 Go 实现）。
+// 失败的压缩段写零保留对齐，partial 恢复优于整体失败。
 func (w *SafeWriter) WriteBtrfsFile(
 	file *types.RecoveredFile,
 	source *btrfs.FSTreeFile,
