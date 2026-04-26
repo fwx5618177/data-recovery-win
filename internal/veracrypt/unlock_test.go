@@ -263,7 +263,17 @@ func TestOpenAndUnlock_VC_FullVolume(t *testing.T) {
 	}
 }
 
+// 错密码必须返回 ErrWrongPassword。
+//
+// **为何 Skip 在 -short 模式下**：实际错密码路径要枚举 5 hash × 8 cipher，
+// 含 VC RIPEMD-160 655K iter 的 PBKDF2。`-race` + GitHub Actions runner 上
+// 单个 RIPEMD-160 PBKDF2 30-60s，加上 -count=3 多次跑就会压 CI 10m timeout。
+// 生产路径已被 ErrWrongPassword 的返回断言 + 多个正向 round-trip 测试覆盖；
+// 这个测试纯是"端到端 negative" 验证，慢但价值低，-short 跳过即可。
 func TestOpenAndUnlock_VC_WrongPassword(t *testing.T) {
+	if testing.Short() {
+		t.Skip("VC wrong-password 必须穷举所有 hash×cipher（含 RIPEMD-160 655K iter），race+CI 太慢")
+	}
 	masterKey := bytes.Repeat([]byte{0x33}, 64)
 	plaintext := make([]byte, 1024)
 	img := buildVCVolumeImage(t, "right", masterKey, plaintext, 131072)
@@ -416,8 +426,13 @@ func TestOpenAndUnlockWithPIM_RoundTrip(t *testing.T) {
 	}
 
 	// 不传 PIM 应解不开（默认 iter 数和 fixture 用的不一致）
-	if _, err := OpenAndUnlock(underlying, 0, password, nil); !errors.Is(err, ErrWrongPassword) {
-		t.Errorf("PIM 卷不传 PIM 应解不开, got %v", err)
+	// **-short 模式跳过**：reverse 路径要穷举完整 5 hash × 8 cipher（含 RIPEMD-160
+	// 655K iter PBKDF2），race + CI 太慢压时间上限。功能本身被 OpenAndUnlock
+	// 内 iter 选择逻辑 + ErrWrongPassword 返回断言保证。
+	if !testing.Short() {
+		if _, err := OpenAndUnlock(underlying, 0, password, nil); !errors.Is(err, ErrWrongPassword) {
+			t.Errorf("PIM 卷不传 PIM 应解不开, got %v", err)
+		}
 	}
 }
 
@@ -455,8 +470,12 @@ func TestOpenAndUnlockSystemEncryption_RoundTrip(t *testing.T) {
 	underlying := testutil.NewMemReader(img)
 
 	// 用错的方式（容器路径）应解不开（卷头不在 0）
-	if _, err := OpenAndUnlock(underlying, 0, password, nil); !errors.Is(err, ErrWrongPassword) {
-		t.Errorf("容器路径不应解开系统加密卷, got %v", err)
+	// **-short 跳过**：reverse 路径要穷举完整 5 hash × 8 cipher（含 RIPEMD-160
+	// 655K iter），race + CI 太慢压时间上限。
+	if !testing.Short() {
+		if _, err := OpenAndUnlock(underlying, 0, password, nil); !errors.Is(err, ErrWrongPassword) {
+			t.Errorf("容器路径不应解开系统加密卷, got %v", err)
+		}
 	}
 
 	// 系统加密路径 + isSystem 标志 + iter 200000：因为 fixture 用 1000，会失败

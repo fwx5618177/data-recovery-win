@@ -53,8 +53,12 @@ jobs:
           # G301/G302/G306: file permissions (取证输出目录)
           gosec -severity=medium -exclude=G115,G104,G304,G204,G301,G302,G306 ./...
 
-      - name: Go test (race, 3x)
-        run: go test -race -count=3 -timeout=10m ./...
+      - name: Go test (race, 3x, -short)
+        # `-short` 跳过 VC 错密码穷举型测试 —— 它们在 race-mode CI runner 上
+        # 单个 RIPEMD-160 PBKDF2 (655K iter) 30-60s，× -count=3 × 多个慢测试容易
+        # 压 10m timeout。负向路径已被 ErrWrongPassword 返回断言 + 多个正向
+        # round-trip 测试覆盖；本地 `go test` 不带 -short 会全跑。
+        run: go test -race -count=3 -timeout=10m -short ./...
 
       - name: Cross-compile smoke (all platforms)
         run: make verify-platforms
