@@ -60,6 +60,18 @@ const (
 
 	// HeaderEncSectorSize 是头部 XTS 加解密的扇区大小（必须 = SectorSize）
 	HeaderEncSectorSize = 512
+
+	// 系统加密卷头偏移（VC Windows 全盘加密）
+	//
+	// 来源：VC src/Common/Crypto.h
+	//   TC_BOOT_VOLUME_HEADER_SECTOR_OFFSET = 62 * 512 = 31744
+	//
+	// 系统加密 (Windows boot 盘) layout：
+	//   sector 0..61   (offset 0..31743):    boot loader（不加密）
+	//   sector 62      (offset 31744):       VC volume header（512B；同 layout = 64 salt + 448 encrypted）
+	//   sector 63..255 (offset 32256..131071): reserved / boot loader 续区
+	//   sector 256+    (offset 131072+):     加密数据区（Windows 分区内容）
+	SystemEncryptionHeaderOffset int64 = 31744
 )
 
 // VolumeHeader 解密后的卷头
@@ -145,9 +157,10 @@ func ParseDecryptedHeader(buf []byte) (*VolumeHeader, error) {
 	if h.VolumeSize == 0 || h.PayloadSize == 0 {
 		return nil, errors.New("VC 卷大小 / payload size 为 0（头部数据破坏）")
 	}
-	if h.PayloadOffset == 0 {
-		return nil, errors.New("VC payload offset 为 0（系统加密暂不支持）")
-	}
+	// 注意：VC system encryption 卷头里 PayloadOffset 也可以是 0（boot 区不算 payload，
+	// 加密数据区从 sector 256 = 131072 字节开始 = data area；但 PayloadOffset 字段
+	// 表达的是"加密区起点"在 *partition* 里的字节偏移，可能为 0/131072/其他）。
+	// 这里不再硬性拒绝 PayloadOffset==0 —— 让 caller (system encryption parser) 决定。
 	return h, nil
 }
 

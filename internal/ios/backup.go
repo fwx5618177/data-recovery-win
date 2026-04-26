@@ -73,9 +73,12 @@ func BackupSearchRoots() []string {
 		}
 	}
 
-	// 过滤：只保留真实存在的目录
+	// 过滤：只保留真实存在的目录。
+	// roots 仅含我们硬编码的已知 iOS backup 路径（~/Library/Application Support/MobileSync/Backup
+	// 等 OS 标准位置），不是用户输入路径，无 path traversal 风险。
 	var existing []string
 	for _, r := range roots {
+		// #nosec G304 G703 -- iOS 备份硬编码路径，由 OS 定义不是用户控
 		if st, err := os.Stat(r); err == nil && st.IsDir() {
 			existing = append(existing, r)
 		}

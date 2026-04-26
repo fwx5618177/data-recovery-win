@@ -38,7 +38,12 @@ package luks
 // ============================================================================
 
 import (
+	// LUKS1 hash_spec 在 cryptsetup 历史上允许 sha1/sha256/sha512/ripemd160；
+	// SHA-1 在 2010 年前创建的 LUKS1 卷里大量存在。读老存量必须支持；
+	// 我们工具是只读取证用途，SHA-1 抗碰撞弱化不构成攻击面。
+	// #nosec G505 -- LUKS1 老存量兼容性，纯只读
 	"crypto/sha1"
+
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"

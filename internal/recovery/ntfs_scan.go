@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,63 +61,95 @@ func (e *Engine) runNTFSScan(
 		totalPartitionWeight = float64(len(partitions))
 	}
 
-	var files []*types.RecoveredFile
-	accumulatedWeight := float64(0)
-	partitionScanned := 0
-	var lastErr error
-
-	for index, partition := range partitions {
-		select {
-		case <-ctx.Done():
-			return files, ctx.Err()
-		default:
-		}
-
-		weight := partitionWeight(partition)
-		if weight <= 0 {
-			weight = 1
-		}
-		normalizedWeight := weight / totalPartitionWeight
-		partitionLabel := fmt.Sprintf("NTFS 分区 %d/%d", index+1, len(partitions))
-		filesFoundBefore := len(files)
-
-		partitionFiles, partitionErr := e.scanNTFSPartition(
-			ctx,
-			scanner,
-			partition,
-			partitionLabel,
-			func(p types.ScanProgress) {
-				p.Percent = accumulatedWeight*100 + p.Percent*normalizedWeight
-				if p.FilesFound > 0 {
-					p.FilesFound += filesFoundBefore
-				} else {
-					p.FilesFound = filesFoundBefore
-				}
-				onProgress(p)
-			},
-			onFound,
-		)
-		if partitionErr != nil {
-			if ctx.Err() != nil {
-				return files, ctx.Err()
-			}
-			lastErr = partitionErr
-			logger.Warn("分区扫描失败", "partition", partitionLabel, "err", partitionErr)
-			accumulatedWeight += normalizedWeight
-			continue
-		}
-
-		partitionScanned++
-		files = append(files, partitionFiles...)
-
-		accumulatedWeight += normalizedWeight
+	// 多分区并发：worker 数 = min(NumCPU, len(partitions), 4)。
+	// 4 是 HDD 友好上限：> 4 并发对单 HDD 引起寻道竞争劣化；SSD/NVMe/image file 无害。
+	concurrency := runtime.NumCPU()
+	if concurrency > len(partitions) {
+		concurrency = len(partitions)
 	}
+	if concurrency > 4 {
+		concurrency = 4
+	}
+
+	var (
+		mu                sync.Mutex
+		files             []*types.RecoveredFile
+		accumulatedWeight float64
+		partitionScanned  int
+		lastErr           error
+	)
+
+	// concurrent-safe onFound：直接转发；mftEntry 实时回调已经线程安全（cacheNTFSSource 加锁）
+	safeOnFound := onFound // 各 worker 直接调用；scanNTFSPartition 内部 mu-protected
+
+	jobs := make(chan int, len(partitions))
+	for i := range partitions {
+		jobs <- i
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				partition := partitions[index]
+
+				weight := partitionWeight(partition)
+				if weight <= 0 {
+					weight = 1
+				}
+				normalizedWeight := weight / totalPartitionWeight
+				partitionLabel := fmt.Sprintf("NTFS 分区 %d/%d", index+1, len(partitions))
+
+				// 每分区独立的 progress 适配：拿当前已完成的累积权重做 base
+				partitionFiles, partitionErr := e.scanNTFSPartition(
+					ctx,
+					scanner,
+					partition,
+					partitionLabel,
+					func(p types.ScanProgress) {
+						mu.Lock()
+						base := accumulatedWeight
+						filesBase := len(files)
+						mu.Unlock()
+						p.Percent = base*100 + p.Percent*normalizedWeight
+						if p.FilesFound > 0 {
+							p.FilesFound += filesBase
+						} else {
+							p.FilesFound = filesBase
+						}
+						onProgress(p)
+					},
+					safeOnFound,
+				)
+
+				mu.Lock()
+				if partitionErr != nil {
+					if ctx.Err() == nil {
+						lastErr = partitionErr
+						logger.Warn("分区扫描失败", "partition", partitionLabel, "err", partitionErr)
+					}
+				} else {
+					partitionScanned++
+					files = append(files, partitionFiles...)
+				}
+				accumulatedWeight += normalizedWeight
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 
 	if partitionScanned == 0 && lastErr != nil {
 		return nil, lastErr
 	}
 
-	logger.Info("NTFS 扫描完成", "partitions", partitionScanned, "files", len(files))
+	logger.Info("NTFS 扫描完成", "partitions", partitionScanned, "files", len(files), "concurrency", concurrency)
 	return files, nil
 }
 

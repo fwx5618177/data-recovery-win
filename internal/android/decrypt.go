@@ -31,7 +31,13 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+
+	// Android `.ab` 备份格式从 Android 4.0 起用 PBKDF2-SHA1 + AES-CBC 派生 master
+	// key（AOSP src/com/android/server/backup/PasswordBasedFileBackupHelper.java）。
+	// 读老 .ab 备份只能用 SHA-1；只读取证用途无攻击面。
+	// #nosec G505 -- Android `.ab` 备份格式硬性约束，纯只读
 	"crypto/sha1"
+
 	"crypto/subtle"
 	"errors"
 	"fmt"

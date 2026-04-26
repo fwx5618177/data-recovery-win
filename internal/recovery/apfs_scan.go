@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"data-recovery/internal/apfs"
 	"data-recovery/internal/disk"
@@ -43,7 +45,20 @@ func (e *Engine) runAPFSScan(
 		return nil, nil
 	}
 
-	var files []*types.RecoveredFile
+	var (
+		mu    sync.Mutex
+		files []*types.RecoveredFile
+	)
+	emit := func(rf *types.RecoveredFile, src apfsRecoverySource) {
+		mu.Lock()
+		files = append(files, rf)
+		mu.Unlock()
+		e.cacheAPFSSource(rf.ID, src)
+		if onFound != nil {
+			onFound(rf)
+		}
+	}
+
 	for ci, c := range containers {
 		if ctx.Err() != nil {
 			return files, ctx.Err()
@@ -62,92 +77,123 @@ func (e *Engine) runAPFSScan(
 			continue
 		}
 
-		c := c // pin loop var; FindContainers 返回 []*Container
-		for _, v := range c.Volumes {
-			if v.IsEncrypted {
-				// FileVault 加密卷：检查 engine 是否已通过 SetAPFSVEK 注入 VEK
-				vek := e.getAPFSVEK(v.UUID)
-				if vek == nil {
-					logger.Info("APFS 卷加密（FileVault）— 未提供 VEK，fs tree 不可读，跳过",
-						"name", v.Name, "uuid", fmt.Sprintf("%X", v.UUID))
-					continue
-				}
-				// 有 VEK：包一层透明解密 reader，fs tree 就能按普通路径遍历
-				encReader, err := apfs.NewEncryptedReader(reader, vek, c.BlockSize, c.Offset)
-				if err != nil {
-					logger.Warn("FileVault EncryptedReader 构造失败", "vol", v.Name, "err", err)
-					continue
-				}
-				if v.RootTreeOID == 0 {
-					continue
-				}
-				crawler := apfs.NewFSTreeCrawler(encReader, c.Offset, c.BlockSize, omap)
-				if err := crawler.Crawl(v.RootTreeOID); err != nil {
-					logger.Warn("FileVault fs tree 遍历失败", "vol", v.Name, "err", err)
-					continue
-				}
-				entries := crawler.EnumerateFiles()
-				vCopy := v
-				for _, ent := range entries {
-					if ent.IsDir {
-						continue
-					}
-					rf := apfsEntryToRecoveredFile(ent, c, &vCopy)
-					if rf == nil {
-						continue
-					}
-					rf.Description += " (FileVault 解密后)"
-					files = append(files, rf)
-					e.cacheAPFSSource(rf.ID, apfsRecoverySource{
-						ContainerOffset: c.Offset,
-						BlockSize:       c.BlockSize,
-						Extents:         ent.Extents,
-					})
-					if onFound != nil {
-						onFound(rf)
-					}
-				}
-				continue
-			}
-			if v.RootTreeOID == 0 {
-				continue
-			}
-			crawler := apfs.NewFSTreeCrawler(reader, c.Offset, c.BlockSize, omap)
-			if err := crawler.Crawl(v.RootTreeOID); err != nil {
-				logger.Warn("APFS 卷 fs tree 遍历失败", "vol", v.Name, "err", err)
-				continue
-			}
-			entries := crawler.EnumerateFiles()
-			perVol := 0
-			vCopy := v
-			for _, ent := range entries {
-				if ent.IsDir {
-					continue
-				}
-				rf := apfsEntryToRecoveredFile(ent, c, &vCopy)
-				if rf == nil {
-					continue
-				}
-				files = append(files, rf)
-				e.cacheAPFSSource(rf.ID, apfsRecoverySource{
-					ContainerOffset: c.Offset,
-					BlockSize:       c.BlockSize,
-					Extents:         ent.Extents,
-					LogicalSize:     0,
-				})
-				if onFound != nil {
-					onFound(rf)
-				}
-				perVol++
-			}
-			logger.Info("APFS 卷扫描完成", "vol", v.Name, "files", perVol)
+		c := c // pin loop var
+		// 单容器内多卷并发：典型 Mac 系统盘有 system / data / preboot / recovery / vm
+		// 等 4-8 个卷；并发能 2-4× 加速。Worker 数 ∩ 4 是 HDD 友好上限。
+		concurrency := runtime.NumCPU()
+		if concurrency > len(c.Volumes) {
+			concurrency = len(c.Volumes)
 		}
+		if concurrency > 4 {
+			concurrency = 4
+		}
+		if concurrency < 1 {
+			concurrency = 1
+		}
+
+		jobs := make(chan int, len(c.Volumes))
+		for vi := range c.Volumes {
+			jobs <- vi
+		}
+		close(jobs)
+
+		var wg sync.WaitGroup
+		for w := 0; w < concurrency; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for vi := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					v := c.Volumes[vi]
+					scanAPFSVolume(e, reader, c, v, omap, emit)
+				}
+			}()
+		}
+		wg.Wait()
 	}
 	if onProgress != nil {
 		onProgress(types.ScanProgress{Phase: "apfs", Percent: 100, FilesFound: len(files)})
 	}
 	logger.Info("APFS 扫描完成", "files", len(files))
 	return files, nil
+}
+
+// scanAPFSVolume 扫描单个 APFS 卷（FileVault 走 EncryptedReader；普通卷直读）。
+// 把 emit 抽出来后这里逻辑纯净 — 给 worker pool 调用。
+func scanAPFSVolume(
+	e *Engine,
+	reader disk.DiskReader,
+	c *apfs.Container,
+	v apfs.Volume,
+	omap map[uint64]apfs.OmapEntry,
+	emit func(*types.RecoveredFile, apfsRecoverySource),
+) {
+	if v.IsEncrypted {
+		vek := e.getAPFSVEK(v.UUID)
+		if vek == nil {
+			logger.Info("APFS 卷加密（FileVault）— 未提供 VEK，fs tree 不可读，跳过",
+				"name", v.Name, "uuid", fmt.Sprintf("%X", v.UUID))
+			return
+		}
+		encReader, err := apfs.NewEncryptedReader(reader, vek, c.BlockSize, c.Offset)
+		if err != nil {
+			logger.Warn("FileVault EncryptedReader 构造失败", "vol", v.Name, "err", err)
+			return
+		}
+		if v.RootTreeOID == 0 {
+			return
+		}
+		crawler := apfs.NewFSTreeCrawler(encReader, c.Offset, c.BlockSize, omap)
+		if err := crawler.Crawl(v.RootTreeOID); err != nil {
+			logger.Warn("FileVault fs tree 遍历失败", "vol", v.Name, "err", err)
+			return
+		}
+		for _, ent := range crawler.EnumerateFiles() {
+			if ent.IsDir {
+				continue
+			}
+			rf := apfsEntryToRecoveredFile(ent, c, &v)
+			if rf == nil {
+				continue
+			}
+			rf.Description += " (FileVault 解密后)"
+			emit(rf, apfsRecoverySource{
+				ContainerOffset: c.Offset,
+				BlockSize:       c.BlockSize,
+				Extents:         ent.Extents,
+			})
+		}
+		return
+	}
+
+	if v.RootTreeOID == 0 {
+		return
+	}
+	crawler := apfs.NewFSTreeCrawler(reader, c.Offset, c.BlockSize, omap)
+	if err := crawler.Crawl(v.RootTreeOID); err != nil {
+		logger.Warn("APFS 卷 fs tree 遍历失败", "vol", v.Name, "err", err)
+		return
+	}
+	perVol := 0
+	for _, ent := range crawler.EnumerateFiles() {
+		if ent.IsDir {
+			continue
+		}
+		rf := apfsEntryToRecoveredFile(ent, c, &v)
+		if rf == nil {
+			continue
+		}
+		emit(rf, apfsRecoverySource{
+			ContainerOffset: c.Offset,
+			BlockSize:       c.BlockSize,
+			Extents:         ent.Extents,
+			LogicalSize:     0,
+		})
+		perVol++
+	}
+	logger.Info("APFS 卷扫描完成", "vol", v.Name, "files", perVol)
 }
 
 func apfsEntryToRecoveredFile(ent apfs.FileEntry, c *apfs.Container, v *apfs.Volume) *types.RecoveredFile {

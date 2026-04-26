@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import FileTable from "./FileTable";
 import BestChanceFirst from "./BestChanceFirst";
+import CacheStatsPanel from "./CacheStatsPanel";
 import {
   IconAlertTriangle,
   IconCheckCircle,
@@ -283,6 +284,10 @@ export default function Workbench({
               {" —— 解密在内存中透明完成，源盘和密钥均未落盘。"}
             </div>
           )}
+          {/* 加密卷扫描时展示 sector 缓存命中率（LUKS / VC / BitLocker）；
+              非加密扫描后端返回 active=false → 面板自动隐藏 */}
+          <CacheStatsPanel scanActive={scanActive} />
+
           {systemFileCount > 0 && (
             <div
               className="system-file-banner"

@@ -29,10 +29,11 @@ import (
 	"hash"
 
 	"golang.org/x/crypto/pbkdf2"
-	// 我们必须支持 RIPEMD-160 才能解锁老 TrueCrypt 7.x / 早期 VeraCrypt 卷。
-	// staticcheck SA1019 说它"不该用于新应用"——对，但取证恢复是处理 *老存量*，
-	// 没得选。
+	// 必须支持 RIPEMD-160 才能解锁老 TrueCrypt 7.x / 早期 VeraCrypt 卷。
+	// staticcheck SA1019 / gosec G507 都警告 "legacy weak primitive"——对，但
+	// 取证恢复是处理 *老存量*，没得选；新创建的卷我们不写 RIPEMD。
 	//lint:ignore SA1019 legacy VC/TC compatibility
+	// #nosec G507 -- VC/TC 老卷只能用 RIPEMD-160 解；纯只读取证用途
 	"golang.org/x/crypto/ripemd160"
 )
 

@@ -54,7 +54,12 @@ package luks
 // ============================================================================
 
 import (
+	// LUKS2 spec 明确允许 sha1/sha256/sha512 三种 csum hash（cryptsetup 实现集合）。
+	// SHA-1 在新创建卷里不推荐，但读取老存量必须支持；纯只读取证场景 SHA-1 抗碰撞
+	// 弱化不构成实际威胁（无对手能选择性伪造让我们误信"卷未被篡改"）。
+	// #nosec G505 -- LUKS2 csum 兼容性，纯只读
 	"crypto/sha1"
+
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"

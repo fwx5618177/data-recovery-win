@@ -4,6 +4,104 @@
 
 ---
 
+## v2.1.0 (2026-04-26)
+
+加密卷真解锁 + Btrfs 完整扫描 + 性能/工程基础设施。代码量 +19233/-1064 (104 文件)。
+
+### Added
+
+**加密卷真解锁**（业界数据恢复工具的核心壁垒）
+- **LUKS1/LUKS2** (`internal/luks/`)：完整 PBKDF2 + Argon2id KDF + AFsplitter (anti-forensic
+  splitter) + AES-XTS-plain64 / CBC-ESSIV / CBC-plain 三种 sector cipher，支持 4K sector 卷
+  和 sha1/sha512 LUKS2 csum；跨 keyslot 进度回调让 UI 能展示"正在尝试 keyslot 2/8"
+- **VeraCrypt/TrueCrypt** (`internal/veracrypt/`)：PBKDF2-{SHA-512/256/RIPEMD-160}
+  × {AES-XTS, Twofish-XTS, AES-Twofish cascade}；PIM (Personal Iterations Multiplier)
+  含系统加密公式 (200000 fixed for SHA / pim×2048 for RIPEMD)；NumCPU 并发派生让
+  最坏 30s+ unlock 缩到 5s；`vc:trying` 事件流前端可观察
+- **DecryptedReader 透明解密代理** (`internal/luks/decrypted_reader.go`)：把已解锁卷
+  暴露成普通 `disk.DiskReader`，下游 NTFS / ext4 / APFS scanner 直接 ReadAt 即可
+  扫"虚拟解密磁盘"，完全不需要懂 LUKS/VC
+
+**Btrfs 完整 FS-tree 扫描**（之前只能 detect-only）
+- `ChunkCatalog` 全量 logical→physical 翻译（覆盖 sys chunks + chunk tree 完整遍历）
+- `WalkRootTree` + `WalkFSTree` + INODE_ITEM/EXTENT_DATA/DIR_ITEM/INODE_REF 解析
+- `BuildPathMap` 完整路径回溯（parents/names 链 → "/Documents/photo.jpg"）
+- 压缩 extent 解压：zlib (`compress/zlib`) + zstd (`klauspost/compress`)
+- 接入 recovery engine：`runBtrfsScan` + `WriteBtrfsFile` + recoverBtrfsFile
+  支持 inline / regular / prealloc 三种 extent + sparse fallback
+
+**iOS / Android / MTP**（移动端备份）
+- iOS bplist binary reader + writer（双向 round-trip，与 plutil 输出一致）
+- iOS XML plist parser（auto-dispatch 支持老 iTunes 备份）
+- Android `.ab` 备份完整链：keybag + AES-CBC + zlib + tar
+- MTP 经 adb shell-out（`internal/mtp`）：DetectMTPDevices / PullDirectoryAndScan
+
+**取证基础设施**
+- DFXML 1.0 schema 升级：xmlns + Dublin Core namespace + `<byte_runs>` + `<source>`
+  区块；Sleuthkit / Autopsy / fiwalk 兼容
+- Custody manifest 双写 (`custody.json` + `custody.plist`)，macOS 工具链
+  (plutil / Apple Configurator / Magnet AXIOM / R-Studio Mac) 原生 fast-path
+- `Signer` 接口化重构：`LocalEd25519Signer` / `ExternalCLISigner` / 任意 HSM/KMS
+  adapter 共用 `signCustodyCanonical` 路径
+- 10 个 Crypto KAT (RFC 6070 PBKDF2-SHA1 v1-v4 / RFC 7914 PBKDF2-SHA256 /
+  IEEE 1619 AES-XTS v1+v2 / Argon2id 参数顺序兜底 / deriveLUKS2KDF 包装层校验)
+
+**Carver 增强**
+- JPEG ITU T.81 Annex K 标准 Huffman 注入（覆盖 NTFS data run 第一段被覆盖
+  导致 DHT 段丢失的常见恢复场景）+ `DeepRepairJPEG` 多策略链
+- ZIP CD 损坏时扫 local headers 兜底重建（覆盖 ZIP 末尾被截断 / CD 被覆盖
+  这两类常见数据恢复场景），含 data descriptor 模式（archive/zip 默认）从
+  描述符读真实 CRC + sizes
+
+**性能 / 工程基础**
+- `disk.SectorCache`：LRU sector 缓存，nil-safe，含 hits/misses/evictions/HitRatio
+  metrics；LUKS / VC / BitLocker DecryptedReader / DecryptingReader 共享同实现
+- VeraCrypt unlock NumCPU 并发派生（worker pool，第一命中即返回）
+- ext / fat / btrfs scanner 多分区并发扫描（worker pool，min(NumCPU, len(parts), 4)，
+  HDD 友好上限）
+- NTFS 非 resident `$ATTRIBUTE_LIST` 支持（极碎片化大文件 + 多 ADS 的"惊人复杂"
+  文件场景；按 DataRuns 读盘 + 共用 parseAttributeListContent）
+- LUKS2 csum 多 hash 支持（cryptsetup 实际支持的 sha1/sha256/sha512 全集）
+
+**架构**
+- `app.go` 拆分：`app_unlock_volumes.go` 抽出 LUKS+VC unlock IPC（~280 行）
+- `internal/disk/sector_cache.go` 共享缓存抽象，避免 LUKS / BitLocker 各自实现
+- `cmd/drift-check`：注释↔实现漂移自动检测器
+- `Engine.Shutdown` 释放对称性 audit：补齐 6 个 source maps 释放 + apfsVEKs 字节归零
+- `Engine.EncryptedReaderCacheStats()` + Wails IPC `GetEncryptedReaderCacheStats`：
+  前端能展示加密卷扫描的缓存命中率
+
+### Fixed
+
+- `internal/ios` 7 处 ST1005 错误信息首字母大写
+- `internal/recovery/android_scan.go` 1 处 ST1005
+- `internal/netfs/xdr.go` 删除 2 个未使用的 XDR primitive helpers (U1000)
+- `internal/recovery/scanner.go` 删除未使用的 `(*Engine).allScanners()` (U1000)
+- CLI `flagsAfter` 注释 drift 修正（注释说"无 flag 后跟值的 bool 暂不支持"
+  但代码 105 行就已经有 `kv[key] = "true"` 兜底）
+
+### Test Infrastructure
+
+- 新增 ~110 单测（覆盖所有新能力）+ 1 个 fuzz
+- `go test -race ./...` 全过
+- `staticcheck ./...` 0 警告
+- `go vet ./...` 干净
+- cross-compile windows/amd64 + linux/amd64 通过
+- `drift-check`: 0 注释↔实现漂移
+
+### Known Limitations (按 ROI 排序留 TODO)
+
+- **VC system encryption volume parser**：公式已实现 (`IterationsForPIMSystem`)，
+  但 layout parser (offset 31744 + boot loader 区) 暂不支持；< 5% VC 用户
+- **Serpent cipher**：无现成 Go 实现 + 自己 port 800 行没权威 KAT 验证渠道是
+  irresponsible（数据恢复给错密文比报错差 10 倍）；网络恢复后引一行依赖即可
+- **APFS LZFSE v2 主 decode loop** (FSE 熵编码)：1500+ 行 + 没 Apple 官方测试
+  向量；当前回退报错并提示 `afsctool -d`
+- **JPEG Huffman state stitching**（无 RST 也能拼）：R-Studio 20 年壁垒，需
+  fork stdlib `image/jpeg` 暴露 decoder.huffmanState
+
+---
+
 ## v2.0.2 (2026-04-24)
 
 核心差异化 wedge 兑现 + CI race 修复。

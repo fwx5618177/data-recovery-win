@@ -75,6 +75,20 @@ func OpenAndUnlock(reader disk.DiskReader, volStart int64, password string, prog
 	return OpenAndUnlockWithPIM(reader, volStart, password, 0, progress)
 }
 
+// OpenAndUnlockSystemEncryption 解锁 VeraCrypt 系统加密卷（Windows 全盘加密 boot 盘）。
+//
+// 与容器卷的关键差异：
+//   1. 卷头不在 offset 0 而在 offset 31744（partition 内 sector 62）
+//   2. KDF iter 用系统加密公式（IterationsForPIMSystem）：SHA 系列固定 200000，
+//      RIPEMD = pim*2048（PIM=0 → 1000）；boot loader KDF 时间预算硬约束
+//   3. 加密区从 sector 256 (= 131072) 起；boot loader 区 [0, 31744) 永远不加密
+//
+// partitionStart 是系统加密分区在 reader 上的字节起点（典型整盘 = 0）。
+// pim == 0 走默认 SHA iter (200000)；> 0 时仅影响 RIPEMD（VC 设计如此）。
+func OpenAndUnlockSystemEncryption(reader disk.DiskReader, partitionStart int64, password string, pim int, progress UnlockProgress) (*UnlockedVolume, error) {
+	return openAndUnlockInternal(reader, partitionStart, password, pim, progress, true)
+}
+
 // OpenAndUnlockWithPIM 同 OpenAndUnlock，但允许指定 PIM (Personal Iterations
 // Multiplier)。VeraCrypt 高级用户在创建容器时可指定 PIM 调整 KDF 强度，必须
 // 知道 PIM 才能解开。
@@ -84,6 +98,17 @@ func OpenAndUnlock(reader disk.DiskReader, volStart int64, password string, prog
 // 注意：用 PIM 创建的卷只能用同一个 PIM 解开 —— PIM 错就跟密码错一样
 // 表现为 ErrWrongPassword。
 func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password string, pim int, progress UnlockProgress) (*UnlockedVolume, error) {
+	return openAndUnlockInternal(reader, volStart, password, pim, progress, false)
+}
+
+// openAndUnlockInternal 是容器卷与系统加密卷共用的解锁实现。
+//
+// isSystemEncryption 切换：
+//   - header offset：0 vs SystemEncryptionHeaderOffset (31744)
+//   - KDF iter：IterationsForPIM vs IterationsForPIMSystem
+//   - PayloadOffset 解释：容器路径仍按 hdr.PayloadOffset，系统路径走 boot loader
+//     之外的固定 sector 256 起点
+func openAndUnlockInternal(reader disk.DiskReader, volStart int64, password string, pim int, progress UnlockProgress, isSystemEncryption bool) (*UnlockedVolume, error) {
 	if reader == nil {
 		return nil, errors.New("VC: reader 为 nil")
 	}
@@ -94,9 +119,14 @@ func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password strin
 		return nil, fmt.Errorf("VC: PIM 必须 >= 0, got %d", pim)
 	}
 
+	// 卷头偏移：容器在 0；系统加密在 31744（partition sector 62）
+	headerOff := volStart
+	if isSystemEncryption {
+		headerOff = volStart + SystemEncryptionHeaderOffset
+	}
 	// 读 512 字节卷头（salt + encrypted block）
 	headerBuf := make([]byte, VolumeHeaderTotalSize)
-	if _, err := reader.ReadAt(headerBuf, volStart); err != nil && err != io.EOF {
+	if _, err := reader.ReadAt(headerBuf, headerOff); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("VC: 读卷头: %w", err)
 	}
 
@@ -107,11 +137,15 @@ func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password strin
 	ciphers := supportedCiphers()
 	// 枚举顺序：VC（500K iter）→ TC（1K iter）；先试 VC 因为现代用户绝大多数用 VC
 	// PIM 模式只对 VC 生效（TC 没有 PIM）；pim>0 时跳过 TC cases
+	// 系统加密：boot loader 不可能写入 TC 头部，跳过 TC 路径
 	cases := make([]unlockCase, 0, len(hashes)*2)
 	for _, h := range hashes {
-		cases = append(cases, unlockCase{hash: h, isTrueCrypt: false, pim: pim})
+		cases = append(cases, unlockCase{
+			hash: h, isTrueCrypt: false, pim: pim,
+			isSystemEncryption: isSystemEncryption,
+		})
 	}
-	if pim == 0 {
+	if pim == 0 && !isSystemEncryption {
 		for _, h := range hashes {
 			// TC 不支持 SHA-256 / Streebog；这里只试 SHA-512 + RIPEMD-160
 			if h.Name == "sha256" {
@@ -121,7 +155,7 @@ func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password strin
 		}
 	}
 
-	return parallelUnlock(reader, volStart, salt, encHeader, password, cases, ciphers, progress)
+	return parallelUnlock(reader, volStart, salt, encHeader, password, cases, ciphers, progress, isSystemEncryption)
 }
 
 // parallelUnlock 并发跑所有 (hash×cipher) 组合，第一个成功者即返回。
@@ -138,7 +172,7 @@ func OpenAndUnlockWithPIM(reader disk.DiskReader, volStart int64, password strin
 // 但 PBKDF2 本身没有 cancellation 钩子，所以正在跑的 worker 必须跑完才退出 ——
 // "命中后立刻返回结果给调用方"是性能正确的（不等其它 worker），
 // 内存只是几个 192B header_key 副本，无害。
-func parallelUnlock(reader disk.DiskReader, volStart int64, salt, encHeader []byte, password string, cases []unlockCase, ciphers []cipherSpec, progress UnlockProgress) (*UnlockedVolume, error) {
+func parallelUnlock(reader disk.DiskReader, volStart int64, salt, encHeader []byte, password string, cases []unlockCase, ciphers []cipherSpec, progress UnlockProgress, isSystemEncryption bool) (*UnlockedVolume, error) {
 	if len(cases) == 0 {
 		return nil, ErrWrongPassword
 	}
@@ -198,11 +232,15 @@ func parallelUnlock(reader disk.DiskReader, volStart int64, salt, encHeader []by
 					return
 				}
 				var iter int
-				if c.isTrueCrypt {
+				switch {
+				case c.isTrueCrypt:
 					iter = IterationsFor(true, c.hash.Name)
-				} else if c.pim > 0 {
+				case c.isSystemEncryption:
+					// 系统加密 KDF 公式：SHA 系列固定 200000；RIPEMD = pim*2048（PIM=0 → 1000）
+					iter = IterationsForPIMSystem(c.hash.Name, c.pim, true)
+				case c.pim > 0:
 					iter = IterationsForPIM(c.hash.Name, c.pim)
-				} else {
+				default:
 					iter = IterationsFor(false, c.hash.Name)
 				}
 				headerKeyMaterial := DeriveHeaderKey([]byte(password), salt, iter, c.hash.NewFn)
@@ -242,9 +280,10 @@ func parallelUnlock(reader disk.DiskReader, volStart int64, salt, encHeader []by
 }
 
 type unlockCase struct {
-	hash        HashSpec
-	isTrueCrypt bool
-	pim         int // 0 = 默认 iter；>0 = 按 IterationsForPIM 公式
+	hash               HashSpec
+	isTrueCrypt        bool
+	pim                int  // 0 = 默认 iter；>0 = 按 IterationsForPIM 公式
+	isSystemEncryption bool // VC 系统加密分支（不同 KDF 公式 + 卷头偏移 31744）
 }
 
 // cipherSpec 描述一个 VC 支持的 cipher 配置。

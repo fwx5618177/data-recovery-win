@@ -198,7 +198,10 @@ func scan(root string) ([]Finding, []error) {
 			return nil
 		}
 
-		// 读原文件字节用于 body 正则扫描（ast 里的 body 打印回来会丢注释风味）
+		// 读原文件字节用于 body 正则扫描（ast 里的 body 打印回来会丢注释风味）。
+		// path 来自 filepath.WalkDir 内部已校验的 root subtree，非用户外部输入；
+		// 是 dev 工具不是 server，TOCTOU 风险无业务影响。
+		// #nosec G304 G122 -- drift-check 是仓库内自检工具，path 来自固定 root 内
 		body, _ := os.ReadFile(path)
 
 		for _, decl := range f.Decls {

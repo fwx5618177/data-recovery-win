@@ -33,7 +33,13 @@ package ios
 
 import (
 	"crypto/aes"
+
+	// iOS backup keybag 老版本（iOS 4-9）的 password unwrap 用 PBKDF2-SHA1 (10000
+	// iter)；新版（iOS 10.2+）才升级到 SHA-256 (10000000 iter)。读老备份必须
+	// 支持 SHA-1；只读取证用途无攻击面。
+	// #nosec G505 -- iOS 老备份兼容性，纯只读
 	"crypto/sha1"
+
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"

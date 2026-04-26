@@ -103,8 +103,12 @@ func newRPCClient(ctx context.Context, host string, port int, authUID, authGID u
 		hn = "data-recovery"
 	}
 
+	// XID 是 RPC transaction id —— 仅用作匹配 request/response 的对偶号，
+	// 没有任何安全意义（可被中间人观察、可被预测）。math/rand 足够；
+	// 改用 crypto/rand 反而引入依赖加重启动 IO。
 	return &rpcClient{
-		conn:     conn,
+		conn: conn,
+		// #nosec G404 -- RPC XID 是非安全 transaction counter，math/rand 是合适选择
 		nextXID:  rand.Uint32(),
 		authUID:  authUID,
 		authGID:  authGID,
