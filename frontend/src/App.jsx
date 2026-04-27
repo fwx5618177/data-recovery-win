@@ -10,6 +10,12 @@ import WelcomePage from "./components/WelcomePage";
 import Workbench from "./components/Workbench";
 import RecoveryPage from "./components/RecoveryPage";
 import {
+  CloudBackupsModal,
+  NASScanModal,
+  AndroidDumpModal,
+  IOSBackupModal,
+} from "./components/MobileToolsModals";
+import {
   DEFAULT_SCAN_MODE,
   getDriveLabel,
   isCancellationError,
@@ -143,6 +149,12 @@ export default function App() {
   const [downloadState, setDownloadState] = useState("idle");
   const [downloadProgress, setDownloadProgress] = useState(null);
   const [pendingUpdate, setPendingUpdate] = useState(null);
+
+  // 移动端工具的 modal 显示开关 + 全局 mobile 进度状态
+  // openModal: null | "cloud" | "nas-smb" | "nas-nfs" | "android-dump" | "ios-backup"
+  const [openMobileModal, setOpenMobileModal] = useState(null);
+  // mobileTask: { kind, label, progress?, error?, done? } —— 显示在底部状态栏
+  const [mobileTask, setMobileTask] = useState(null);
 
   /* =====================================================================
      1. 加载 Wails bridge
@@ -408,10 +420,58 @@ export default function App() {
       alert("下载更新失败：" + (msg?.message || msg || "未知错误"));
     });
 
+    // 移动端 / 备份 / NAS 全局进度事件 —— 显示在状态栏上
+    const offMobile = [
+      wailsRuntime.EventsOn("mtp:dumpStarted", (p) => {
+        setMobileTask({ kind: "android-dump", label: `Android dump 启动: ${p?.block || "?"}`, progress: 0 });
+      }),
+      wailsRuntime.EventsOn("mtp:dumpProgress", (b) => {
+        setMobileTask((prev) => prev ? { ...prev, progress: b, label: `Android dump 中: ${(b / 1024 / 1024).toFixed(1)} MB` } : prev);
+      }),
+      wailsRuntime.EventsOn("mtp:dumpCompleted", () => {
+        setMobileTask({ kind: "android-dump", label: "Android dump 完成 ✓", progress: -1, done: true });
+        setTimeout(() => setMobileTask(null), 5000);
+      }),
+      wailsRuntime.EventsOn("mtp:dumpError", (e) => {
+        setMobileTask({ kind: "android-dump", label: "Android dump 失败", error: String(e), done: true });
+      }),
+      wailsRuntime.EventsOn("mtp:pullStarted", () => {
+        setMobileTask({ kind: "adb-pull", label: "adb pull 中…", progress: -1 });
+      }),
+      wailsRuntime.EventsOn("mtp:pullCompleted", () => {
+        setMobileTask({ kind: "adb-pull", label: "adb pull 完成 ✓", done: true });
+        setTimeout(() => setMobileTask(null), 5000);
+      }),
+      wailsRuntime.EventsOn("mtp:pullError", (e) => {
+        setMobileTask({ kind: "adb-pull", label: "adb pull 失败", error: String(e), done: true });
+      }),
+      wailsRuntime.EventsOn("ios:backupStarted", (udid) => {
+        setMobileTask({ kind: "ios-backup", label: `iOS 备份启动 (${String(udid).slice(0, 12)}…)`, progress: -1 });
+      }),
+      wailsRuntime.EventsOn("ios:backupCompleted", () => {
+        setMobileTask({ kind: "ios-backup", label: "iOS 备份完成 ✓", done: true });
+        setTimeout(() => setMobileTask(null), 5000);
+      }),
+      wailsRuntime.EventsOn("ios:backupError", (e) => {
+        setMobileTask({ kind: "ios-backup", label: "iOS 备份失败", error: String(e), done: true });
+      }),
+      wailsRuntime.EventsOn("ptp:pullStarted", () => {
+        setMobileTask({ kind: "ptp-pull", label: "PTP 相机 pull 中…", progress: -1 });
+      }),
+      wailsRuntime.EventsOn("ptp:pullCompleted", () => {
+        setMobileTask({ kind: "ptp-pull", label: "PTP pull 完成 ✓", done: true });
+        setTimeout(() => setMobileTask(null), 5000);
+      }),
+      wailsRuntime.EventsOn("ptp:pullError", (e) => {
+        setMobileTask({ kind: "ptp-pull", label: "PTP pull 失败", error: String(e), done: true });
+      }),
+    ];
+
     return () => {
       [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
        offFileDrop, offBLDerive, offBLUnlocked,
-       offUpdate, offDownloadProg, offDownloaded, offDownloadErr]
+       offUpdate, offDownloadProg, offDownloaded, offDownloadErr,
+       ...offMobile]
         .filter((fn) => typeof fn === "function")
         .forEach((fn) => fn());
     };
@@ -832,7 +892,12 @@ export default function App() {
           })}
         </div>
         <div className="topbar-actions no-drag" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <ToolsMenu wailsApp={wailsApp} outputDir={outputDir} selectedDrive={selectedDrive} />
+          <ToolsMenu
+            wailsApp={wailsApp}
+            outputDir={outputDir}
+            selectedDrive={selectedDrive}
+            onOpenMobileModal={setOpenMobileModal}
+          />
           <ThemeSwitcher />
           <LocaleSwitcher />
           <button
@@ -984,6 +1049,95 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* ============== 移动端 / 备份 / NAS 工具 modals ============== */}
+      {openMobileModal === "cloud" && (
+        <CloudBackupsModal
+          wailsApp={wailsApp}
+          onClose={() => setOpenMobileModal(null)}
+          onStartedScan={() => setCurrentPage("workbench")}
+        />
+      )}
+      {openMobileModal === "nas-smb" && (
+        <NASScanModal
+          kind="smb"
+          wailsApp={wailsApp}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
+      )}
+      {openMobileModal === "nas-nfs" && (
+        <NASScanModal
+          kind="nfs"
+          wailsApp={wailsApp}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
+      )}
+      {openMobileModal === "android-dump" && (
+        <AndroidDumpModal
+          wailsApp={wailsApp}
+          outputDir={outputDir}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
+      )}
+      {openMobileModal === "ios-backup" && (
+        <IOSBackupModal
+          wailsApp={wailsApp}
+          outputDir={outputDir}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
+      )}
+
+      {/* ============== 移动端任务全局状态栏（底部） ============== */}
+      {mobileTask && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 16,
+            right: 16,
+            background: mobileTask.error ? "var(--bg-danger-soft, #fee)" : "var(--bg-surface)",
+            border: `1px solid ${mobileTask.error ? "var(--danger)" : "var(--border)"}`,
+            borderRadius: 8,
+            padding: "10px 14px",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+            zIndex: 999,
+            fontSize: 12,
+            minWidth: 240,
+            maxWidth: 360,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 14 }}>
+              {mobileTask.kind === "android-dump" ? "💽"
+                : mobileTask.kind === "adb-pull" ? "📂"
+                : mobileTask.kind === "ios-backup" ? "🍎"
+                : mobileTask.kind === "ptp-pull" ? "📷" : "🔄"}
+            </span>
+            <span style={{ flex: 1, fontWeight: 600 }}>{mobileTask.label}</span>
+            <button
+              className="btn btn--sm btn--ghost"
+              onClick={() => setMobileTask(null)}
+              title="关闭"
+              style={{ padding: "0 6px" }}
+            >
+              ✕
+            </button>
+          </div>
+          {!mobileTask.done && mobileTask.progress === -1 && (
+            <div className="progress" style={{ marginTop: 8, height: 6 }}>
+              <div className="progress__fill" style={{ width: "100%", animation: "progressPulse 2s ease-in-out infinite" }} />
+            </div>
+          )}
+          {mobileTask.error && (
+            <div style={{ marginTop: 6, color: "var(--danger)", fontSize: 11 }}>
+              {mobileTask.error}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1158,7 +1312,7 @@ function pickAssetForPlatform(assets, platform) {
  *   🌐 网络镜像：挂载建议
  *   ⚡ 多盘并行扫描
  */
-function ToolsMenu({ wailsApp, outputDir, selectedDrive }) {
+function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
   React.useEffect(() => {
@@ -1294,26 +1448,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive }) {
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
 
-          {item("☁️ 扫云端备份（iCloud/OneDrive/Drive...）", () => runAsync(
-            async () => {
-              const roots = await wailsApp?.DiscoverCloudSyncRoots?.();
-              const hits = await wailsApp?.ScanCloudForBackups?.();
-              return { roots: roots || [], hits: hits || [] };
-            },
-            (r) => {
-              if (r.roots.length === 0) {
-                return "未发现已同步的云盘文件夹\n（iCloud Drive / OneDrive / Google Drive / Dropbox 桌面客户端没装或未启用）";
-              }
-              const rootsList = r.roots.map((x) => `  • [${x.provider}] ${x.path}`).join("\n");
-              if (r.hits.length === 0) {
-                return `发现 ${r.roots.length} 个云同步根：\n${rootsList}\n\n但其中**没找到** iOS/Android 备份文件。`;
-              }
-              const hitsList = r.hits.map((h) =>
-                `  • [${h.provider}] ${h.kind}: ${h.path} (${(h.sizeBytes / 1024 / 1024).toFixed(1)} MB)`
-              ).join("\n");
-              return `发现 ${r.roots.length} 个云同步根：\n${rootsList}\n\n找到 ${r.hits.length} 个备份：\n${hitsList}`;
-            }
-          ))}
+          {item("☁️ 扫云端备份（iCloud/OneDrive/Drive...）", () => {
+            setOpen(false);
+            onOpenMobileModal?.("cloud");
+          })}
 
           {item("📱 扫 iOS 备份（本机 MobileSync）", () => runAsync(
             () => wailsApp?.DiscoverIOSBackups?.(),
@@ -1373,30 +1511,8 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive }) {
           })}
 
           {item("💽 Android root 块级 dump", () => {
-            const serial = globalThis.prompt?.("Android 设备 serial（必须 root + 已 grant root 权限）：", "");
-            if (!serial) return;
-            runAsync(
-              async () => {
-                const rooted = await wailsApp?.AndroidIsRooted?.(serial);
-                if (!rooted) throw new Error("设备未 root，无法块级 dump");
-                const parts = await wailsApp?.AndroidListPartitions?.(serial);
-                if (!parts || parts.length === 0) throw new Error("未发现分区");
-                const partList = parts.map((p, i) =>
-                  `${i}: ${p.name} (${(p.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB) → ${p.blockNode}`
-                ).join("\n");
-                const idx = parseInt(
-                  globalThis.prompt?.(`选分区编号（多数情况选 userdata）：\n\n${partList}\n\n输入编号：`, "0") || "-1",
-                  10
-                );
-                if (idx < 0 || idx >= parts.length) throw new Error("分区编号非法");
-                const p = parts[idx];
-                const dst = globalThis.prompt?.(`输出 .img 路径：`, `~/${p.name}.img`);
-                if (!dst) throw new Error("输出路径必填");
-                await wailsApp?.AndroidDumpPartitionAndScan?.(serial, p.blockNode, dst, "full");
-                return p.name;
-              },
-              (n) => `✅ 已启动 ${n} 分区 dump；预计 30-50 分钟（128GB），详见进度事件 mtp:dumpProgress`
-            );
+            setOpen(false);
+            onOpenMobileModal?.("android-dump");
           })}
 
           {item("📷 PTP 相机（gphoto2）拉照片扫描", () => runAsync(
@@ -1424,57 +1540,21 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive }) {
             (p) => p ? `✅ 已启动相机 ${p} 拉取；详见主面板` : "已取消"
           ))}
 
-          {item("🍎 iOS 直连备份触发（libimobiledevice）", () => runAsync(
-            async () => {
-              const status = await wailsApp?.IOSDirectCheck?.();
-              if (!status?.available) {
-                throw new Error("libimobiledevice 未安装\nmacOS: brew install libimobiledevice\nLinux: apt install libimobiledevice-utils");
-              }
-              const devs = await wailsApp?.IOSListDevices?.();
-              if (!devs || devs.length === 0) throw new Error("未发现 iOS 设备 — 请用 USB 线接 iPhone 并解锁");
-              const dev = devs[0];
-              if (!dev.trusted) {
-                if (!globalThis.confirm?.(`设备 ${dev.name || dev.udid} 未配对，将弹出 'Trust this Computer' 提示。继续？`)) return null;
-                await wailsApp?.IOSPair?.(dev.udid);
-              }
-              const dst = globalThis.prompt?.("备份输出目录（>30GB 数据可能要 30 分钟）：", outputDir || "");
-              if (!dst) return null;
-              const pwd = globalThis.prompt?.("加密备份密码（启用过加密备份的设备需密码；否则留空）：", "") || "";
-              await wailsApp?.IOSTriggerBackupAndScan?.(dev.udid, dst, pwd);
-              return dev.udid;
-            },
-            (u) => u ? `✅ 已对 UDID ${u.slice(0, 12)}... 启动备份；监听 ios:backupProgress` : "已取消"
-          ))}
+          {item("🍎 iOS 直连备份触发（libimobiledevice）", () => {
+            setOpen(false);
+            onOpenMobileModal?.("ios-backup");
+          })}
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
 
           {item("📡 NAS SMB 扫描", () => {
-            const host = globalThis.prompt?.("SMB host (IP 或主机名)：", "");
-            if (!host) return;
-            const user = globalThis.prompt?.("用户名（匿名留空）：", "") || "";
-            const pwd = user ? (globalThis.prompt?.("密码：", "") || "") : "";
-            const share = globalThis.prompt?.("share 名（不填会列出 server 上所有 share）：", "") || "";
-            runAsync(
-              () => wailsApp?.StartSMBScan?.({
-                host, port: 445, username: user, password: pwd,
-                share, maxDepth: 50, maxFiles: 1000000,
-              }),
-              () => "✅ 已启动 SMB 扫描；详见主面板进度"
-            );
+            setOpen(false);
+            onOpenMobileModal?.("nas-smb");
           })}
 
           {item("📡 NAS NFSv3 扫描", () => {
-            const host = globalThis.prompt?.("NFS host (IP)：", "");
-            if (!host) return;
-            const exp = globalThis.prompt?.("export 路径（不填会先列出 server 上所有 export）：", "") || "";
-            runAsync(
-              () => wailsApp?.StartNFSScan?.({
-                host, nfsPort: 0, mountPort: 0, // 0 = portmap 自动发现
-                uid: 0, gid: 0,
-                export: exp, maxDepth: 50, maxFiles: 1000000,
-              }),
-              () => "✅ 已启动 NFS 扫描；详见主面板进度"
-            );
+            setOpen(false);
+            onOpenMobileModal?.("nas-nfs");
           })}
 
           {item("🎯 RAID 阵列检测", () => runAsync(

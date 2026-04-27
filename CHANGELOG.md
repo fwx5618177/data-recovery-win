@@ -4,6 +4,75 @@
 
 ---
 
+## v2.4.1 (2026-04-27)
+
+**v2.4.0 的 prompt() 升级为完整 modal dialog + 全局移动端进度状态栏**
+
+v2.4.0 用 `prompt()` / `alert()` 解锁 11 个暗物质功能能跑，但高频/复杂路径
+（NAS / Android dump / iOS 备份）的 4-6 步连续 prompt 体验拙劣。本 release 升级。
+
+### Added — 4 个完整 Modal Dialog
+
+`frontend/src/components/MobileToolsModals.jsx`（~600 行新组件）：
+
+1. **CloudBackupsModal** —— 云盘扫描结果可点击 ✓
+   - 旧路径：alert 长文本，用户复制粘贴路径才能扫
+   - 新路径：list view，每个发现的 iOS/Android 备份旁边一个 "🔍 扫描" 按钮直接调
+     `StartIOSBackupScan` / `StartAndroidBackupScan`（解决用户原始建议 #2）
+
+2. **NASScanModal** —— SMB / NFS 扫描表单
+   - 单 modal 复用（`kind` prop 切换）：host / 凭据 / share / export
+   - 字段验证 + 启动失败时显示具体错误 + "已启动→关闭跳到主面板"
+
+3. **AndroidDumpModal** —— Android root 块级 dump（含 进度可视化）
+   - 状态机：input → checking → ready → running → done
+   - root 检测 + 自动列分区 + 默认选 userdata + 输出路径默认填 outputDir
+   - 实时显示 dumped MB + 百分比（监听 `mtp:dumpProgress` 事件）
+   - 完成后 banner + 5 秒自动关闭
+
+4. **IOSBackupModal** —— iOS libimobiledevice 直连备份触发
+   - 状态机：checking → input → pairing → backup → done
+   - 工具检测 + 设备列表（trusted/untrusted 标记）+ 配对引导（"看 iPhone 屏幕"）
+   - 监听 `ios:backupCompleted` / `ios:backupError` 事件 + 心跳进度提示
+
+### Added — 全局移动端任务状态栏（解决用户建议 #3）
+
+App.jsx 监听 11 个 backend 事件 → 右下角浮窗显示当前任务：
+- `mtp:dumpStarted` / `mtp:dumpProgress` / `mtp:dumpCompleted` / `mtp:dumpError`
+- `mtp:pullStarted` / `mtp:pullCompleted` / `mtp:pullError`
+- `ios:backupStarted` / `ios:backupCompleted` / `ios:backupError`
+- `ptp:pullStarted` / `ptp:pullCompleted` / `ptp:pullError`
+
+状态栏特性：
+- 图标按任务类型（💽📂🍎📷）
+- 不确定进度走 `progressPulse` CSS 动画
+- 完成 5 秒后自动隐藏
+- 错误时红色背景 + 完整错误消息
+- ✕ 按钮手动关闭
+
+### Changed — ToolsMenu 4 个菜单项现在打开 modal
+
+之前：4-6 个连续 `prompt()` → 拙劣
+现在：单击菜单项 → 打开 modal → 表单填写 → 一键启动
+
+被替换的菜单项：
+- ☁️ 扫云端备份 → CloudBackupsModal
+- 📡 NAS SMB 扫描 → NASScanModal kind="smb"
+- 📡 NAS NFSv3 扫描 → NASScanModal kind="nfs"
+- 💽 Android root 块级 dump → AndroidDumpModal
+- 🍎 iOS 直连备份触发 → IOSBackupModal
+
+仍走 prompt() 的（步骤少 + 一次性）：📂 ADB 拉目录、🔍 启动 iOS 备份扫描、
+🤖 选 .ab 文件、📷 PTP 相机、🔌 ADB 设备列表、🎯 RAID、💾 镜像 dump
+
+### 工程指标
+- frontend `vite build` 成功（268 KB → gzip 86.6 KB，比 v2.4.0 大 17 KB = 4 个新 modal + 全局状态栏）
+- backend `go test -short ./...` 全绿
+- 没动 backend，纯 UI 增强
+- 加 `progressPulse` CSS keyframe（不确定进度动画）
+
+---
+
 ## v2.4.0 (2026-04-27)
 
 **11 个"暗物质"功能从后端解锁到 UI** —— 修复 v2.2.0 加了 IPC 但前端没入口的问题。

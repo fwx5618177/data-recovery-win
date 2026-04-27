@@ -742,6 +742,12 @@ kbd,
   100% { transform: translateX(250%); }
 }
 
+/* MobileToolsModals 的不确定进度动画（idevicebackup2 / adb pull 没细粒度进度） */
+@keyframes progressPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
 /* ============================================================ empty state */
 
 .empty-state {
