@@ -1289,6 +1289,215 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive }) {
             (list) => list.length === 0 ? "未发现 APFS snapshot" :
               list.map((c) => `容器 0x${c.containerOffset.toString(16)}: ${c.snapshots.length} 个 snapshot`).join("\n")
           ))}
+
+          {/* ==================== 移动端 / 备份 / 云端 / NAS（v2.4 解锁）  ==================== */}
+
+          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+
+          {item("☁️ 扫云端备份（iCloud/OneDrive/Drive...）", () => runAsync(
+            async () => {
+              const roots = await wailsApp?.DiscoverCloudSyncRoots?.();
+              const hits = await wailsApp?.ScanCloudForBackups?.();
+              return { roots: roots || [], hits: hits || [] };
+            },
+            (r) => {
+              if (r.roots.length === 0) {
+                return "未发现已同步的云盘文件夹\n（iCloud Drive / OneDrive / Google Drive / Dropbox 桌面客户端没装或未启用）";
+              }
+              const rootsList = r.roots.map((x) => `  • [${x.provider}] ${x.path}`).join("\n");
+              if (r.hits.length === 0) {
+                return `发现 ${r.roots.length} 个云同步根：\n${rootsList}\n\n但其中**没找到** iOS/Android 备份文件。`;
+              }
+              const hitsList = r.hits.map((h) =>
+                `  • [${h.provider}] ${h.kind}: ${h.path} (${(h.sizeBytes / 1024 / 1024).toFixed(1)} MB)`
+              ).join("\n");
+              return `发现 ${r.roots.length} 个云同步根：\n${rootsList}\n\n找到 ${r.hits.length} 个备份：\n${hitsList}`;
+            }
+          ))}
+
+          {item("📱 扫 iOS 备份（本机 MobileSync）", () => runAsync(
+            () => wailsApp?.DiscoverIOSBackups?.(),
+            (list) => {
+              if (!list || list.length === 0) return "未发现 iOS 备份\n（路径：~/Library/Application Support/MobileSync/Backup/）";
+              return `发现 ${list.length} 个 iOS 备份：\n` +
+                list.map((b) => `  • ${b.deviceName || "未命名"} (${b.iosVersion || "?"}) ${b.encrypted ? "🔒加密" : "明文"} - ${b.path}`).join("\n");
+            }
+          ))}
+
+          {item("🔍 启动 iOS 备份扫描", () => {
+            const path = globalThis.prompt?.("iOS 备份目录路径：", "");
+            if (!path) return;
+            const pwd = globalThis.prompt?.("加密备份密码（明文备份留空）：", "");
+            runAsync(
+              () => wailsApp?.StartIOSBackupScan?.(path, pwd || ""),
+              () => "✅ iOS 备份扫描已启动；详见主面板进度"
+            );
+          })}
+
+          {item("🤖 选 Android .ab 备份扫描", () => runAsync(
+            async () => {
+              const path = await wailsApp?.SelectAndroidBackup?.();
+              if (!path) return null;
+              const info = await wailsApp?.InspectAndroidBackup?.(path);
+              const pwd = info?.encrypted
+                ? globalThis.prompt?.(".ab 加密备份密码：", "") || ""
+                : "";
+              await wailsApp?.StartAndroidBackupScan?.(path, pwd);
+              return path;
+            },
+            (p) => p ? `✅ 已启动扫描：${p}` : "已取消"
+          ))}
+
+          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+
+          {item("🔌 手机直连 ADB 设备列表", () => runAsync(
+            () => wailsApp?.MTPListDevices?.(),
+            (list) => {
+              if (!list || list.length === 0) return "未发现 Android 设备\n请：\n  1. 手机开 USB 调试\n  2. 接 USB 线\n  3. 点手机弹出的 '允许 USB 调试'";
+              return `发现 ${list.length} 个 Android 设备：\n` +
+                list.map((d) => `  • ${d.model || d.serial} (${d.state}) ${d.product || ""}`).join("\n");
+            }
+          ))}
+
+          {item("📂 ADB 拉手机目录扫描", () => {
+            const serial = globalThis.prompt?.("Android 设备 serial（adb devices 显示的）：", "");
+            if (!serial) return;
+            const src = globalThis.prompt?.("手机端目录（如 /sdcard/DCIM）：", "/sdcard/DCIM");
+            if (!src) return;
+            const dst = globalThis.prompt?.("本地目标目录：", outputDir || "");
+            if (!dst) return;
+            runAsync(
+              () => wailsApp?.MTPPullDirectoryAndScan?.(serial, src, dst, "full"),
+              () => "✅ 已启动 adb pull + 扫描；详见主面板进度"
+            );
+          })}
+
+          {item("💽 Android root 块级 dump", () => {
+            const serial = globalThis.prompt?.("Android 设备 serial（必须 root + 已 grant root 权限）：", "");
+            if (!serial) return;
+            runAsync(
+              async () => {
+                const rooted = await wailsApp?.AndroidIsRooted?.(serial);
+                if (!rooted) throw new Error("设备未 root，无法块级 dump");
+                const parts = await wailsApp?.AndroidListPartitions?.(serial);
+                if (!parts || parts.length === 0) throw new Error("未发现分区");
+                const partList = parts.map((p, i) =>
+                  `${i}: ${p.name} (${(p.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB) → ${p.blockNode}`
+                ).join("\n");
+                const idx = parseInt(
+                  globalThis.prompt?.(`选分区编号（多数情况选 userdata）：\n\n${partList}\n\n输入编号：`, "0") || "-1",
+                  10
+                );
+                if (idx < 0 || idx >= parts.length) throw new Error("分区编号非法");
+                const p = parts[idx];
+                const dst = globalThis.prompt?.(`输出 .img 路径：`, `~/${p.name}.img`);
+                if (!dst) throw new Error("输出路径必填");
+                await wailsApp?.AndroidDumpPartitionAndScan?.(serial, p.blockNode, dst, "full");
+                return p.name;
+              },
+              (n) => `✅ 已启动 ${n} 分区 dump；预计 30-50 分钟（128GB），详见进度事件 mtp:dumpProgress`
+            );
+          })}
+
+          {item("📷 PTP 相机（gphoto2）拉照片扫描", () => runAsync(
+            async () => {
+              const status = await wailsApp?.PTPCheck?.();
+              if (!status?.available) {
+                throw new Error("gphoto2 未安装\nmacOS: brew install gphoto2\nLinux: apt install gphoto2");
+              }
+              const devs = await wailsApp?.PTPListDevices?.();
+              if (!devs || devs.length === 0) throw new Error("未发现 PTP 相机");
+              const port = devs.length === 1
+                ? devs[0].port
+                : globalThis.prompt?.(
+                    "选相机 port（多个相机时）：\n\n" +
+                      devs.map((d) => `  ${d.model} → ${d.port}`).join("\n") +
+                      "\n\n输入 port：",
+                    devs[0].port
+                  );
+              if (!port) return null;
+              const dst = globalThis.prompt?.("拉到本地哪个目录：", outputDir || "");
+              if (!dst) return null;
+              await wailsApp?.PTPPullAllAndScan?.(port, dst, "full");
+              return port;
+            },
+            (p) => p ? `✅ 已启动相机 ${p} 拉取；详见主面板` : "已取消"
+          ))}
+
+          {item("🍎 iOS 直连备份触发（libimobiledevice）", () => runAsync(
+            async () => {
+              const status = await wailsApp?.IOSDirectCheck?.();
+              if (!status?.available) {
+                throw new Error("libimobiledevice 未安装\nmacOS: brew install libimobiledevice\nLinux: apt install libimobiledevice-utils");
+              }
+              const devs = await wailsApp?.IOSListDevices?.();
+              if (!devs || devs.length === 0) throw new Error("未发现 iOS 设备 — 请用 USB 线接 iPhone 并解锁");
+              const dev = devs[0];
+              if (!dev.trusted) {
+                if (!globalThis.confirm?.(`设备 ${dev.name || dev.udid} 未配对，将弹出 'Trust this Computer' 提示。继续？`)) return null;
+                await wailsApp?.IOSPair?.(dev.udid);
+              }
+              const dst = globalThis.prompt?.("备份输出目录（>30GB 数据可能要 30 分钟）：", outputDir || "");
+              if (!dst) return null;
+              const pwd = globalThis.prompt?.("加密备份密码（启用过加密备份的设备需密码；否则留空）：", "") || "";
+              await wailsApp?.IOSTriggerBackupAndScan?.(dev.udid, dst, pwd);
+              return dev.udid;
+            },
+            (u) => u ? `✅ 已对 UDID ${u.slice(0, 12)}... 启动备份；监听 ios:backupProgress` : "已取消"
+          ))}
+
+          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+
+          {item("📡 NAS SMB 扫描", () => {
+            const host = globalThis.prompt?.("SMB host (IP 或主机名)：", "");
+            if (!host) return;
+            const user = globalThis.prompt?.("用户名（匿名留空）：", "") || "";
+            const pwd = user ? (globalThis.prompt?.("密码：", "") || "") : "";
+            const share = globalThis.prompt?.("share 名（不填会列出 server 上所有 share）：", "") || "";
+            runAsync(
+              () => wailsApp?.StartSMBScan?.({
+                host, port: 445, username: user, password: pwd,
+                share, maxDepth: 50, maxFiles: 1000000,
+              }),
+              () => "✅ 已启动 SMB 扫描；详见主面板进度"
+            );
+          })}
+
+          {item("📡 NAS NFSv3 扫描", () => {
+            const host = globalThis.prompt?.("NFS host (IP)：", "");
+            if (!host) return;
+            const exp = globalThis.prompt?.("export 路径（不填会先列出 server 上所有 export）：", "") || "";
+            runAsync(
+              () => wailsApp?.StartNFSScan?.({
+                host, nfsPort: 0, mountPort: 0, // 0 = portmap 自动发现
+                uid: 0, gid: 0,
+                export: exp, maxDepth: 50, maxFiles: 1000000,
+              }),
+              () => "✅ 已启动 NFS 扫描；详见主面板进度"
+            );
+          })}
+
+          {item("🎯 RAID 阵列检测", () => runAsync(
+            () => wailsApp?.DetectRAIDArrays?.(),
+            (arrays) => {
+              if (!arrays || arrays.length === 0) return "未检测到 RAID 阵列";
+              return `检测到 ${arrays.length} 个 RAID：\n` +
+                arrays.map((a) => `  • ${a.type} (${a.devices?.length || 0} 盘) - 健康: ${a.healthy ? "✅" : "⚠️"}`).join("\n");
+            }
+          ))}
+
+          {item("💾 整盘镜像 dump (.img)", () => {
+            if (!drivePath) {
+              globalThis.alert?.("请先在主面板选一块源盘");
+              return;
+            }
+            const dst = globalThis.prompt?.(`输出 .img 路径（必须**不同**物理盘！${drivePath} 是 ~XXX GB）：`, "");
+            if (!dst) return;
+            runAsync(
+              () => wailsApp?.DumpDisk?.(drivePath, dst),
+              () => "✅ 已启动镜像 dump；监听 image:dumpProgress 事件"
+            );
+          })}
         </div>
       )}
     </div>

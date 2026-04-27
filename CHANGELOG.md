@@ -4,6 +4,72 @@
 
 ---
 
+## v2.4.0 (2026-04-27)
+
+**11 个"暗物质"功能从后端解锁到 UI** —— 修复 v2.2.0 加了 IPC 但前端没入口的问题。
+
+### Background
+
+v2.2.0 一次性加了 6 大功能（移动端协议 / 云端备份 / NAS / 国标 cipher 等），但
+**只加了 23 个 Wails IPC 没建 UI 入口**，结果用户看不到这些功能存在。本 release
+按用户优先级建 11 个 ToolsMenu 入口，让所有暗物质功能都可触达。
+
+### Added — ToolsMenu 11 个新入口
+
+按分组归到顶栏 🧰 工具下拉：
+
+**☁️ 云端 + 备份**：
+1. `☁️ 扫云端备份（iCloud/OneDrive/Drive...）` —— 一键扫所有云盘同步根 + 找其中的 iOS/Android 备份
+2. `📱 扫 iOS 备份（本机 MobileSync）` —— 列出本机所有 iOS 备份（含加密标记）
+3. `🔍 启动 iOS 备份扫描` —— 输入路径 + 密码，启动后台扫描
+4. `🤖 选 Android .ab 备份扫描` —— 文件选择器 → magic 检测 → 密码（如加密）→ 扫描
+
+**🔌 手机直连**：
+5. `🔌 手机直连 ADB 设备列表` —— 列已 grant USB 调试的 Android 设备
+6. `📂 ADB 拉手机目录扫描` —— 选 serial + 远端目录 → adb pull → 扫
+7. `💽 Android root 块级 dump` —— 检测 root → 列分区 → 选分区 → dd 到本地 .img → 扫
+8. `📷 PTP 相机（gphoto2）拉照片扫描` —— 检测 gphoto2 → 列相机 → 选 port → 拉所有照片 → 扫
+9. `🍎 iOS 直连备份触发（libimobiledevice）` —— 检测工具链 → 列设备 → pair（需要 iPhone "信任此电脑"）→ 触发系统级备份 → 扫
+
+**📡 NAS + RAID + 镜像**：
+10. `📡 NAS SMB 扫描` —— host + 凭据 + share → 启动扫描
+11. `📡 NAS NFSv3 扫描` —— host + export → 启动扫描
+12. `🎯 RAID 阵列检测` —— 列出本机检测到的 mdadm/LVM/Storage Spaces 阵列
+13. `💾 整盘镜像 dump (.img)` —— 当前选中盘 → dump 到 .img（强制不同盘）
+
+### Verified — 23/23 Wails IPC 名称匹配
+
+每个新菜单项调用的 backend method 都在 app.go 实际存在（防"调一个不存在的 method"
+导致运行时 undefined error）：
+- 云端：DiscoverCloudSyncRoots, ScanCloudForBackups
+- iOS 备份：DiscoverIOSBackups, StartIOSBackupScan
+- Android 备份：SelectAndroidBackup, InspectAndroidBackup, StartAndroidBackupScan
+- MTP：MTPListDevices, MTPPullDirectoryAndScan
+- Android 块级：AndroidIsRooted, AndroidListPartitions, AndroidDumpPartitionAndScan
+- PTP：PTPCheck, PTPListDevices, PTPPullAllAndScan
+- iOS 直连：IOSDirectCheck, IOSListDevices, IOSPair, IOSTriggerBackupAndScan
+- NAS：StartSMBScan, StartNFSScan
+- RAID + dump：DetectRAIDArrays, DumpDisk
+
+### 工程指标
+- frontend `vite build` 成功（251 KB → gzip 82 KB，比 v2.3.2 大 8 KB = 11 个新菜单项）
+- backend `go test -short ./...` 全绿
+- 没动 backend，纯 UI 增强
+
+### UX 哲学：prompt() 而非 modal
+
+新菜单项用浏览器原生 `prompt()` / `confirm()` / `alert()` 收集输入和显示结果，
+跟其他工具菜单项（查找重复图片 / OCR / 计划备份）保持一致。优势：
+
+- 单文件改动（仅 App.jsx ~200 行）
+- 不引入新组件依赖
+- 用户已熟悉这种交互（同套工具菜单 6 个月）
+
+未来若用户反馈"输入步骤太碎"，再升级关键路径（NAS / Android dump / iOS 备份）
+为完整 modal dialog。
+
+---
+
 ## v2.3.2 (2026-04-27)
 
 **IDCT 优化 (DC-only 24% 提速) + UI 部分恢复 badge + 长路径 tooltip + 进度条文本**
