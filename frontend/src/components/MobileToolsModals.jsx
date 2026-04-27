@@ -1238,20 +1238,48 @@ const TASK_KIND_META = {
   "disk-dump":    { icon: "💾", color: "#ef4444", title: "整盘镜像 dump" },
 };
 
-export function TasksSidebar({ tasks, collapsed, onToggleCollapsed, onDismiss }) {
-  // tasks 是 Map<kind, task>；render 时转 array 按 startedAt 排序
-  const list = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+// kind → backend Cancel<X> IPC method 名（v2.5.1 加）
+const TASK_KIND_CANCEL_IPC = {
+  "android-dump": "CancelAndroidDump",
+  "adb-pull":     "CancelMTPPull",
+  "ios-backup":   "CancelIOSBackup",
+  "ptp-pull":     "CancelPTPPull",
+  "disk-dump":    "CancelDiskDump",
+};
 
-  if (list.length === 0 && collapsed) return null; // 没任务且折叠 → 完全不显示
+export function TasksSidebar({
+  tasks,            // Map<kind, task> — 进行中
+  history,          // Array<task> — 5 分钟内完成（按 completedAt 倒序）
+  collapsed,
+  onToggleCollapsed,
+  onDismiss,        // (kind) => void —— 关 in-flight 卡片（不取消 backend）
+  onDismissHistory, // (id) => void —— 关历史卡片
+  onCancel,         // (kind) => Promise —— 调 backend Cancel<X> IPC
+}) {
+  const [tab, setTab] = React.useState("active"); // "active" | "history"
+  const inflight = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const histList = history || [];
+
+  if (inflight.length === 0 && histList.length === 0 && collapsed) return null;
+
+  // 本地时钟刷新（让 elapsed 显示走起来；每秒 tick 一次）
+  const [, force] = React.useReducer((x) => x + 1, 0);
+  React.useEffect(() => {
+    if (collapsed || inflight.length === 0) return;
+    const id = setInterval(force, 1000);
+    return () => clearInterval(id);
+  }, [collapsed, inflight.length]);
+
+  const list = tab === "active" ? inflight : histList;
 
   return (
     <div
       style={{
         position: "fixed",
         left: 0,
-        top: 64, // 在 topbar 之下
+        top: 64,
         bottom: 0,
-        width: collapsed ? 36 : 280,
+        width: collapsed ? 36 : 300,
         background: "var(--bg-surface)",
         borderRight: "1px solid var(--border)",
         boxShadow: collapsed ? "none" : "2px 0 12px rgba(0,0,0,0.08)",
@@ -1269,7 +1297,7 @@ export function TasksSidebar({ tasks, collapsed, onToggleCollapsed, onDismiss })
       }}>
         {!collapsed && (
           <div style={{ fontSize: 12, fontWeight: 600 }}>
-            🗂 今日任务 {list.length > 0 && <span className="muted" style={{ fontWeight: 400 }}>({list.length})</span>}
+            🗂 任务
           </div>
         )}
         <button
@@ -1283,76 +1311,156 @@ export function TasksSidebar({ tasks, collapsed, onToggleCollapsed, onDismiss })
       </div>
 
       {!collapsed && (
-        <div style={{ overflowY: "auto", flex: 1, padding: "8px" }}>
-          {list.length === 0 ? (
-            <div className="muted" style={{ fontSize: 11, padding: 8, textAlign: "center" }}>
-              当前无运行中的移动端任务
-              <div style={{ marginTop: 6, fontSize: 10, opacity: 0.7 }}>
-                启动 Android dump / iOS 备份 / PTP 拉取 / 镜像 dump 后会出现在这里
+        <>
+          {/* Tab 切换 */}
+          <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
+            <button
+              onClick={() => setTab("active")}
+              style={{
+                flex: 1, padding: "8px 0", fontSize: 11, fontWeight: 600,
+                background: tab === "active" ? "var(--accent-soft)" : "transparent",
+                color: tab === "active" ? "var(--accent)" : "var(--text-muted)",
+                border: "none", borderBottom: tab === "active" ? "2px solid var(--accent)" : "none",
+                cursor: "pointer",
+              }}
+            >
+              进行中 ({inflight.length})
+            </button>
+            <button
+              onClick={() => setTab("history")}
+              style={{
+                flex: 1, padding: "8px 0", fontSize: 11, fontWeight: 600,
+                background: tab === "history" ? "var(--accent-soft)" : "transparent",
+                color: tab === "history" ? "var(--accent)" : "var(--text-muted)",
+                border: "none", borderBottom: tab === "history" ? "2px solid var(--accent)" : "none",
+                cursor: "pointer",
+              }}
+            >
+              历史 ({histList.length})
+            </button>
+          </div>
+
+          <div style={{ overflowY: "auto", flex: 1, padding: "8px" }}>
+            {list.length === 0 ? (
+              <div className="muted" style={{ fontSize: 11, padding: 8, textAlign: "center" }}>
+                {tab === "active" ? (
+                  <>
+                    无进行中任务
+                    <div style={{ marginTop: 6, fontSize: 10, opacity: 0.7 }}>
+                      启动 Android dump / iOS 备份 / PTP 拉取 / 镜像 dump 后出现在这里
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    最近 5 分钟无完成的任务
+                    <div style={{ marginTop: 6, fontSize: 10, opacity: 0.7 }}>
+                      完成 5 分钟以上的任务自动清理
+                    </div>
+                  </>
+                )}
               </div>
+            ) : (
+              list.map((t) => (
+                <TaskCard
+                  key={t.id || t.kind}
+                  task={t}
+                  isHistory={tab === "history"}
+                  onDismiss={() => tab === "history" ? onDismissHistory?.(t.id) : onDismiss?.(t.kind)}
+                  onCancel={() => onCancel?.(t.kind)}
+                />
+              ))
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// 单任务卡片（in-flight 或 history）
+function TaskCard({ task, isHistory, onDismiss, onCancel }) {
+  const meta = TASK_KIND_META[task.kind] || { icon: "🔄", color: "#6b7280", title: task.kind };
+  const elapsed = task.startedAt ? Math.floor(((task.completedAt || Date.now()) - task.startedAt) / 1000) : 0;
+  const fmtElapsed = elapsed >= 60
+    ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+    : `${elapsed}s`;
+  const canCancel = !isHistory && !task.done && TASK_KIND_CANCEL_IPC[task.kind];
+  const isError = !!task.error;
+
+  return (
+    <div
+      style={{
+        background: isError ? "var(--bg-danger-soft, #fee2e2)" : (task.done ? "var(--bg-inset)" : "var(--bg-inset)"),
+        border: `1px solid ${isError ? "var(--danger)" : "var(--border)"}`,
+        borderLeft: `3px solid ${isError ? "var(--danger)" : (task.done && !isError ? "var(--success, #16a34a)" : meta.color)}`,
+        borderRadius: 6,
+        padding: "8px 10px",
+        marginBottom: 8,
+        fontSize: 11,
+        opacity: isHistory ? 0.85 : 1,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        <span style={{ fontSize: 13 }}>{meta.icon}</span>
+        <span style={{ flex: 1, fontWeight: 600, fontSize: 11 }}>{meta.title}</span>
+        {canCancel && (
+          <button
+            onClick={() => {
+              if (globalThis.confirm?.(`确定取消 ${meta.title}?\n（已传输的部分会保留）`)) {
+                onCancel?.();
+              }
+            }}
+            style={{
+              border: "1px solid var(--danger)", background: "transparent",
+              color: "var(--danger)", cursor: "pointer", fontSize: 10,
+              padding: "1px 6px", borderRadius: 3, marginRight: 2,
+            }}
+            title="取消任务（停止 backend 子进程）"
+          >
+            🛑 取消
+          </button>
+        )}
+        <button
+          onClick={onDismiss}
+          style={{
+            border: "none", background: "transparent", cursor: "pointer",
+            fontSize: 12, color: "var(--text-muted)", padding: "0 4px",
+          }}
+          title="关闭卡片"
+        >
+          ✕
+        </button>
+      </div>
+      <div style={{ fontSize: 11, marginBottom: 6, color: "var(--text)" }}>{task.label}</div>
+      {!task.done && !isHistory && (
+        <>
+          {typeof task.progress === "number" && task.progress > 0 && task.totalBytes > 0 ? (
+            <div className="progress" style={{ height: 4 }}>
+              <div className="progress__fill" style={{ width: `${Math.min(100, (task.progress / task.totalBytes) * 100)}%` }} />
             </div>
           ) : (
-            list.map((t) => {
-              const meta = TASK_KIND_META[t.kind] || { icon: "🔄", color: "#6b7280", title: t.kind };
-              const elapsed = t.startedAt ? Math.floor((Date.now() - t.startedAt) / 1000) : 0;
-              return (
-                <div
-                  key={t.kind}
-                  style={{
-                    background: t.error ? "var(--bg-danger-soft, #fee)" : "var(--bg-inset)",
-                    border: `1px solid ${t.error ? "var(--danger)" : "var(--border)"}`,
-                    borderLeft: `3px solid ${t.error ? "var(--danger)" : meta.color}`,
-                    borderRadius: 6,
-                    padding: "8px 10px",
-                    marginBottom: 8,
-                    fontSize: 11,
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                    <span style={{ fontSize: 13 }}>{meta.icon}</span>
-                    <span style={{ flex: 1, fontWeight: 600, fontSize: 11 }}>{meta.title}</span>
-                    <button
-                      onClick={() => onDismiss(t.kind)}
-                      style={{
-                        border: "none", background: "transparent", cursor: "pointer",
-                        fontSize: 12, color: "var(--text-muted)", padding: "0 4px",
-                      }}
-                      title="关闭"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  <div style={{ fontSize: 11, marginBottom: 6, color: "var(--text)" }}>{t.label}</div>
-                  {!t.done && (
-                    <>
-                      {typeof t.progress === "number" && t.progress > 0 && t.totalBytes > 0 ? (
-                        <div className="progress" style={{ height: 4 }}>
-                          <div className="progress__fill" style={{ width: `${Math.min(100, (t.progress / t.totalBytes) * 100)}%` }} />
-                        </div>
-                      ) : (
-                        <div className="progress" style={{ height: 4 }}>
-                          <div
-                            className="progress__fill"
-                            style={{ width: "100%", animation: "progressPulse 2s ease-in-out infinite" }}
-                          />
-                        </div>
-                      )}
-                    </>
-                  )}
-                  {elapsed > 0 && (
-                    <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>
-                      已用 {elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`}
-                    </div>
-                  )}
-                  {t.error && (
-                    <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
-                      {t.error}
-                    </div>
-                  )}
-                </div>
-              );
-            })
+            <div className="progress" style={{ height: 4 }}>
+              <div
+                className="progress__fill"
+                style={{ width: "100%", animation: "progressPulse 2s ease-in-out infinite" }}
+              />
+            </div>
           )}
+        </>
+      )}
+      {elapsed > 0 && (
+        <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>
+          {isHistory ? "用时" : "已用"} {fmtElapsed}
+          {isHistory && task.completedAt && (
+            <span style={{ marginLeft: 8 }}>
+              · {Math.floor((Date.now() - task.completedAt) / 1000 / 60)} 分钟前
+            </span>
+          )}
+        </div>
+      )}
+      {task.error && (
+        <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
+          {task.error}
         </div>
       )}
     </div>

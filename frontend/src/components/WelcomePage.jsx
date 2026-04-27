@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   IconAlertTriangle,
   IconArrowRight,
@@ -13,42 +13,167 @@ import { t, onLocaleChange } from "../i18n";
 
 /**
  * QuickCard —— WelcomePage 顶部快速入口卡片（云端 / 手机直连 / 相机 / NAS）。
- * 让新用户不用挖"🧰 工具" 下拉就能从主流"非本机磁盘"来源恢复。
+ * 支持 HTML5 拖拽重排 + localStorage 持久化（v2.5.1）。
  */
-function QuickCard({ icon, title, desc, onClick }) {
+function QuickCard({ icon, title, desc, onClick, draggable, onDragStart, onDragOver, onDrop, isDragging, isDragOver }) {
   return (
-    <button
+    <div
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
       onClick={onClick}
       className="card"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick?.(); }}
       style={{
         textAlign: "left",
         padding: "12px 14px",
-        border: "1px solid var(--border)",
+        border: `1px solid ${isDragOver ? "var(--accent)" : "var(--border)"}`,
         borderRadius: 8,
-        background: "var(--bg-surface)",
-        cursor: "pointer",
+        background: isDragOver ? "var(--accent-soft)" : "var(--bg-surface)",
+        cursor: draggable ? "grab" : "pointer",
         display: "flex",
         alignItems: "center",
         gap: 10,
         transition: "all 0.15s",
+        opacity: isDragging ? 0.4 : 1,
+        userSelect: "none",
       }}
       onMouseEnter={(e) => {
+        if (isDragging) return;
         e.currentTarget.style.borderColor = "var(--accent)";
         e.currentTarget.style.background = "var(--accent-soft)";
         e.currentTarget.style.transform = "translateY(-1px)";
       }}
       onMouseLeave={(e) => {
+        if (isDragging) return;
         e.currentTarget.style.borderColor = "var(--border)";
         e.currentTarget.style.background = "var(--bg-surface)";
         e.currentTarget.style.transform = "translateY(0)";
       }}
     >
+      {/* 拖拽手柄（仅 hover 时显示，不抢点击 ） */}
+      {draggable && (
+        <span
+          className="drag-handle"
+          style={{
+            fontSize: 14, color: "var(--text-muted)", cursor: "grab",
+            marginRight: -4, opacity: 0.5,
+          }}
+          title="拖拽重排"
+        >
+          ⋮⋮
+        </span>
+      )}
       <div style={{ fontSize: 24, lineHeight: 1 }}>{icon}</div>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{title}</div>
         <div className="muted" style={{ fontSize: 11 }}>{desc}</div>
       </div>
-    </button>
+    </div>
+  );
+}
+
+// QuickCardsGrid —— 包装器，处理拖拽顺序 + localStorage 持久化
+function QuickCardsGrid({ cards, onOpenMobileModal }) {
+  const STORAGE_KEY = "welcome_quick_cards_order";
+  // 读 localStorage 里保存的顺序；解析失败 fallback 到默认
+  const [order, setOrder] = useState(() => {
+    try {
+      const saved = globalThis.localStorage?.getItem?.(STORAGE_KEY);
+      if (saved) {
+        const arr = JSON.parse(saved);
+        if (Array.isArray(arr) && arr.every((k) => cards.find((c) => c.key === k))) {
+          // 已保存的顺序里所有 key 都在当前 cards 里 → 用它
+          // 同时把 cards 里没出现在 saved 的（新增功能）追加到末尾
+          const missing = cards.filter((c) => !arr.includes(c.key)).map((c) => c.key);
+          return [...arr, ...missing];
+        }
+      }
+    } catch (_e) {}
+    return cards.map((c) => c.key);
+  });
+  const [dragKey, setDragKey] = useState(null);
+  const [dragOverKey, setDragOverKey] = useState(null);
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem?.(STORAGE_KEY, JSON.stringify(order));
+    } catch (_e) {}
+  }, [order]);
+
+  function handleDragStart(key) {
+    return (e) => {
+      setDragKey(key);
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox 需要 setData 才肯触发 dragstart
+      e.dataTransfer.setData("text/plain", key);
+    };
+  }
+
+  function handleDragOver(key) {
+    return (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      if (key !== dragOverKey) setDragOverKey(key);
+    };
+  }
+
+  function handleDrop(key) {
+    return (e) => {
+      e.preventDefault();
+      if (!dragKey || dragKey === key) {
+        setDragKey(null);
+        setDragOverKey(null);
+        return;
+      }
+      setOrder((prev) => {
+        const next = [...prev];
+        const fromIdx = next.indexOf(dragKey);
+        const toIdx = next.indexOf(key);
+        if (fromIdx === -1 || toIdx === -1) return prev;
+        next.splice(fromIdx, 1);
+        next.splice(toIdx, 0, dragKey);
+        return next;
+      });
+      setDragKey(null);
+      setDragOverKey(null);
+    };
+  }
+
+  // 按 order 排序后渲染
+  const orderedCards = order
+    .map((k) => cards.find((c) => c.key === k))
+    .filter(Boolean);
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+        gap: 10,
+        marginBottom: 16,
+      }}
+      onDragLeave={() => setDragOverKey(null)}
+    >
+      {orderedCards.map((card) => (
+        <QuickCard
+          key={card.key}
+          icon={card.icon}
+          title={card.title}
+          desc={card.desc}
+          onClick={() => onOpenMobileModal(card.modal)}
+          draggable
+          onDragStart={handleDragStart(card.key)}
+          onDragOver={handleDragOver(card.key)}
+          onDrop={handleDrop(card.key)}
+          isDragging={dragKey === card.key}
+          isDragOver={dragOverKey === card.key && dragKey !== card.key}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -157,45 +282,21 @@ export default function WelcomePage({
           </div>
         )}
 
-        {/* ============== 快速入口卡片（v2.5.0 新）让新用户不挖工具菜单也能用 ============== */}
+        {/* ============== 快速入口卡片（v2.5.0 新 / v2.5.1 加拖拽重排） ============== */}
         {onOpenMobileModal && (
           <div>
             <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-              💡 也可以从其他来源恢复（不一定是本机磁盘）：
+              💡 也可以从其他来源恢复（不一定是本机磁盘）—— 拖拽重排卡片顺序：
             </div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                gap: 10,
-                marginBottom: 16,
-              }}
-            >
-              <QuickCard
-                icon="📱"
-                title="iOS / Android 备份"
-                desc="本机或云盘里 iTunes / .ab 备份"
-                onClick={() => onOpenMobileModal("cloud")}
-              />
-              <QuickCard
-                icon="🔌"
-                title="手机直连"
-                desc="ADB 拉目录 / 块级 dump / iOS 触发备份"
-                onClick={() => onOpenMobileModal("adb-pull")}
-              />
-              <QuickCard
-                icon="📷"
-                title="数码相机 (PTP)"
-                desc="gphoto2 拉相机所有照片 + 扫描"
-                onClick={() => onOpenMobileModal("ptp-camera")}
-              />
-              <QuickCard
-                icon="📡"
-                title="NAS (SMB / NFS)"
-                desc="扫局域网共享盘 + 直接恢复"
-                onClick={() => onOpenMobileModal("nas-smb")}
-              />
-            </div>
+            <QuickCardsGrid
+              cards={[
+                { key: "cloud", icon: "📱", title: "iOS / Android 备份", desc: "本机或云盘里 iTunes / .ab 备份", modal: "cloud" },
+                { key: "adb", icon: "🔌", title: "手机直连", desc: "ADB 拉目录 / 块级 dump / iOS 触发备份", modal: "adb-pull" },
+                { key: "ptp", icon: "📷", title: "数码相机 (PTP)", desc: "gphoto2 拉相机所有照片 + 扫描", modal: "ptp-camera" },
+                { key: "nas", icon: "📡", title: "NAS (SMB / NFS)", desc: "扫局域网共享盘 + 直接恢复", modal: "nas-smb" },
+              ]}
+              onOpenMobileModal={onOpenMobileModal}
+            />
           </div>
         )}
 

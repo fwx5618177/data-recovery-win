@@ -165,6 +165,10 @@ export default function App() {
   // 同 kind 只能有一个 in-flight task（系统约束：一次只一个 dump / 一次只一个 backup）
   const [mobileTasks, setMobileTasks] = useState(() => new Map());
 
+  // 历史已完成任务（5 分钟内）：Array<task with id + completedAt>
+  // 比 Map 更适合 history（同 kind 可以多次完成，每次独立记录）
+  const [taskHistory, setTaskHistory] = useState([]);
+
   const upsertTask = useCallback((kind, patch) => {
     setMobileTasks((prev) => {
       const next = new Map(prev);
@@ -173,6 +177,29 @@ export default function App() {
       return next;
     });
   }, []);
+
+  // 任务完成/出错 → 迁到 history（不立即删除 in-flight 卡片，让用户看到 5s 完成态）
+  const completeTask = useCallback((kind) => {
+    setMobileTasks((prev) => {
+      const t = prev.get(kind);
+      if (!t) return prev;
+      // 加到历史
+      setTaskHistory((hist) => [
+        { ...t, id: `${kind}-${Date.now()}`, completedAt: Date.now() },
+        ...hist,
+      ]);
+      return prev;
+    });
+    // 5 秒后从 in-flight 移除
+    setTimeout(() => {
+      setMobileTasks((prev) => {
+        const next = new Map(prev);
+        next.delete(kind);
+        return next;
+      });
+    }, 5000);
+  }, []);
+
   const dismissTask = useCallback((kind) => {
     setMobileTasks((prev) => {
       const next = new Map(prev);
@@ -180,10 +207,39 @@ export default function App() {
       return next;
     });
   }, []);
-  // 完成任务 5 秒后自动移除
-  const autoDismissTask = useCallback((kind) => {
-    setTimeout(() => dismissTask(kind), 5000);
-  }, [dismissTask]);
+  const dismissHistoryTask = useCallback((id) => {
+    setTaskHistory((hist) => hist.filter((t) => t.id !== id));
+  }, []);
+
+  // history 自动清理：每 30 秒清掉 > 5 分钟的
+  useEffect(() => {
+    const id = setInterval(() => {
+      const cutoff = Date.now() - 5 * 60 * 1000;
+      setTaskHistory((hist) => hist.filter((t) => (t.completedAt || 0) > cutoff));
+    }, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // 取消 in-flight 任务 — 调 backend Cancel<X> IPC
+  const cancelTask = useCallback(async (kind) => {
+    const ipcMap = {
+      "android-dump": "CancelAndroidDump",
+      "adb-pull":     "CancelMTPPull",
+      "ios-backup":   "CancelIOSBackup",
+      "ptp-pull":     "CancelPTPPull",
+      "disk-dump":    "CancelDiskDump",
+    };
+    const method = ipcMap[kind];
+    if (!method || !wailsApp?.[method]) return;
+    try {
+      await wailsApp[method]();
+      // backend 取消后会触发对应 :Error 事件，自然走 completeTask 路径
+    } catch (e) {
+      // 取消本身报错（罕见）
+      upsertTask(kind, { error: "取消失败: " + (e?.message || e), done: true });
+      completeTask(kind);
+    }
+  }, [wailsApp, upsertTask, completeTask]);
 
   // sidebar 折叠状态
   const [tasksSidebarCollapsed, setTasksSidebarCollapsed] = useState(false);
@@ -471,10 +527,11 @@ export default function App() {
       }),
       wailsRuntime.EventsOn("mtp:dumpCompleted", () => {
         upsertTask("android-dump", { label: "Android dump 完成 ✓", done: true });
-        autoDismissTask("android-dump");
+        completeTask("android-dump");
       }),
       wailsRuntime.EventsOn("mtp:dumpError", (e) => {
         upsertTask("android-dump", { label: "Android dump 失败", error: String(e), done: true });
+        completeTask("android-dump");
       }),
       // ADB pull directory
       wailsRuntime.EventsOn("mtp:pullStarted", (p) => {
@@ -485,10 +542,11 @@ export default function App() {
       }),
       wailsRuntime.EventsOn("mtp:pullCompleted", (dst) => {
         upsertTask("adb-pull", { label: `ADB pull 完成 → ${dst || ""}`, done: true });
-        autoDismissTask("adb-pull");
+        completeTask("adb-pull");
       }),
       wailsRuntime.EventsOn("mtp:pullError", (e) => {
         upsertTask("adb-pull", { label: "ADB pull 失败", error: String(e), done: true });
+        completeTask("adb-pull");
       }),
       // iOS backup
       wailsRuntime.EventsOn("ios:backupStarted", (udid) => {
@@ -499,10 +557,11 @@ export default function App() {
       }),
       wailsRuntime.EventsOn("ios:backupCompleted", () => {
         upsertTask("ios-backup", { label: "iOS 备份完成 ✓", done: true });
-        autoDismissTask("ios-backup");
+        completeTask("ios-backup");
       }),
       wailsRuntime.EventsOn("ios:backupError", (e) => {
         upsertTask("ios-backup", { label: "iOS 备份失败", error: String(e), done: true });
+        completeTask("ios-backup");
       }),
       // PTP camera pull
       wailsRuntime.EventsOn("ptp:pullStarted", (port) => {
@@ -513,10 +572,11 @@ export default function App() {
       }),
       wailsRuntime.EventsOn("ptp:pullCompleted", (dst) => {
         upsertTask("ptp-pull", { label: `PTP pull 完成 → ${dst || ""}`, done: true });
-        autoDismissTask("ptp-pull");
+        completeTask("ptp-pull");
       }),
       wailsRuntime.EventsOn("ptp:pullError", (e) => {
         upsertTask("ptp-pull", { label: "PTP pull 失败", error: String(e), done: true });
+        completeTask("ptp-pull");
       }),
       // 镜像 dump
       wailsRuntime.EventsOn("image:dumpStarted", (p) => {
@@ -534,10 +594,11 @@ export default function App() {
       }),
       wailsRuntime.EventsOn("image:dumpCompleted", () => {
         upsertTask("disk-dump", { label: "镜像 dump 完成 ✓", done: true });
-        autoDismissTask("disk-dump");
+        completeTask("disk-dump");
       }),
       wailsRuntime.EventsOn("image:dumpError", (e) => {
         upsertTask("disk-dump", { label: "镜像 dump 失败", error: String(e), done: true });
+        completeTask("disk-dump");
       }),
     ];
 
@@ -549,7 +610,7 @@ export default function App() {
         .filter((fn) => typeof fn === "function")
         .forEach((fn) => fn());
     };
-  }, [bridgeState, wailsRuntime, wailsApp, queueFile, flushPending]);
+  }, [bridgeState, wailsRuntime, wailsApp, queueFile, flushPending, upsertTask, completeTask]);
 
   // 启动后拉一次 pending 状态；如果上一次会话下载好了，进入本次直接展示"重启以应用"
   useEffect(() => {
@@ -1195,12 +1256,15 @@ export default function App() {
         />
       )}
 
-      {/* ============== 左侧 "今日任务" 侧栏（多任务并行可视化） ============== */}
+      {/* ============== 左侧 "今日任务" 侧栏（多任务并行 + 历史 tab + 取消） ============== */}
       <TasksSidebar
         tasks={mobileTasks}
+        history={taskHistory}
         collapsed={tasksSidebarCollapsed}
         onToggleCollapsed={() => setTasksSidebarCollapsed((v) => !v)}
         onDismiss={dismissTask}
+        onDismissHistory={dismissHistoryTask}
+        onCancel={cancelTask}
       />
     </div>
   );

@@ -109,6 +109,14 @@ type App struct {
 
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
+
+	// 移动端任务的 cancel functions（v2.5.1）
+	// 一次每种 kind 只允许一个任务在跑，所以单字段够用
+	mtpDumpCancel    context.CancelFunc // Android root 块级 dump
+	mtpPullCancel    context.CancelFunc // ADB pull directory
+	iosBackupCancel  context.CancelFunc // libimobiledevice 备份触发
+	ptpPullCancel    context.CancelFunc // gphoto2 相机 pull
+	diskDumpCancel   context.CancelFunc // 整盘镜像 dump
 }
 
 // NewApp 创建一个新的 App 实例
@@ -1622,24 +1630,43 @@ func (a *App) DumpDisk(srcDevicePath string, dstImagePath string) error {
 		return fmt.Errorf("已有镜像任务正在进行中，请等待完成或取消")
 	}
 
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.diskDumpCancel = cancel
+	a.mu.Unlock()
+
 	go func() {
-		defer imagingMu.Unlock()
+		defer func() {
+			imagingMu.Unlock()
+			cancel()
+			a.mu.Lock()
+			a.diskDumpCancel = nil
+			a.mu.Unlock()
+		}()
 
 		reader := disk.NewReader(srcDevicePath)
 		if err := reader.Open(); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "imaging:error", err.Error())
+			wailsRuntime.EventsEmit(a.ctx, "image:dumpError", err.Error())
 			return
 		}
 		defer reader.Close()
 
+		// 同时发 imaging:started + image:dumpStarted 让前端 TasksSidebar 也跟到
+		wailsRuntime.EventsEmit(a.ctx, "image:dumpStarted", map[string]string{
+			"src": srcDevicePath, "dst": dstImagePath,
+		})
+
 		opts := disk.DefaultImageOptions()
-		ctx := a.ctx
 		written, err := disk.DumpDiskToImage(ctx, reader, dstImagePath, opts, func(p disk.ImageProgress) {
 			wailsRuntime.EventsEmit(a.ctx, "imaging:progress", p)
+			// TasksSidebar 用单个 progress 字节数（已成功读 = 写到镜像的字节数）
+			wailsRuntime.EventsEmit(a.ctx, "image:dumpProgress", p.BytesOK)
 		})
 		if err != nil {
 			appLogger.Warn("镜像 dump 出错", "err", err, "written", written)
 			wailsRuntime.EventsEmit(a.ctx, "imaging:error", err.Error())
+			wailsRuntime.EventsEmit(a.ctx, "image:dumpError", err.Error())
 			return
 		}
 		appLogger.Info("镜像 dump 完成", "path", dstImagePath, "bytes", written)
@@ -1647,8 +1674,26 @@ func (a *App) DumpDisk(srcDevicePath string, dstImagePath string) error {
 			"path":  dstImagePath,
 			"bytes": written,
 		})
+		wailsRuntime.EventsEmit(a.ctx, "image:dumpCompleted", map[string]any{
+			"path":  dstImagePath,
+			"bytes": written,
+		})
 	}()
 
+	return nil
+}
+
+// CancelDiskDump 取消进行中的整盘镜像 dump 任务。
+// 取消后已写的部分镜像保留（用户可能想保住已有 X% 数据）。
+func (a *App) CancelDiskDump() error {
+	a.mu.Lock()
+	c := a.diskDumpCancel
+	a.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c()
+	appLogger.Info("用户取消整盘镜像 dump")
 	return nil
 }
 
@@ -2625,9 +2670,17 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 	a.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.mtpPullCancel = cancel
+	a.mu.Unlock()
 
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			a.mu.Lock()
+			a.mtpPullCancel = nil
+			a.mu.Unlock()
+		}()
 		wailsRuntime.EventsEmit(a.ctx, "mtp:pullStarted", map[string]string{
 			"serial": serial, "src": srcPath, "dest": destDir,
 		})
@@ -2646,6 +2699,20 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
 		}
 	}()
+	return nil
+}
+
+// CancelMTPPull 取消进行中的 ADB pull 任务。
+// 如果当前没有 pull 在跑，返回 nil（幂等）。
+func (a *App) CancelMTPPull() error {
+	a.mu.Lock()
+	c := a.mtpPullCancel
+	a.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c()
+	appLogger.Info("用户取消 MTP pull")
 	return nil
 }
 
@@ -2702,8 +2769,16 @@ func (a *App) AndroidDumpPartitionAndScan(serial, blockNode, outImgPath, mode st
 	a.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.mtpDumpCancel = cancel
+	a.mu.Unlock()
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			a.mu.Lock()
+			a.mtpDumpCancel = nil
+			a.mu.Unlock()
+		}()
 		wailsRuntime.EventsEmit(a.ctx, "mtp:dumpStarted", map[string]string{
 			"serial": serial, "block": blockNode, "out": outImgPath,
 		})
@@ -2724,6 +2799,20 @@ func (a *App) AndroidDumpPartitionAndScan(serial, blockNode, outImgPath, mode st
 			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
 		}
 	}()
+	return nil
+}
+
+// CancelAndroidDump 取消进行中的 Android 块级 dump。
+// adb shell dd 进程会被 ctx 取消（exec.CommandContext 自动 SIGKILL 子进程）。
+func (a *App) CancelAndroidDump() error {
+	a.mu.Lock()
+	c := a.mtpDumpCancel
+	a.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c()
+	appLogger.Info("用户取消 Android 块级 dump")
 	return nil
 }
 
@@ -2773,8 +2862,16 @@ func (a *App) PTPPullAllAndScan(port, destDir, mode string) error {
 		mode = string(types.ScanFull)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.ptpPullCancel = cancel
+	a.mu.Unlock()
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			a.mu.Lock()
+			a.ptpPullCancel = nil
+			a.mu.Unlock()
+		}()
 		wailsRuntime.EventsEmit(a.ctx, "ptp:pullStarted", port)
 		if err := mtp.PullPTPAll(ctx, port, destDir); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "ptp:pullError", err.Error())
@@ -2783,6 +2880,19 @@ func (a *App) PTPPullAllAndScan(port, destDir, mode string) error {
 		wailsRuntime.EventsEmit(a.ctx, "ptp:pullCompleted", destDir)
 		_ = a.StartScan(destDir, mode)
 	}()
+	return nil
+}
+
+// CancelPTPPull 取消进行中的 PTP/gphoto2 相机 pull 任务。
+func (a *App) CancelPTPPull() error {
+	a.mu.Lock()
+	c := a.ptpPullCancel
+	a.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c()
+	appLogger.Info("用户取消 PTP pull")
 	return nil
 }
 
@@ -2838,8 +2948,16 @@ func (a *App) IOSTriggerBackupAndScan(udid, destDir, password string) error {
 		return fmt.Errorf("udid/destDir 不能为空")
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.iosBackupCancel = cancel
+	a.mu.Unlock()
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			a.mu.Lock()
+			a.iosBackupCancel = nil
+			a.mu.Unlock()
+		}()
 		wailsRuntime.EventsEmit(a.ctx, "ios:backupStarted", udid)
 		if err := mtp.TriggerIOSBackup(ctx, udid, destDir); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "ios:backupError", err.Error())
@@ -2850,5 +2968,20 @@ func (a *App) IOSTriggerBackupAndScan(udid, destDir, password string) error {
 		// StartIOSBackupScan 会找 Manifest.plist 自动定位 backup root
 		_ = a.StartIOSBackupScan(destDir, password)
 	}()
+	return nil
+}
+
+// CancelIOSBackup 取消进行中的 iOS 备份触发任务。
+// idevicebackup2 子进程会被 ctx 取消（exec.CommandContext SIGKILL）。
+// 注意：iOS 端可能仍在准备备份；下次接 USB 时 iPhone 会显示"未完成的备份"。
+func (a *App) CancelIOSBackup() error {
+	a.mu.Lock()
+	c := a.iosBackupCancel
+	a.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c()
+	appLogger.Info("用户取消 iOS 备份")
 	return nil
 }

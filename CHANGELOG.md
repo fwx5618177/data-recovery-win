@@ -4,6 +4,62 @@
 
 ---
 
+## v2.5.1 (2026-04-27)
+
+**TasksSidebar 历史 tab + 5 个 Cancel IPC + WelcomePage 卡片拖拽重排 + DumpDisk 事件名修正**
+
+### Added — Backend 5 个 Cancel IPC
+
+每个 mobile 任务现在用 cancellable context + 在 App struct 存 cancel func：
+- `mtpDumpCancel` / `mtpPullCancel` / `iosBackupCancel` / `ptpPullCancel` / `diskDumpCancel`
+- 5 个 IPC：`CancelAndroidDump` / `CancelMTPPull` / `CancelIOSBackup` / `CancelPTPPull` / `CancelDiskDump`
+- 取消时 `exec.CommandContext` 自动 SIGKILL 子进程（adb / dd / idevicebackup2 / gphoto2）
+- 已传输的部分保留（用户可能想保住已有 X% 数据）
+- 幂等：没在跑时调 Cancel 返回 nil
+
+### Fixed — DumpDisk 事件名 + 缺 cancellable context（v2.5.0 漏的）
+
+之前 `DumpDisk` 用 `imaging:*` 事件，但 v2.5.0 frontend 监听 `image:dump*` →
+**事件接不上**，TasksSidebar 看不到镜像 dump 进度。本 release 同时发两套事件
+（`imaging:*` 兼容旧消费者 + `image:dumpStarted/Progress/Completed/Error` 给 sidebar）。
+顺便给 DumpDisk 加 cancellable context（之前直接用 `a.ctx`，无法取消）。
+
+### Added — TasksSidebar 历史 tab + 取消按钮
+
+之前完成的任务 5 秒后直接消失。现在：
+- **2 个 tab**：进行中 (N) / 历史 (M)
+- 完成/出错时**先迁到 history**，再 5s 后从进行中删除（用户能看到完成态）
+- 历史 task 含 `id` + `completedAt`，按完成时间倒序
+- 自动 purge：每 30s 清掉 > 5 分钟的历史
+- in-flight 卡片新增 **🛑 取消** 按钮（红色边框小按钮），点击 confirm 后调 `Cancel<Kind>` IPC
+- 历史卡片：成功/失败用左边框颜色区分（绿/红），显示用时 + "X 分钟前"
+
+### Added — WelcomePage 4 张卡片拖拽重排
+
+不同用户偏好不同（手机直连重度用户 vs 云盘重度用户），现在卡片可拖拽重排：
+- HTML5 drag-and-drop API（无第三方依赖）
+- 拖拽手柄 ⋮⋮ 在 hover 时半透明显示
+- 拖拽中：源卡 opacity 0.4，目标卡边框 + 背景换 accent 色高亮
+- 顺序持久化到 `localStorage["welcome_quick_cards_order"]`
+- 未来加新卡片时（saved 顺序里没有的 key）自动追加到末尾
+
+### 工程指标
+- frontend `vite build` 成功（287 KB → gzip 92 KB，比 v2.5.0 +5 KB）
+- backend `go build` + `go test -short` 全绿
+- 5 个新 Cancel IPC + 1 个 bug 修复（DumpDisk 事件名 + cancellable）
+
+### CI Auto-Release（用户的 #4 已确认）
+
+`.github/workflows/release.yml` 配 `on: push: tags: v*`，每次 git tag push 自动触发：
+- 跨平台 wails build (Windows amd64/arm64, Linux amd64)
+- 创建 GitHub Release
+- 上传 .exe / Linux 二进制 assets
+
+v2.1.5..v2.5.0 的 7 个 tag 已推（GitHub Actions 应当正在构建）。
+v2.5.1 推送后第 8 次触发。
+
+---
+
 ## v2.5.0 (2026-04-27)
 
 **完整移动端 / 备份 / 云端 工作流 UI 体验** —— 多任务并行 + 4 个新 modal +
