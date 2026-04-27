@@ -204,30 +204,32 @@ export default function Workbench({
   return (
     <div className={`workbench${viewMode === "buckets" ? " workbench--buckets" : ""}`}>
       {/* 顶部进度条 ---------------------------------------------------- */}
+      {/* 重排逻辑：
+          主行（醒目）：phase 图标 + label + 大字进度% + ETA + 停止/返回按钮
+          次行（紧凑）：来源 / 文件计数 / 字节量 / 速度  —— 文字小且 muted
+          底行（mono 路径）：当前正在扫的文件 —— 单行 truncate
+          这样用户扫一眼就能抓到"现在多少%、还剩多久"，不再被一行 6 个字段碾过去 */}
       <div className="workbench__progress">
         <div className="progress-strip">
+          {/* 主行 */}
           <div className="progress-strip__top">
             <div className="progress-strip__phase">
               {scanActive ? <IconPlay size={16} className="muted" /> : <IconCheckCircle size={16} style={{ color: "var(--success)" }} />}
               <span className="progress-strip__phase-label">{phaseLabel}</span>
-              <span className="muted" style={{ fontSize: 12 }}>
-                {t("wb.source")}：<span className="mono">{getDriveLabel(selectedDrive)}</span>
+              <span style={{
+                fontSize: "var(--text-2xl)",
+                fontWeight: "var(--weight-medium)",
+                fontVariantNumeric: "tabular-nums",
+                color: scanActive ? "var(--accent)" : "var(--text)",
+                marginLeft: "var(--space-3)",
+              }}>
+                {percent.toFixed(1)}%
               </span>
-            </div>
-            <div className="progress-strip__stats">
-              <span className="progress-strip__stat"><b>{files.length.toLocaleString()}</b> {t("common.found")}</span>
-              {highPriorityCount > 0 && (
-                <span
-                  className="progress-strip__stat"
-                  style={{ color: "var(--success)" }}
-                  title="Windows.old / Users — likely the original owner's personal data"
-                >
-                  <b>{highPriorityCount.toLocaleString()}</b> {t("common.highPriority")}
+              {scanActive && (
+                <span className="muted" style={{ fontSize: "var(--text-sm)", marginLeft: "var(--space-3)" }}>
+                  {t("wb.eta")} <b style={{ color: "var(--text)" }}>{formatDuration(scanProgress?.eta)}</b>
                 </span>
               )}
-              <span className="progress-strip__stat"><b>{formatSize(scanProgress?.bytesScanned || 0)}</b> / {formatSize(scanProgress?.totalBytes || 0)}</span>
-              <span className="progress-strip__stat">{t("wb.speed")}: <b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
-              {scanActive && <span className="progress-strip__stat">{t("wb.eta")} <b>{formatDuration(scanProgress?.eta)}</b></span>}
             </div>
             <div className="btn-group">
               {scanActive ? (
@@ -241,11 +243,41 @@ export default function Workbench({
               )}
             </div>
           </div>
+          {/* 进度条 */}
           <div className={scanActive && percent === 0 ? "progress progress--indeterminate" : "progress"}>
             <div className="progress__fill" style={{ width: `${percent}%` }} />
           </div>
+          {/* 次行：紧凑统计 */}
+          <div className="progress-strip__stats" style={{ marginTop: "var(--space-2)" }}>
+            <span className="muted" style={{ fontSize: "var(--text-sm)" }}>
+              {t("wb.source")}：<span className="mono" style={{ color: "var(--text)" }}>{getDriveLabel(selectedDrive)}</span>
+            </span>
+            <span className="progress-strip__stat"><b>{files.length.toLocaleString()}</b> {t("common.found")}</span>
+            {highPriorityCount > 0 && (
+              <span
+                className="progress-strip__stat"
+                style={{ color: "var(--success)" }}
+                title="Windows.old / Users — likely the original owner's personal data"
+              >
+                <b>{highPriorityCount.toLocaleString()}</b> {t("common.highPriority")}
+              </span>
+            )}
+            <span className="progress-strip__stat"><b>{formatSize(scanProgress?.bytesScanned || 0)}</b> / {formatSize(scanProgress?.totalBytes || 0)}</span>
+            <span className="progress-strip__stat">{t("wb.speed")}: <b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
+          </div>
+          {/* 底行：当前文件 */}
           {scanProgress?.currentFile && (
-            <div className="muted mono" style={{ fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <div
+              className="muted mono"
+              title={scanProgress.currentFile}
+              style={{
+                fontSize: "var(--text-xs)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                marginTop: "var(--space-1)",
+              }}
+            >
               {scanProgress.currentFile}
             </div>
           )}

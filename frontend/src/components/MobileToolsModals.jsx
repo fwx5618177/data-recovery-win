@@ -8,6 +8,7 @@
 //   - 进度可视化：监听 backend 事件（ios:backupProgress / mtp:dumpProgress 等）
 
 import React, { useEffect, useRef, useState } from "react";
+import { IconX } from "../icons";
 
 // 通用 modal 壳：复用 preview-modal CSS，但内容可定制
 // width 是 inner 的 max-width（默认 600）
@@ -36,8 +37,14 @@ export function GenericModal({ title, onClose, width = 600, children, footer }) 
       >
         <div className="preview-modal__header">
           <div className="preview-modal__title">{title}</div>
-          <button className="btn btn--sm btn--ghost" onClick={onClose} title="关闭 (Esc)">
-            ✕
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={onClose}
+            title="关闭 (Esc)"
+            aria-label="关闭对话框"
+            style={{ minWidth: 32, minHeight: 32, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          >
+            <IconX size={14} />
           </button>
         </div>
         <div className="preview-modal__body" style={{ display: "block", padding: 16, background: "var(--bg-surface)" }}>

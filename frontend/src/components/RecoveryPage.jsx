@@ -216,7 +216,7 @@ export default function RecoveryPage({
           <div className="file-table-wrap" style={{ marginTop: 8 }}>
             <div className="file-table-toolbar">
               <div className="file-table-toolbar__left">
-                <div className="btn-group">
+                <div className="tab-bar" role="tablist" aria-label="按状态过滤恢复结果">
                   {[
                     { v: "failed", label: `未成功 (${counts.failed + counts.skipped})` },
                     ...(counts.partial > 0 ? [{ v: "partial", label: `部分恢复 (${counts.partial})` }] : []),
@@ -225,7 +225,9 @@ export default function RecoveryPage({
                   ].map((opt) => (
                     <button
                       key={opt.v}
-                      className={`btn btn--sm ${filter === opt.v ? "btn--primary" : "btn--ghost"}`}
+                      role="tab"
+                      aria-selected={filter === opt.v}
+                      className={`tab-bar__item ${filter === opt.v ? "tab-bar__item--active" : ""}`}
                       onClick={() => setFilter(opt.v)}
                     >
                       {opt.label}

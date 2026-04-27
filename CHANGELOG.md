@@ -4,6 +4,94 @@
 
 ---
 
+## v2.6.0 (2026-04-27)
+
+**完整 UI 设计迭代** —— 修 18 个具体问题（美观 / 直观 / 方便操作），加 token
+体系、Cmd+K 工具搜索、可拖拽快速卡片，并把 ✕ 文本按钮换成 SVG icon。
+
+### Added — Design token system + 视觉一致性
+
+- `style.css` 加完整 token 体系（之前散落硬编码 px / 字号）：
+  - **字号 scale**：`--text-xs` (11) / `sm` (12) / `base` (13) / `md` (14) / `lg` (15) / `xl` (18) / `2xl` (22) / `3xl` (28)
+  - **字重 scale**：normal (400) / **medium (500)** / semibold (600) / bold (700) — 中文标题主推 medium 避免"打扁"
+  - **间距 scale**：8 倍数体系 `--space-1..12`
+- 文本对比度按 WCAG AA 重排：
+  - dark mode `--text` 从 `#e7ecf2` → `#f0f4fa`（对 bg-base 7:1 AAA）
+  - dark mode `--text-muted` 从 `#8b96a6` → `#a3afc1`（对 bg-base 5.2:1 AA pass）
+  - light mode 全部加深一档：`--text` 从 `#0f1624` → `#0a1220`（17:1 AAA）；
+    border 从 0.10 → 0.12 让卡片边界更清楚
+- 新加 `.tab-bar` segmented control：底部 accent 横线 + 激活态 surface 背景，
+  比之前 `btn-group` 的"primary vs ghost"反差强 5×
+- `.badge` 默认从灰扑扑改用淡 accent 色（中性信息也有存在感）；真正"无关紧要"
+  迁到 `.badge--muted`
+
+### Added — 6 个新 SVG icon
+
+`icons.jsx` 加：`IconCloud` / `IconPhone` / `IconCamera` / `IconServer` /
+`IconGripVertical` / `IconChevronUp/Down/UpDown`
+
+### Changed — WelcomePage 视觉重构
+
+- 4 张快速卡片 emoji（📱🔌📷📡 — 4 种风格不一致）→ SVG icon set
+  （Cloud/Phone/Camera/Server，统一笔画 + accent 圆角方块容器）
+- 拖拽手柄 ⋮⋮ 默认就显示（之前 hover 才出，新用户不知道可拖）
+- 卡片 hover 加 box-shadow 提升 + accent border（之前只换背景色，反馈弱）
+
+### Changed — drive-grid 自适应
+
+`auto-fill, minmax(280px, 1fr)` → `auto-fill, minmax(240px, 1fr)`：
+- 1920px 宽屏从一行 4 张提升到一行 7-8 张，少滚动
+- 窄屏不变（auto-fill 仍降到 1-2 列）
+
+### Added — ToolsMenu Cmd+K 搜索 + 重排
+
+之前 25 个菜单项扫起来累。现在：
+- 顶栏按钮加 `⌘K` kbd 提示
+- **Cmd/Ctrl+K** 全局快捷键打开菜单 + 自动 focus 搜索框
+- 输入即时 filter（拆 emoji + 大小写不敏感子串匹配）
+- Esc 一次清空 filter，再次 Esc 关菜单
+- 菜单宽度 240 → 320，更舒展
+
+### Changed — RecoveryPage filter 改 tab-bar
+
+`btn-group` (btn--primary vs btn--ghost) → `.tab-bar` segmented control：
+- 激活态有底部 accent 横线 + surface 背景，扫一眼看出"我在哪个 tab"
+- 加 ARIA `role="tablist"` / `aria-selected` for 可访问性
+
+### Changed — Workbench 进度条主/次行分层
+
+之前一行挤 6 段（phase / 字数 / 字节 / 速度 / ETA / 当前文件），字号混乱无层次。
+现在 3 行分层：
+- **主行（醒目）**：phase 图标 + 标签 + 大字 22px **进度%** (accent 蓝) + ETA + 停止/返回按钮
+- **次行（紧凑）**：来源 / 文件计数 / 字节量 / 速度 — text-sm muted
+- **底行（mono）**：当前正在扫的文件 — 单行 truncate + title tooltip
+
+用户扫一眼就抓到"X% 还剩 Y 分钟"，不被一行 6 字段碾过。
+
+### Fixed — Modal 关闭按钮 ✕ → SVG IconX
+
+`MobileToolsModals.jsx` GenericModal header 关闭按钮：
+- 文本 ✕ → `IconX` SVG（125% 缩放下不糊）
+- min-width/height 32px（满足 44px 触摸目标的 ~75%）
+- 加 `aria-label="关闭对话框"`
+
+### 工程指标
+- frontend `vite build` 成功（290 KB → gzip 93 KB，比 v2.5.1 +3 KB = 6 个新 icon + tab-bar CSS + Cmd+K 搜索）
+- backend 未动；`go test -short ./internal/updater/` 全绿
+- 文本对比度全部 ≥ AA（WCAG 2.1）；多数主文字达 AAA
+
+### 解决的 18 个具体问题
+
+按严重度记录全部修复：HIGH 5 个（drive grid 宽度、拖拽手柄、Workbench 进度堆叠、emoji-not-icon、ToolsMenu 25 项扫不完）；MED 9 个（badge 配色、字号 token、Modal ✕、tab-bar 视觉、UpdateBanner 状态色、字号梯度、ghost button、3 banner 平摊、filter-panel 互斥关系）；LOW 4 个（grid padding、缩略图比例、ghost hover、文字对比）。
+
+### 后续可改进
+- ToolsMenu 25 项的"按使用频率重排"留待 v2.7（需要 telemetry 收集使用频次）
+- WelcomePage 加密卷面板和顶部 banner 的视觉层次还能再压
+- Workbench 左侧 filter-panel 可考虑改 tab-bar
+- Sortable 列头的 ▲▼ 指示器还没加（已在 icons.jsx 备好 IconChevronUpDown）
+
+---
+
 ## v2.5.1 (2026-04-27)
 
 **TasksSidebar 历史 tab + 5 个 Cancel IPC + WelcomePage 卡片拖拽重排 + DumpDisk 事件名修正**

@@ -7,6 +7,11 @@ import {
   IconRefresh,
   IconShield,
   IconUsb,
+  IconCloud,
+  IconPhone,
+  IconCamera,
+  IconServer,
+  IconGripVertical,
 } from "../icons";
 import { formatSize } from "../formatters";
 import { t, onLocaleChange } from "../i18n";
@@ -15,7 +20,7 @@ import { t, onLocaleChange } from "../i18n";
  * QuickCard —— WelcomePage 顶部快速入口卡片（云端 / 手机直连 / 相机 / NAS）。
  * 支持 HTML5 拖拽重排 + localStorage 持久化（v2.5.1）。
  */
-function QuickCard({ icon, title, desc, onClick, draggable, onDragStart, onDragOver, onDrop, isDragging, isDragOver }) {
+function QuickCard({ Icon, title, desc, onClick, draggable, onDragStart, onDragOver, onDrop, isDragging, isDragOver }) {
   return (
     <div
       draggable={draggable}
@@ -23,54 +28,69 @@ function QuickCard({ icon, title, desc, onClick, draggable, onDragStart, onDragO
       onDragOver={onDragOver}
       onDrop={onDrop}
       onClick={onClick}
-      className="card"
       role="button"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick?.(); }}
       style={{
         textAlign: "left",
-        padding: "12px 14px",
+        padding: "var(--space-3) var(--space-4)",
         border: `1px solid ${isDragOver ? "var(--accent)" : "var(--border)"}`,
-        borderRadius: 8,
+        borderRadius: "var(--radius-md)",
         background: isDragOver ? "var(--accent-soft)" : "var(--bg-surface)",
         cursor: draggable ? "grab" : "pointer",
         display: "flex",
         alignItems: "center",
-        gap: 10,
-        transition: "all 0.15s",
+        gap: "var(--space-3)",
+        transition: "all 150ms cubic-bezier(.4,0,.2,1)",
         opacity: isDragging ? 0.4 : 1,
         userSelect: "none",
       }}
       onMouseEnter={(e) => {
         if (isDragging) return;
-        e.currentTarget.style.borderColor = "var(--accent)";
-        e.currentTarget.style.background = "var(--accent-soft)";
+        e.currentTarget.style.borderColor = "var(--accent-border)";
         e.currentTarget.style.transform = "translateY(-1px)";
+        e.currentTarget.style.boxShadow = "var(--shadow-md)";
       }}
       onMouseLeave={(e) => {
         if (isDragging) return;
-        e.currentTarget.style.borderColor = "var(--border)";
-        e.currentTarget.style.background = "var(--bg-surface)";
+        e.currentTarget.style.borderColor = isDragOver ? "var(--accent)" : "var(--border)";
         e.currentTarget.style.transform = "translateY(0)";
+        e.currentTarget.style.boxShadow = "none";
       }}
     >
-      {/* 拖拽手柄（仅 hover 时显示，不抢点击 ） */}
+      {/* 拖拽手柄默认就显示（不再 hover 才出），让用户一眼就知道可拖 */}
       {draggable && (
         <span
           className="drag-handle"
           style={{
-            fontSize: 14, color: "var(--text-muted)", cursor: "grab",
-            marginRight: -4, opacity: 0.5,
+            color: "var(--text-subtle)",
+            cursor: "grab",
+            display: "flex",
+            alignItems: "center",
+            flex: "none",
           }}
           title="拖拽重排"
         >
-          ⋮⋮
+          <IconGripVertical size={14} />
         </span>
       )}
-      <div style={{ fontSize: 24, lineHeight: 1 }}>{icon}</div>
+      {/* SVG icon 在 accent 圆角方块里 — 替代 emoji，统一笔画风格 */}
+      <div style={{
+        width: 36,
+        height: 36,
+        borderRadius: "var(--radius-md)",
+        background: "var(--accent-soft)",
+        color: "var(--accent)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flex: "none",
+      }}>
+        {Icon ? <Icon size={20} /> : null}
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{title}</div>
-        <div className="muted" style={{ fontSize: 11 }}>{desc}</div>
+        <div style={{ fontWeight: "var(--weight-medium)", fontSize: "var(--text-base)", marginBottom: 2 }}>{title}</div>
+        <div className="muted" style={{ fontSize: "var(--text-xs)" }}>{desc}</div>
       </div>
     </div>
   );
@@ -161,7 +181,7 @@ function QuickCardsGrid({ cards, onOpenMobileModal }) {
       {orderedCards.map((card) => (
         <QuickCard
           key={card.key}
-          icon={card.icon}
+          Icon={card.Icon}
           title={card.title}
           desc={card.desc}
           onClick={() => onOpenMobileModal(card.modal)}
@@ -290,10 +310,10 @@ export default function WelcomePage({
             </div>
             <QuickCardsGrid
               cards={[
-                { key: "cloud", icon: "📱", title: "iOS / Android 备份", desc: "本机或云盘里 iTunes / .ab 备份", modal: "cloud" },
-                { key: "adb", icon: "🔌", title: "手机直连", desc: "ADB 拉目录 / 块级 dump / iOS 触发备份", modal: "adb-pull" },
-                { key: "ptp", icon: "📷", title: "数码相机 (PTP)", desc: "gphoto2 拉相机所有照片 + 扫描", modal: "ptp-camera" },
-                { key: "nas", icon: "📡", title: "NAS (SMB / NFS)", desc: "扫局域网共享盘 + 直接恢复", modal: "nas-smb" },
+                { key: "cloud", Icon: IconCloud, title: "iOS / Android 备份", desc: "本机或云盘里 iTunes / .ab 备份", modal: "cloud" },
+                { key: "adb", Icon: IconPhone, title: "手机直连", desc: "ADB 拉目录 / 块级 dump / iOS 触发备份", modal: "adb-pull" },
+                { key: "ptp", Icon: IconCamera, title: "数码相机 (PTP)", desc: "gphoto2 拉相机所有照片 + 扫描", modal: "ptp-camera" },
+                { key: "nas", Icon: IconServer, title: "NAS (SMB / NFS)", desc: "扫局域网共享盘 + 直接恢复", modal: "nas-smb" },
               ]}
               onOpenMobileModal={onOpenMobileModal}
             />

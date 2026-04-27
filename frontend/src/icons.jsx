@@ -251,6 +251,70 @@ export const IconFile = (p) =>
     </>,
   );
 
+// 移动端 / 网络 / 云端 来源图标 —— 替换 WelcomePage 快速卡片 + ToolsMenu 的纯 emoji
+export const IconCloud = (p) =>
+  I(
+    p,
+    <path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 17.5h11.5z" />,
+  );
+
+export const IconPhone = (p) =>
+  I(
+    p,
+    <>
+      <rect x="6" y="2" width="12" height="20" rx="2" />
+      <line x1="11" y1="18" x2="13" y2="18" />
+    </>,
+  );
+
+export const IconCamera = (p) =>
+  I(
+    p,
+    <>
+      <path d="M3 7h4l2-3h6l2 3h4v13H3z" />
+      <circle cx="12" cy="13" r="4" />
+    </>,
+  );
+
+export const IconServer = (p) =>
+  I(
+    p,
+    <>
+      <rect x="3" y="4" width="18" height="6" rx="1.5" />
+      <rect x="3" y="14" width="18" height="6" rx="1.5" />
+      <line x1="7" y1="7" x2="7.01" y2="7" />
+      <line x1="7" y1="17" x2="7.01" y2="17" />
+    </>,
+  );
+
+export const IconGripVertical = (p) =>
+  I(
+    p,
+    <>
+      <circle cx="9" cy="6" r="1" />
+      <circle cx="9" cy="12" r="1" />
+      <circle cx="9" cy="18" r="1" />
+      <circle cx="15" cy="6" r="1" />
+      <circle cx="15" cy="12" r="1" />
+      <circle cx="15" cy="18" r="1" />
+    </>,
+  );
+
+export const IconChevronUp = (p) =>
+  I(p, <polyline points="18 15 12 9 6 15" />);
+
+export const IconChevronDown = (p) =>
+  I(p, <polyline points="6 9 12 15 18 9" />);
+
+export const IconChevronUpDown = (p) =>
+  I(
+    p,
+    <>
+      <polyline points="7 8 12 4 17 8" />
+      <polyline points="7 16 12 20 17 16" />
+    </>,
+  );
+
 const categoryIcons = {
   image: IconImage,
   document: IconFileText,

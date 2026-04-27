@@ -1442,7 +1442,10 @@ function pickAssetForPlatform(assets, platform) {
  */
 function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
   const [open, setOpen] = React.useState(false);
+  const [filter, setFilter] = React.useState("");
   const ref = React.useRef(null);
+  const searchRef = React.useRef(null);
+
   React.useEffect(() => {
     function onClick(e) {
       if (ref.current && !ref.current.contains(e.target)) setOpen(false);
@@ -1450,6 +1453,32 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
     globalThis.addEventListener("click", onClick);
     return () => globalThis.removeEventListener("click", onClick);
   }, []);
+
+  // Cmd/Ctrl+K 全局快捷键打开工具菜单 + 自动 focus 搜索框
+  React.useEffect(() => {
+    function onKey(e) {
+      const isMod = e.metaKey || e.ctrlKey;
+      if (isMod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen(true);
+        setTimeout(() => searchRef.current?.focus(), 0);
+      } else if (e.key === "Escape" && open) {
+        setOpen(false);
+        setFilter("");
+      }
+    }
+    globalThis.addEventListener("keydown", onKey);
+    return () => globalThis.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  // 打开时自动 focus 搜索框 + 清空 filter
+  React.useEffect(() => {
+    if (open) {
+      setFilter("");
+      setTimeout(() => searchRef.current?.focus(), 50);
+    }
+  }, [open]);
+
   const drivePath = selectedDrive?.path || "";
 
   async function runAsync(fn, msg) {
@@ -1461,38 +1490,90 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
       globalThis.alert?.("失败: " + (err?.message || err));
     }
   }
-  const item = (label, handler) => (
-    <button
-      key={label}
-      onClick={handler}
-      style={{
-        display: "block", width: "100%", textAlign: "left",
-        padding: "6px 12px", border: "none", background: "transparent",
-        cursor: "pointer", fontSize: 12, color: "var(--text)",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-surface-2)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-    >
-      {label}
-    </button>
-  );
+
+  // filter 命中：拆掉 emoji + 大小写不敏感的子串匹配
+  const matches = (label) => {
+    if (!filter) return true;
+    const s = String(label).toLowerCase().replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").trim();
+    return s.includes(filter.toLowerCase().trim());
+  };
+
+  const item = (label, handler) => {
+    if (!matches(label)) return null;
+    return (
+      <button
+        key={label}
+        onClick={handler}
+        style={{
+          display: "block", width: "100%", textAlign: "left",
+          padding: "var(--space-2) var(--space-3)",
+          border: "none", background: "transparent",
+          cursor: "pointer", fontSize: "var(--text-sm)", color: "var(--text)",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-surface-2)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+      >
+        {label}
+      </button>
+    );
+  };
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
         className="btn btn--sm btn--ghost"
         onClick={() => setOpen((v) => !v)}
-        title="工具箱 / Tools"
+        title="工具箱 (Cmd+K / Ctrl+K)"
       >
-        🧰 工具
+        🧰 工具 <kbd style={{
+          marginLeft: 6, padding: "1px 5px", fontSize: 10,
+          color: "var(--text-subtle)", border: "1px solid var(--border)",
+          borderRadius: 3, fontFamily: "var(--font-mono)",
+        }}>⌘K</kbd>
       </button>
       {open && (
         <div style={{
           position: "absolute", top: "100%", right: 0, marginTop: 4,
           background: "var(--bg-surface)", border: "1px solid var(--border)",
-          borderRadius: 6, minWidth: 240, boxShadow: "var(--shadow-md)",
-          zIndex: 100, padding: "4px 0",
+          borderRadius: "var(--radius-md)", width: 320,
+          maxHeight: "70vh", overflowY: "auto",
+          boxShadow: "var(--shadow-lg)",
+          zIndex: 100, padding: 0,
         }}>
+          {/* 搜索框：Cmd+K 打开后自动 focus，type 立刻 filter */}
+          <div style={{
+            position: "sticky", top: 0,
+            padding: "var(--space-3)",
+            background: "var(--bg-surface)",
+            borderBottom: "1px solid var(--border)",
+            zIndex: 1,
+          }}>
+            <input
+              ref={searchRef}
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="搜工具… (Esc 关闭)"
+              style={{
+                width: "100%",
+                padding: "6px 10px",
+                background: "var(--bg-inset)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--text)",
+                fontSize: "var(--text-sm)",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  if (filter) setFilter("");
+                  else setOpen(false);
+                }
+              }}
+            />
+          </div>
+          <div style={{ padding: "var(--space-1) 0" }}>
           {item("🩺 磁盘 SMART 健康", () => runAsync(
             () => wailsApp?.QueryDiskHealth?.(drivePath || ""),
             (r) => `SMART: ${r.healthy ? "✅ 健康" : "⚠️ 异常"}\n${r.notes || ""}`
@@ -1676,6 +1757,17 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             setOpen(false);
             onOpenMobileModal?.("about");
           })}
+          </div>
+
+          {/* 空搜索结果时给提示 */}
+          {filter && !document.querySelector(`[data-tools-menu-item="match"]`) && (
+            <div style={{
+              padding: "var(--space-4)", fontSize: "var(--text-xs)",
+              color: "var(--text-muted)", textAlign: "center",
+            }}>
+              没有匹配的工具
+            </div>
+          )}
         </div>
       )}
     </div>
