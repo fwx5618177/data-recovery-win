@@ -4,7 +4,14 @@
  * 颜色通过 currentColor 继承，方便在按钮/徽章里统一染色。
  */
 
-function I(props, children) {
+import type { ReactNode, SVGProps } from "react";
+
+export interface IconProps extends Omit<SVGProps<SVGSVGElement>, "children"> {
+  size?: number;
+  className?: string;
+}
+
+function I(props: IconProps, children: ReactNode) {
   const { size = 16, className = "", ...rest } = props;
   return (
     <svg
@@ -25,7 +32,7 @@ function I(props, children) {
   );
 }
 
-export const IconShield = (p) =>
+export const IconShield = (p: IconProps) =>
   I(
     p,
     <>
@@ -34,7 +41,7 @@ export const IconShield = (p) =>
     </>,
   );
 
-export const IconHardDrive = (p) =>
+export const IconHardDrive = (p: IconProps) =>
   I(
     p,
     <>
@@ -45,7 +52,7 @@ export const IconHardDrive = (p) =>
     </>,
   );
 
-export const IconUsb = (p) =>
+export const IconUsb = (p: IconProps) =>
   I(
     p,
     <>
@@ -56,7 +63,7 @@ export const IconUsb = (p) =>
     </>,
   );
 
-export const IconArrowRight = (p) =>
+export const IconArrowRight = (p: IconProps) =>
   I(
     p,
     <>
@@ -65,7 +72,7 @@ export const IconArrowRight = (p) =>
     </>,
   );
 
-export const IconArrowLeft = (p) =>
+export const IconArrowLeft = (p: IconProps) =>
   I(
     p,
     <>
@@ -74,7 +81,7 @@ export const IconArrowLeft = (p) =>
     </>,
   );
 
-export const IconSearch = (p) =>
+export const IconSearch = (p: IconProps) =>
   I(
     p,
     <>
@@ -83,13 +90,13 @@ export const IconSearch = (p) =>
     </>,
   );
 
-export const IconCheck = (p) =>
+export const IconCheck = (p: IconProps) =>
   I(p, <polyline points="20 6 9 17 4 12" />);
 
-export const IconX = (p) =>
+export const IconX = (p: IconProps) =>
   I(p, <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>);
 
-export const IconEye = (p) =>
+export const IconEye = (p: IconProps) =>
   I(
     p,
     <>
@@ -98,7 +105,7 @@ export const IconEye = (p) =>
     </>,
   );
 
-export const IconAlertTriangle = (p) =>
+export const IconAlertTriangle = (p: IconProps) =>
   I(
     p,
     <>
@@ -108,7 +115,7 @@ export const IconAlertTriangle = (p) =>
     </>,
   );
 
-export const IconInfo = (p) =>
+export const IconInfo = (p: IconProps) =>
   I(
     p,
     <>
@@ -118,7 +125,7 @@ export const IconInfo = (p) =>
     </>,
   );
 
-export const IconCheckCircle = (p) =>
+export const IconCheckCircle = (p: IconProps) =>
   I(
     p,
     <>
@@ -127,7 +134,7 @@ export const IconCheckCircle = (p) =>
     </>,
   );
 
-export const IconRefresh = (p) =>
+export const IconRefresh = (p: IconProps) =>
   I(
     p,
     <>
@@ -138,19 +145,19 @@ export const IconRefresh = (p) =>
     </>,
   );
 
-export const IconStop = (p) =>
+export const IconStop = (p: IconProps) =>
   I(
     p,
     <rect x="6" y="6" width="12" height="12" rx="2" />,
   );
 
-export const IconPlay = (p) =>
+export const IconPlay = (p: IconProps) =>
   I(
     p,
     <polygon points="6 4 20 12 6 20 6 4" />,
   );
 
-export const IconDownload = (p) =>
+export const IconDownload = (p: IconProps) =>
   I(
     p,
     <>
@@ -160,13 +167,13 @@ export const IconDownload = (p) =>
     </>,
   );
 
-export const IconFolder = (p) =>
+export const IconFolder = (p: IconProps) =>
   I(
     p,
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
   );
 
-export const IconFolderOpen = (p) =>
+export const IconFolderOpen = (p: IconProps) =>
   I(
     p,
     <>
@@ -175,7 +182,7 @@ export const IconFolderOpen = (p) =>
     </>,
   );
 
-export const IconImage = (p) =>
+export const IconImage = (p: IconProps) =>
   I(
     p,
     <>
@@ -185,7 +192,7 @@ export const IconImage = (p) =>
     </>,
   );
 
-export const IconFileText = (p) =>
+export const IconFileText = (p: IconProps) =>
   I(
     p,
     <>
@@ -196,7 +203,7 @@ export const IconFileText = (p) =>
     </>,
   );
 
-export const IconFilm = (p) =>
+export const IconFilm = (p: IconProps) =>
   I(
     p,
     <>
@@ -212,7 +219,7 @@ export const IconFilm = (p) =>
     </>,
   );
 
-export const IconMusic = (p) =>
+export const IconMusic = (p: IconProps) =>
   I(
     p,
     <>
@@ -222,7 +229,7 @@ export const IconMusic = (p) =>
     </>,
   );
 
-export const IconArchive = (p) =>
+export const IconArchive = (p: IconProps) =>
   I(
     p,
     <>
@@ -232,7 +239,7 @@ export const IconArchive = (p) =>
     </>,
   );
 
-export const IconDatabase = (p) =>
+export const IconDatabase = (p: IconProps) =>
   I(
     p,
     <>
@@ -242,7 +249,7 @@ export const IconDatabase = (p) =>
     </>,
   );
 
-export const IconFile = (p) =>
+export const IconFile = (p: IconProps) =>
   I(
     p,
     <>
@@ -252,13 +259,13 @@ export const IconFile = (p) =>
   );
 
 // 移动端 / 网络 / 云端 来源图标 —— 替换 WelcomePage 快速卡片 + ToolsMenu 的纯 emoji
-export const IconCloud = (p) =>
+export const IconCloud = (p: IconProps) =>
   I(
     p,
     <path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 17.5h11.5z" />,
   );
 
-export const IconPhone = (p) =>
+export const IconPhone = (p: IconProps) =>
   I(
     p,
     <>
@@ -267,7 +274,7 @@ export const IconPhone = (p) =>
     </>,
   );
 
-export const IconCamera = (p) =>
+export const IconCamera = (p: IconProps) =>
   I(
     p,
     <>
@@ -276,7 +283,7 @@ export const IconCamera = (p) =>
     </>,
   );
 
-export const IconServer = (p) =>
+export const IconServer = (p: IconProps) =>
   I(
     p,
     <>
@@ -287,7 +294,7 @@ export const IconServer = (p) =>
     </>,
   );
 
-export const IconGripVertical = (p) =>
+export const IconGripVertical = (p: IconProps) =>
   I(
     p,
     <>
@@ -300,13 +307,13 @@ export const IconGripVertical = (p) =>
     </>,
   );
 
-export const IconChevronUp = (p) =>
+export const IconChevronUp = (p: IconProps) =>
   I(p, <polyline points="18 15 12 9 6 15" />);
 
-export const IconChevronDown = (p) =>
+export const IconChevronDown = (p: IconProps) =>
   I(p, <polyline points="6 9 12 15 18 9" />);
 
-export const IconChevronUpDown = (p) =>
+export const IconChevronUpDown = (p: IconProps) =>
   I(
     p,
     <>
@@ -315,7 +322,9 @@ export const IconChevronUpDown = (p) =>
     </>,
   );
 
-const categoryIcons = {
+type IconComponent = (props: IconProps) => JSX.Element;
+
+const categoryIcons: Record<string, IconComponent> = {
   image: IconImage,
   document: IconFileText,
   video: IconFilm,
@@ -324,7 +333,13 @@ const categoryIcons = {
   database: IconDatabase,
 };
 
-export function IconForCategory({ category, size = 16, className = "" }) {
-  const Cmp = categoryIcons[category] || IconFile;
+export interface IconForCategoryProps {
+  category?: string;
+  size?: number;
+  className?: string;
+}
+
+export function IconForCategory({ category, size = 16, className = "" }: IconForCategoryProps) {
+  const Cmp = (category && categoryIcons[category]) || IconFile;
   return <Cmp size={size} className={className} />;
 }

@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    /* Vite + React modern preset */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "skipLibCheck": true,
+
+    /* Type-checking severity —— **故意宽松**起步：
+     * 这是**渐进迁移**，allowJs 让 .jsx 还能跟 .tsx 共存；
+     * strict 关掉避免一次性冒 100+ 错误吓到；逐步收紧。
+     */
+    "strict": false,
+    "noImplicitAny": false,
+    "allowJs": true,
+    "checkJs": false,
+
+    /* Output —— Vite 来 transpile，TS 只做类型检查（noEmit） */
+    "noEmit": true,
+
+    /* React 17+ JSX runtime —— 不用 import React from "react" */
+    "useDefineForClassFields": true,
+
+    /* 路径解析 */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    /* 跟 Vite/Wails 兼容性 */
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.js",
+    "src/**/*.jsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

@@ -298,8 +298,11 @@ export function bucketCounts(bucketed) {
   return out;
 }
 
-export function buildFallbackScanResult(files = [], progress = {}) {
-  const stats = {};
+export function buildFallbackScanResult(
+  files: any[] = [],
+  progress: { bytesScanned?: number } = {},
+) {
+  const stats: Record<string, number> = {};
 
   files.forEach((file) => {
     const category = file?.category || "other";

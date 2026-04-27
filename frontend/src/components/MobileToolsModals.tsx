@@ -10,9 +10,22 @@
 import React, { useEffect, useRef, useState } from "react";
 import { IconX } from "../icons";
 
+// 所有 modal 的通用 prop shape —— wailsApp / outputDir / selectedDrive / 回调
+// 故意宽松：让 modal 组件内部按需用，避免一次给 8 个 modal 都加严格 props 定义。
+// 渐进迁移：未来逐个 modal 改严格 props 类型。
+type ModalProps = {
+  wailsApp?: any;
+  outputDir?: string;
+  selectedDrive?: any;
+  onClose: () => void;
+  onStarted?: () => void;
+  onStartedScan?: (hit: any) => void;
+  [k: string]: any;
+};
+
 // 通用 modal 壳：复用 preview-modal CSS，但内容可定制
 // width 是 inner 的 max-width（默认 600）
-export function GenericModal({ title, onClose, width = 600, children, footer }) {
+export function GenericModal({ title, onClose, width = 600, children, footer }: { title: string; onClose: () => void; width?: number; children: React.ReactNode; footer?: React.ReactNode }) {
   const ref = useRef(null);
   useEffect(() => {
     function onKey(e) {
@@ -61,7 +74,12 @@ export function GenericModal({ title, onClose, width = 600, children, footer }) 
 }
 
 // 表单字段 helper —— 标签 + input 一体化
-export function Field({ label, hint, children }) {
+interface FieldProps {
+  label: string;
+  hint?: React.ReactNode;
+  children: React.ReactNode;
+}
+export function Field({ label, hint, children }: FieldProps) {
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
@@ -75,7 +93,14 @@ export function Field({ label, hint, children }) {
   );
 }
 
-export function TextInput({ value, onChange, placeholder, type = "text", disabled }) {
+interface TextInputProps {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+  disabled?: boolean;
+}
+export function TextInput({ value, onChange, placeholder, type = "text", disabled }: TextInputProps) {
   return (
     <input
       type={type}
@@ -105,7 +130,7 @@ export function TextInput({ value, onChange, placeholder, type = "text", disable
 // 新路径：list view，每条 hit 旁边一个 "🔍 扫描" 按钮直接调
 //         StartIOSBackupScan / 触发 Android backup scan
 
-export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }) {
+export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }: ModalProps) {
   const [loading, setLoading] = useState(true);
   const [roots, setRoots] = useState([]);
   const [hits, setHits] = useState([]);
@@ -251,7 +276,7 @@ export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }) {
 // 2. NASScanModal —— SMB / NFS 扫描表单
 // =============================================================================
 
-export function NASScanModal({ kind, wailsApp, onClose, onStarted }) {
+export function NASScanModal({ kind, wailsApp, onClose, onStarted }: ModalProps) {
   const isSMB = kind === "smb";
   const [host, setHost] = useState("");
   const [user, setUser] = useState(""); // SMB only
@@ -352,7 +377,7 @@ export function NASScanModal({ kind, wailsApp, onClose, onStarted }) {
 // 3. AndroidDumpModal —— Android root 块级 dump（含进度可视化）
 // =============================================================================
 
-export function AndroidDumpModal({ wailsApp, outputDir, onClose, onStarted }) {
+export function AndroidDumpModal({ wailsApp, outputDir, onClose, onStarted }: ModalProps) {
   const [phase, setPhase] = useState("input"); // input → checking → ready → running → done
   const [serial, setSerial] = useState("");
   const [parts, setParts] = useState(null);
@@ -551,7 +576,7 @@ export function AndroidDumpModal({ wailsApp, outputDir, onClose, onStarted }) {
 // 4. IOSBackupModal —— iOS libimobiledevice 直连备份触发（含 pair 状态 + 进度）
 // =============================================================================
 
-export function IOSBackupModal({ wailsApp, outputDir, onClose, onStarted }) {
+export function IOSBackupModal({ wailsApp, outputDir, onClose, onStarted }: ModalProps) {
   const [phase, setPhase] = useState("checking"); // checking → input → pairing → backup → done
   const [tools, setTools] = useState(null);
   const [devices, setDevices] = useState([]);
@@ -786,7 +811,7 @@ export function IOSBackupModal({ wailsApp, outputDir, onClose, onStarted }) {
 // 5. PTPCameraModal —— gphoto2 数码相机/老 Android 拉照片
 // =============================================================================
 
-export function PTPCameraModal({ wailsApp, outputDir, onClose, onStarted }) {
+export function PTPCameraModal({ wailsApp, outputDir, onClose, onStarted }: ModalProps) {
   const [phase, setPhase] = useState("checking"); // checking → input → starting
   const [tools, setTools] = useState(null);
   const [devs, setDevs] = useState([]);
@@ -924,7 +949,7 @@ export function PTPCameraModal({ wailsApp, outputDir, onClose, onStarted }) {
 // 6. ADBPullModal —— Android adb pull 目录到本地后扫描
 // =============================================================================
 
-export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }) {
+export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalProps) {
   const [phase, setPhase] = useState("loading"); // loading → input → starting
   const [devs, setDevs] = useState([]);
   const [serial, setSerial] = useState("");
@@ -1068,7 +1093,7 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }) {
 // 7. DiskDumpModal —— 整盘镜像 dump (.img)
 // =============================================================================
 
-export function DiskDumpModal({ wailsApp, selectedDrive, onClose, onStarted }) {
+export function DiskDumpModal({ wailsApp, selectedDrive, onClose, onStarted }: ModalProps) {
   const [outImg, setOutImg] = useState("");
   const [phase, setPhase] = useState("input"); // input → starting
   const [err, setErr] = useState("");
@@ -1166,7 +1191,7 @@ export function DiskDumpModal({ wailsApp, selectedDrive, onClose, onStarted }) {
 // 8. AboutModal —— 版本 / 能力 / 依赖 / 鸣谢
 // =============================================================================
 
-export function AboutModal({ wailsApp, onClose }) {
+export function AboutModal({ wailsApp, onClose }: ModalProps) {
   const [version, setVersion] = useState("");
   useEffect(() => {
     const v = wailsApp?.GetAppVersion?.();
@@ -1246,7 +1271,7 @@ const TASK_KIND_META = {
 };
 
 // kind → backend Cancel<X> IPC method 名（v2.5.1 加）
-const TASK_KIND_CANCEL_IPC = {
+const TASK_KIND_CANCEL_IPC: Record<string, string> = {
   "android-dump": "CancelAndroidDump",
   "adb-pull":     "CancelMTPPull",
   "ios-backup":   "CancelIOSBackup",
@@ -1254,16 +1279,39 @@ const TASK_KIND_CANCEL_IPC = {
   "disk-dump":    "CancelDiskDump",
 };
 
+// 任务对象 shape（in-flight 和 history 共用）
+export interface MobileTask {
+  kind: string;
+  label: string;
+  startedAt: number;
+  completedAt?: number;
+  progress?: number;       // bytes 已完成；-1 = 不确定
+  totalBytes?: number;     // 已知总字节
+  done?: boolean;
+  error?: string;
+  id?: string;             // 历史 task 用唯一 id
+}
+
+interface TasksSidebarProps {
+  tasks: Map<string, MobileTask>;
+  history?: MobileTask[];
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  onDismiss: (kind: string) => void;
+  onDismissHistory?: (id: string) => void;
+  onCancel?: (kind: string) => Promise<void> | void;
+}
+
 export function TasksSidebar({
-  tasks,            // Map<kind, task> — 进行中
-  history,          // Array<task> — 5 分钟内完成（按 completedAt 倒序）
+  tasks,
+  history,
   collapsed,
   onToggleCollapsed,
-  onDismiss,        // (kind) => void —— 关 in-flight 卡片（不取消 backend）
-  onDismissHistory, // (id) => void —— 关历史卡片
-  onCancel,         // (kind) => Promise —— 调 backend Cancel<X> IPC
-}) {
-  const [tab, setTab] = React.useState("active"); // "active" | "history"
+  onDismiss,
+  onDismissHistory,
+  onCancel,
+}: TasksSidebarProps) {
+  const [tab, setTab] = React.useState<"active" | "history">("active");
   const inflight = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   const histList = history || [];
 

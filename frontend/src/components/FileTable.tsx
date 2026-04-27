@@ -346,7 +346,15 @@ function PreviewModal({ file, onClose, onRequestPreview }) {
   );
 }
 
-function Th({ k, sk, sd, onClick, children, align }) {
+interface ThProps {
+  k: string;
+  sk: string;
+  sd: "asc" | "desc" | string;
+  onClick: (key: string) => void;
+  children: React.ReactNode;
+  align?: "left" | "right" | "center";
+}
+function Th({ k, sk, sd, onClick, children, align }: ThProps) {
   const active = sk === k;
   return (
     <th
@@ -356,7 +364,10 @@ function Th({ k, sk, sd, onClick, children, align }) {
       title="点击列头切换排序"
     >
       {children}
-      {active && <span className="muted" style={{ marginLeft: 4 }}>{sd === "asc" ? "↑" : "↓"}</span>}
+      {/* 激活列：明确 ↑/↓；其余列：默认浅色 ↕ 提示"可排序"（v2.7 加，之前没有任何指示） */}
+      <span style={{ marginLeft: 4, fontSize: 9, opacity: active ? 1 : 0.35, color: active ? "var(--accent)" : "var(--text-subtle)" }}>
+        {active ? (sd === "asc" ? "↑" : "↓") : "↕"}
+      </span>
     </th>
   );
 }

@@ -141,7 +141,8 @@ function detectDefault() {
 }
 
 let locale = detectDefault();
-const listeners = new Set();
+type LocaleListener = (locale: string) => void;
+const listeners = new Set<LocaleListener>();
 
 export function getLocale() {
   return locale;
@@ -156,21 +157,24 @@ export function setLocale(next) {
   });
 }
 
-export function onLocaleChange(fn) {
+export function onLocaleChange(fn: LocaleListener): () => void {
   listeners.add(fn);
-  return () => listeners.delete(fn);
+  // 包成 () => void 让 React useEffect cleanup 兼容（listeners.delete 返回 boolean 会让 TS 报错）
+  return () => {
+    listeners.delete(fn);
+  };
 }
 
 /**
  * t(key, vars?) — 取当前 locale 下的文案，再用 vars 插值。
  * 未命中 key 时返回 key 本身，便于开发期快速发现漏翻。
  */
-export function t(key, vars) {
-  const table = dict[locale] || dict.zh;
+export function t(key: string, vars?: Record<string, string | number>): string {
+  const table = (dict as Record<string, Record<string, string>>)[locale] || dict.zh;
   let s = table[key];
   if (s === undefined) {
     // 回落到 zh
-    s = dict.zh[key] ?? key;
+    s = (dict.zh as Record<string, string>)[key] ?? key;
   }
   if (vars) {
     for (const [k, v] of Object.entries(vars)) {

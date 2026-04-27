@@ -4,6 +4,101 @@
 
 ---
 
+## v2.7.0 (2026-04-27)
+
+**TypeScript 迁移 + 类型化 IPC + 顺手修了 5 个 TS 抓出来的真 bug + sortable 列指示器**
+
+### 用户问题：是不是该上 TS？
+
+是的。已经迁完。Vite 早就在用，只是 React 代码是 `.jsx` (plain JS + JSX)。
+本 release 把 16 个文件迁到 `.tsx` / `.ts`，并对 IPC 边界做强类型。
+
+### Added — TypeScript 基础设施
+
+- 新增 `tsconfig.json`（渐进迁移配置：`strict: false` + `allowJs: true`，
+  避免一次冒 100+ 错误吓到）
+- 新增 `package.json` script：`pnpm typecheck` 跑 `tsc --noEmit`
+- 安装 `typescript@latest`（`@types/react` + `@types/react-dom` 之前已经在了）
+- Vite 原生支持 TS，0 配置变化
+
+### Added — Wails IPC 类型声明 (`src/types/wails.d.ts`)
+
+手写精简补丁 vs 依赖 `wails generate`（要求 dev/build 跑过才能生成）：
+- 强类型 30+ 个最常用 IPC method（GetDrives / StartScan / 5 个 Cancel / 11 个移动端 IPC...）
+- index signature `[methodName: string]: (...args: any[]) => unknown` 兜底其余
+  ~70 个 method（编译过得去 + 渐进改进）
+- 14 个业务数据 interface：`DriveInfo / RecoveredFile / ScanProgress /
+  RecoveryProgress / FileRecoveryRecord / CloudSyncRoot / CloudBackupHit /
+  AndroidPartition / IOSDevice / PTPDevice / MTPDevice / ...`
+- 全局 `Window.runtime.EventsOn / EventsEmit` 类型声明
+- 编译期捕"调一个不存在的 IPC method" bug（v2.4.0 audit 时遇到的真实问题类）
+
+### Migrated — 16 文件 jsx/.js → tsx/.ts
+
+| 文件 | 之前 | 之后 |
+|------|------|------|
+| `App.jsx` | `.jsx` | **`.tsx`** |
+| `main.jsx` | `.jsx` | **`.tsx`** |
+| `icons.jsx` | `.jsx` | **`.tsx`** + IconProps interface |
+| `formatters.js` | `.js` | **`.ts`** |
+| `recovery-helpers.js` | `.js` | **`.ts`** |
+| `i18n.js` | `.js` | **`.ts`** |
+| `theme.js` | `.js` | **`.ts`** |
+| `components/*.jsx` (8 个) | `.jsx` | **`.tsx`** |
+
+### Fixed — 5 个 TS 实际抓出来的 bug
+
+迁移过程中 `tsc` 实际 catch 的非平凡问题（不是凑数的 lint 风格）：
+
+1. **RecoveryPage `counts.highConfidence` 字段不存在** —— 计数对象 init 没声明
+   `highConfidence`，但 line 53 `c.highConfidence = c.success - c.lowConfidence`
+   靠 JS 动态属性"飞着加"，TS 编译时会"undefined"。展示在 stat-card 上没炸
+   只是因为 React 渲染数字 NaN 走 falsy。修：init 时把 `highConfidence: 0` 列上。
+
+2. **i18n `t()` 单参数调用爆 24 处** —— `t("foo")` 传一个 arg，但 `function t(key, vars)`
+   没标 `vars` optional。修：`t(key: string, vars?: Record<string, ...>)`。
+
+3. **`onLocaleChange` / `onThemeChange` 返回值被 useEffect 当 destructor 用，
+   但实际是 `() => boolean`** —— `Set.prototype.delete()` 返回 boolean 让 React 抱怨
+   "destructor 不能返回非 void"。**这是真 bug，可能导致 cleanup 不被触发**。
+   修：包成 `() => { listeners.delete(fn); }` 显式返回 void。
+
+4. **`Field` / `TextInput` props 强必填** —— TS 看到 `disabled` 没标 `?:`
+   就要求每个调用都传 disabled，6 处 callsite 漏传。修：定义 `FieldProps` /
+   `TextInputProps` 把 `hint` / `disabled` 标 optional。
+
+5. **`document.querySelector(...).focus()` 在 `Element` 上不存在** —— 必须
+   `as HTMLInputElement` cast。本来 keyboard shortcut Ctrl+F 只有刚好命中
+   `<input>` 时才工作；命中其他元素时 `.focus is not a function` 静默失败。
+
+### Added — Sortable 列指示器（v2.6.0 没做的）
+
+`FileTable.tsx` 里的 `Th` 组件（之前 v2.6.0 我留 TODO 了）：
+- 激活列 → ↑/↓ accent 蓝色
+- 非激活列 → 默认浅色 ↕（之前完全无指示，用户得逐列点试）
+- 加 ARIA `title="点击列头切换排序"` 鼠标悬浮提示
+
+### 工程指标
+- frontend `vite build` 成功（293 KB → gzip 93 KB，比 v2.6.0 +3 KB = TS 类型 + 业务数据 interface）
+- frontend `pnpm typecheck` **0 errors**（lenient `strict: false` 起步）
+- backend 未动；`go build ./...` 全绿
+
+### 后续改进路径
+
+TS 迁移**渐进**思路（避免一次 strict 暴 100+ 错误）：
+1. v2.7：完成基础迁移 + 抓 5 个真 bug ✅（本 release）
+2. v2.7.x：逐个文件加严格 props 类型（modal 的 ModalProps 现在还是 `[k]: any` 兜底）
+3. v2.8：开 `strict: true` + `noImplicitAny: true`，预期再暴 50+ 真 bug
+4. v2.9：跑 `wails generate ts` 替换手写的 wails.d.ts（更权威）
+
+### v2.6.0 留下未做的（推到 v2.7.x）
+- ToolsMenu 25 项按使用频率重排（需 telemetry 数据）
+- WelcomePage banner 堆压缩
+- Workbench 左 filter-panel 改 tab-bar
+- Inline px → token 全面 sweep（A11y level 1 已达，level 2 慢慢来）
+
+---
+
 ## v2.6.0 (2026-04-27)
 
 **完整 UI 设计迭代** —— 修 18 个具体问题（美观 / 直观 / 方便操作），加 token

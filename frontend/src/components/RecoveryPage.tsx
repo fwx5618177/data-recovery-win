@@ -37,7 +37,14 @@ export default function RecoveryPage({
   const [filter, setFilter] = useState("failed"); // all | success | failed
 
   const counts = useMemo(() => {
-    const c = { success: 0, lowConfidence: 0, partial: 0, failed: 0, skipped: 0 };
+    const c = {
+      success: 0,
+      lowConfidence: 0,
+      highConfidence: 0,
+      partial: 0,
+      failed: 0,
+      skipped: 0,
+    };
     (records || []).forEach((r) => {
       if (r.state === "success") {
         c.success++;

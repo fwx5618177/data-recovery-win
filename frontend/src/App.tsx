@@ -717,18 +717,18 @@ export default function App() {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && currentPage === "workbench") {
-        const input = globalThis.document?.querySelector(".file-table-search input");
+        const input = globalThis.document?.querySelector(".file-table-search input") as HTMLInputElement | null;
         if (input) {
           e.preventDefault();
           input.focus();
-          if (input.select) input.select();
+          input.select?.();
         }
         return;
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" &&
           currentPage === "workbench" && !inEditable) {
-        const allBtn = globalThis.document?.querySelector("[data-shortcut='select-all-visible']");
+        const allBtn = globalThis.document?.querySelector("[data-shortcut='select-all-visible']") as HTMLButtonElement | null;
         if (allBtn) {
           e.preventDefault();
           allBtn.click();
@@ -841,7 +841,10 @@ export default function App() {
      6. 操作：开始恢复 / 停止 / 重试 / 导出
      ===================================================================== */
   const startRecovery = useCallback(
-    async (fileIDs, opts = {}) => {
+    async (
+      fileIDs: string[],
+      opts: { allowSameDisk?: boolean; archiveByExifDate?: boolean } = {},
+    ) => {
       if (!Array.isArray(fileIDs) || fileIDs.length === 0 || !outputDir) return;
       if (!wailsApp?.StartRecovery) return;
 

@@ -3,7 +3,8 @@
 // 不带 data-theme 时跟随 prefers-color-scheme。
 
 const STORAGE_KEY = "data-recovery.theme";
-const listeners = new Set();
+type ThemeListener = (theme: string) => void;
+const listeners = new Set<ThemeListener>();
 let current = loadInitial();
 applyToHTML(current);
 
@@ -37,9 +38,11 @@ export function setTheme(next) {
   listeners.forEach((fn) => { try { fn(current); } catch {/* no-op */} });
 }
 
-export function onThemeChange(fn) {
+export function onThemeChange(fn: ThemeListener): () => void {
   listeners.add(fn);
-  return () => listeners.delete(fn);
+  return () => {
+    listeners.delete(fn);
+  };
 }
 
 export const AVAILABLE_THEMES = ["system", "dark", "light"];

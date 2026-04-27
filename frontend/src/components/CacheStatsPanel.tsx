@@ -22,7 +22,7 @@ export default function CacheStatsPanel({ scanActive }) {
     let cancelled = false;
     const tick = async () => {
       try {
-        const resp = await window.go.main.App.GetEncryptedReaderCacheStats();
+        const resp: any = await window.go!.main!.App!.GetEncryptedReaderCacheStats();
         if (cancelled) return;
         if (resp?.active) {
           setStats(resp.stats);
