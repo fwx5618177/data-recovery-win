@@ -4,6 +4,90 @@
 
 ---
 
+## v2.8.1 (2026-04-27)
+
+**全局 Toast 通知系统 —— 替代散落的 native `alert()` 调用**
+
+### 用户反馈
+
+> 这个应该集成，而不是还要自己弄一个
+
+截图：触发"磁盘 SMART 健康"工具后弹出 Wails 的 native alert 框
+（"wails.localhost 显示 / SMART: ⚠ 异常 / smartctl 未安装；装 smartmontools 可看磁盘健康"），
+跟应用本身的暗色 / 现代设计语言完全不搭。
+
+### 问题
+
+`App.tsx` + `MobileToolsModals.tsx` 一共 39 处 `alert()` / `globalThis.alert?.()`：
+- Wails 渲染原生 alert 时显示 "wails.localhost 显示" 顶部 → 像浏览器警告框，廉价
+- 阻塞式：用户必须先点确定才能继续操作
+- 多个 alert 排队体验极差
+- 不能含 icon / 不能区分 success / warning / error
+- 不响应主题切换
+
+### Added — `frontend/src/toast.ts`（单例 API，0 dep）
+
+```ts
+toast.success("操作成功");
+toast.error("失败：" + err);
+toast.info({ title: "SMART", description: "smartctl 未安装；装 smartmontools 可看磁盘健康" });
+toast.warning({ title: "...", description: "...", action: { label: "重试", onClick: ... } });
+```
+
+特性：
+- 4 个 level：info / success / warning / error，对应 accent / success / warning / danger 色温
+- 自动消失（默认 5s，error 8s）；duration: 0 → 不消失（用户手动关）
+- 队列上限 5 条，超出丢最早的（防 toast 风暴）
+- 支持 action button（如"重试"）
+- 单一字符串含 `\n` 时自动拆 title + description（兼容老 alert 风格的多行消息）
+- 模块单例 + 订阅模式 → 模块函数（如 `runAsync`）也能调，无需 hook context
+
+### Added — `frontend/src/components/ToastViewport.tsx`
+
+固定在右下角；多条上下堆叠 + slide-in 动画；每条 toast：
+- 左 24px icon（圆角方块 + level 软色背景）
+- 中 title + description（description 限 4 行 + 超长 title= tooltip）
+- 右 action 按钮 + 关闭按钮
+- 左侧 3px level 色边框条
+
+挂载点：`App.tsx` 根 `<div className="app-shell">` 下统一一份。
+
+### Changed — 全部 `alert()` → `toast.X()`
+
+| 调用方 | 之前 | 之后 |
+| --- | --- | --- |
+| scan:error / recovery:error 事件处理 | `alert(getFriendlyActionError(...))` | `toast.error(...)` |
+| 文件拖入不支持的格式 | `globalThis.alert(\`不支持拖入 "..."\\n请拖入...\`)` | `toast.warning({ title, description })` |
+| StartScan / StartImageScan / StartRecovery 等 IPC 失败 | `alert(...)` | `toast.error(...)` |
+| BitLocker 解锁 / VSS 启动 / 选择目录失败 | `alert(...)` | `toast.error(...)` |
+| 报告 / 诊断包导出成功 | `alert(\`报告已导出到：\\n${path}\`)` | `toast.success({ title, description: path })` |
+| 下载页复制到剪贴板 | `alert(...)` | `toast.success(...)` |
+| 工具菜单 SMART 健康结果 | `globalThis.alert?.("SMART: ⚠ 异常\\n...")` | `toast.info("SMART: ⚠ 异常\\n...")` 自动拆 title/desc |
+| MobileToolsModals 启动扫描失败 | `globalThis.alert?.(...)` | `toast.error(...)` |
+| 应用更新失败 / 平台资源未找到 | `alert(...)` | `toast.error / warning` |
+
+总计：39 处 native alert 全部清零。
+
+### Files
+
+- 新增：`frontend/src/toast.ts`（单例 + 订阅，约 130 行，0 dep）
+- 新增：`frontend/src/components/ToastViewport.tsx`
+- 修改：`frontend/src/style.css`（appended `.toast-viewport / .toast / .toast--{level} / .toast__{icon|body|title|desc|action-btn|close}`）
+- 修改：`frontend/src/App.tsx`（import toast + ToastViewport；38 处 alert 替换；ToastViewport 挂在 app-shell 下）
+- 修改：`frontend/src/components/MobileToolsModals.tsx`（1 处 alert 替换）
+
+### Verify
+
+```bash
+grep -r "globalThis\.alert\|alert(" frontend/src/{App,components}*.{ts,tsx}
+# (无输出 —— 全清零)
+
+cd frontend && pnpm build
+# ✓ built in ~480ms
+```
+
+---
+
 ## v2.8.0 (2026-04-27)
 
 **UI 现代化重做 + 跟随时间自动主题切换 + Material 风格 `<Select>`**

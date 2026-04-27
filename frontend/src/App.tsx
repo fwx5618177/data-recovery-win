@@ -10,6 +10,8 @@ import WelcomePage from "./components/WelcomePage";
 import Workbench from "./components/Workbench";
 import RecoveryPage from "./components/RecoveryPage";
 import Select from "./components/Select";
+import ToastViewport from "./components/ToastViewport";
+import { toast } from "./toast";
 import {
   CloudBackupsModal,
   NASScanModal,
@@ -427,7 +429,7 @@ export default function App() {
       setScanActive(false);
       flushPending();
       if (isCancellationError(msg)) return; // 用户主动停，静默
-      alert(getFriendlyActionError("扫描", msg));
+      toast.error(getFriendlyActionError("扫描", msg));
     });
 
     const offRecProg = wailsRuntime.EventsOn("recovery:progress", (p) => {
@@ -445,7 +447,7 @@ export default function App() {
     const offRecErr = wailsRuntime.EventsOn("recovery:error", (payload) => {
       const msg = payload?.message || payload || "未知错误";
       setRecoveryActive(false);
-      alert(getFriendlyActionError("恢复", msg));
+      toast.error(getFriendlyActionError("恢复", msg));
     });
 
     // OS 级文件拖拽：用户把磁盘镜像 / .img / .raw / .dd 拖到窗口任意位置
@@ -457,10 +459,10 @@ export default function App() {
       // 只接受常见镜像扩展，避免用户拖个 .docx 触发"扫描该文件"
       const looksLikeImage = /\.(img|raw|dd|iso|dmg|vhd|vhdx|vmdk|001|e01)$/i.test(lower);
       if (!looksLikeImage) {
-        if (typeof globalThis.alert === "function") {
-          globalThis.alert(`不支持拖入 "${path.split(/[\\/]/).pop()}"。\n` +
-            `请拖入磁盘镜像文件 (.img / .raw / .dd / .iso / .dmg / .vhd / .vmdk / .001 / .e01)`);
-        }
+        toast.warning({
+          title: `不支持拖入 "${path.split(/[\\/]/).pop()}"`,
+          description: "请拖入磁盘镜像文件 (.img / .raw / .dd / .iso / .dmg / .vhd / .vmdk / .001 / .e01)",
+        });
         return;
       }
       const fakeDrive = { path, name: `镜像: ${path.split(/[\\/]/).pop()}` };
@@ -470,7 +472,7 @@ export default function App() {
       setCurrentPage("workbench");
       wailsApp?.StartScan?.(path, DEFAULT_SCAN_MODE).catch((err) => {
         setScanActive(false);
-        alert(getFriendlyActionError("启动镜像扫描", err));
+        toast.error(getFriendlyActionError("启动镜像扫描", err));
         setCurrentPage("welcome");
       });
     });
@@ -506,7 +508,7 @@ export default function App() {
     });
     const offDownloadErr = wailsRuntime.EventsOn("update:downloadError", (msg) => {
       setDownloadState("error");
-      alert("下载更新失败：" + (msg?.message || msg || "未知错误"));
+      toast.error("下载更新失败：" + (msg?.message || msg || "未知错误"));
     });
 
     // 移动端 / 备份 / NAS 全局进度事件 —— 推到 mobileTasks Map
@@ -644,7 +646,7 @@ export default function App() {
       await wailsApp.StartScan(selectedDrive.path, DEFAULT_SCAN_MODE);
     } catch (err) {
       setScanActive(false);
-      alert(getFriendlyActionError("启动扫描", err));
+      toast.error(getFriendlyActionError("启动扫描", err));
       setCurrentPage("welcome");
     }
   }, [selectedDrive, bridgeState, wailsApp]);
@@ -663,7 +665,7 @@ export default function App() {
       await wailsApp.StartScan(shadow.devicePath, DEFAULT_SCAN_MODE);
     } catch (err) {
       setScanActive(false);
-      alert(getFriendlyActionError("启动 VSS 扫描", err));
+      toast.error(getFriendlyActionError("启动 VSS 扫描", err));
       setCurrentPage("welcome");
     }
   }, [wailsApp]);
@@ -675,7 +677,7 @@ export default function App() {
     try {
       path = await wailsApp.SelectImageFile();
     } catch (err) {
-      alert(getFriendlyActionError("选择镜像文件", err));
+      toast.error(getFriendlyActionError("选择镜像文件", err));
       return;
     }
     if (!path) return; // 用户取消
@@ -689,7 +691,7 @@ export default function App() {
       await wailsApp.StartScan(path, DEFAULT_SCAN_MODE);
     } catch (err) {
       setScanActive(false);
-      alert(getFriendlyActionError("启动镜像扫描", err));
+      toast.error(getFriendlyActionError("启动镜像扫描", err));
       setCurrentPage("welcome");
     }
   }, [wailsApp]);
@@ -761,7 +763,7 @@ export default function App() {
     } catch (err) {
       setScanActive(false);
       setBitlockerState({ phase: "error", error: getErrorText(err) || "解锁失败", volume: vol });
-      alert(getFriendlyActionError("BitLocker 内存解锁", err));
+      toast.error(getFriendlyActionError("BitLocker 内存解锁", err));
       setCurrentPage("welcome");
     }
   }, [wailsApp]);
@@ -798,7 +800,7 @@ export default function App() {
         error: getErrorText(err) || "解锁失败",
         volume: vol,
       });
-      alert(getFriendlyActionError("BitLocker 解锁 / 扫描", err));
+      toast.error(getFriendlyActionError("BitLocker 解锁 / 扫描", err));
       setCurrentPage("welcome");
     }
   }, [wailsApp]);
@@ -833,7 +835,7 @@ export default function App() {
 
       return dir;
     } catch (err) {
-      alert(getFriendlyActionError("选择恢复目录", err));
+      toast.error(getFriendlyActionError("选择恢复目录", err));
       return "";
     }
   }, [wailsApp]);
@@ -863,7 +865,7 @@ export default function App() {
           await wailsApp.StartRecovery(fileIDs, outputDir);
         }
       } catch (err) {
-        alert(getFriendlyActionError("启动恢复", err));
+        toast.error(getFriendlyActionError("启动恢复", err));
         return;
       }
 
@@ -890,7 +892,7 @@ export default function App() {
       await wailsApp.RetryFailedRecovery(outputDir);
     } catch (err) {
       setRecoveryActive(false);
-      alert(getFriendlyActionError("重试失败项", err));
+      toast.error(getFriendlyActionError("重试失败项", err));
     }
   }, [outputDir, wailsApp]);
 
@@ -898,9 +900,9 @@ export default function App() {
     if (!outputDir || !wailsApp?.ExportRecoveryReport) return;
     try {
       const path = await wailsApp.ExportRecoveryReport(outputDir);
-      if (path) alert(`报告已导出到：\n${path}`);
+      if (path) toast.success({ title: "报告已导出", description: path });
     } catch (err) {
-      alert(getFriendlyActionError("导出恢复报告", err));
+      toast.error(getFriendlyActionError("导出恢复报告", err));
     }
   }, [outputDir, wailsApp]);
 
@@ -981,7 +983,7 @@ export default function App() {
       setPendingSession(null);
     } catch (err) {
       setScanActive(false);
-      alert(getFriendlyActionError("断点续扫", err));
+      toast.error(getFriendlyActionError("断点续扫", err));
       setCurrentPage("welcome");
     }
   }, [pendingSession, drives, wailsApp]);
@@ -1064,7 +1066,7 @@ export default function App() {
           const plat = platform || "windows";
           const asset = pickAssetForPlatform(updateInfo.assets || [], plat);
           if (!asset) {
-            alert("未找到适合当前平台的更新资源，请访问下载页手动下载");
+            toast.warning("未找到适合当前平台的更新资源，请访问下载页手动下载");
             return;
           }
           setDownloadState("downloading");
@@ -1077,13 +1079,13 @@ export default function App() {
             asset.size || 0,
           ).catch((err) => {
             setDownloadState("error");
-            alert("启动下载失败：" + (err?.message || err));
+            toast.error("启动下载失败：" + (err?.message || err));
           });
         }}
         onRestart={() => {
           if (!globalThis.confirm?.("应用即将关闭并以新版本重启，继续吗？")) return;
           wailsApp?.ApplyPendingUpdate?.().catch((err) => {
-            alert("应用更新失败：" + (err?.message || err));
+            toast.error("应用更新失败：" + (err?.message || err));
           });
         }}
         onCancelPending={() => {
@@ -1095,7 +1097,7 @@ export default function App() {
           if (!updateInfo?.downloadPage) return;
           wailsApp?.OpenFolder?.(updateInfo.downloadPage).catch(() => {
             globalThis.navigator?.clipboard?.writeText?.(updateInfo.downloadPage);
-            alert(`下载页已复制到剪贴板：\n${updateInfo.downloadPage}`);
+            toast.success({ title: "下载页已复制到剪贴板", description: updateInfo.downloadPage });
           });
         }}
       />
@@ -1270,6 +1272,7 @@ export default function App() {
         onDismissHistory={dismissHistoryTask}
         onCancel={cancelTask}
       />
+      <ToastViewport />
     </div>
   );
 }
@@ -1426,13 +1429,9 @@ async function exportDiagnosticBundle(wailsApp) {
   } catch {/* no-op */}
   try {
     const path = await wailsApp.ExportDiagnosticBundle("", notes);
-    if (typeof globalThis.alert === "function") {
-      globalThis.alert(t("diag.done", { path }));
-    }
+    toast.success({ title: "诊断包已导出", description: path });
   } catch (err) {
-    if (typeof globalThis.alert === "function") {
-      globalThis.alert("导出诊断包失败: " + (err?.message || err));
-    }
+    toast.error("导出诊断包失败: " + (err?.message || err));
   }
 }
 
@@ -1511,9 +1510,9 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
     setOpen(false);
     try {
       const r = await fn();
-      if (msg && r) globalThis.alert?.(msg(r));
+      if (msg && r) toast.info(msg(r));
     } catch (err) {
-      globalThis.alert?.("失败: " + (err?.message || err));
+      toast.error("失败: " + (err?.message || err));
     }
   }
 
@@ -1626,7 +1625,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             const kw = globalThis.prompt?.("搜索关键词：", "");
             if (!kw) return;
             // 这里简化：假设前端已有 imagePaths 列表；真实可通过 FS IPC 拿
-            globalThis.alert?.("在选中目录下运行 tesseract 扫描含 '"+kw+"' 的图片；\n需要本机装 tesseract。");
+            toast.info({
+              title: "OCR 扫描已计划",
+              description: `在选中目录下运行 tesseract 扫描含 "${kw}" 的图片；需要本机装 tesseract。`,
+            });
           })}
           {item("📅 计划定时备份", () => {
             const src = globalThis.prompt?.("源目录：", outputDir || "");
@@ -1671,7 +1673,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             );
           })}
           {item("⚡ 多盘并行扫描", () => {
-            globalThis.alert?.("多盘并行功能已就绪；从命令行 data-recovery-cli 或 API 调 ParallelScanDrives。");
+            toast.info({
+              title: "多盘并行功能已就绪",
+              description: "从命令行 data-recovery-cli 或 API 调 ParallelScanDrives。",
+            });
           })}
           {item("📸 APFS 时光快照", () => runAsync(
             () => wailsApp?.ListAPFSSnapshots?.(drivePath || ""),

@@ -9,6 +9,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { IconX } from "../icons";
+import { toast } from "../toast";
 
 // 所有 modal 的通用 prop shape —— wailsApp / outputDir / selectedDrive / 回调
 // 故意宽松：让 modal 组件内部按需用，避免一次给 8 个 modal 都加严格 props 定义。
@@ -167,7 +168,7 @@ export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }: ModalPro
       onStartedScan?.(hit);
       onClose();
     } catch (err) {
-      globalThis.alert?.("启动扫描失败: " + (err?.message || err));
+      toast.error("启动扫描失败: " + (err?.message || err));
     }
   }
 
