@@ -61,13 +61,18 @@ type storagePredictFailure struct {
 }
 
 // querySmartNative 是 Windows 实现。
-// devicePath 形如 \\.\PhysicalDrive0；用户传 "disk0" / "0" 我们补全。
+//
+// devicePath 三种形态都吃：
+//   - `\\.\PhysicalDrive0` —— 直接打开
+//   - `\\.\G:`              —— **逻辑卷**，先解析出底层物理盘索引再重定向
+//   - `disk0` / `0`         —— 索引数字补成 PhysicalDrive
+//
+// SMART IOCTL 只能在物理盘 handle 上跑，逻辑卷会失败 —— 所以必须先解析。
+// USB 桥接 SATA 盘多数不透传 SMART，会得到失败错误，写入 Notes 让用户知情。
 func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
-	winPath := devicePath
-	if !strings.HasPrefix(winPath, `\\.\`) {
-		if n := tryParseDriveIndex(devicePath); n >= 0 {
-			winPath = `\\.\PhysicalDrive` + strconv.Itoa(n)
-		}
+	winPath := resolveToPhysicalDriveWindows(devicePath)
+	if winPath == "" {
+		return nil
 	}
 	pUTF16, err := windows.UTF16PtrFromString(winPath)
 	if err != nil {

@@ -302,10 +302,19 @@ func (e *Engine) scanNTFSPartition(
 	var liveFilesFound int64
 	startTime := time.Now()
 
+	// 速度用 1s 滚动窗口而非 since-start，避免开扫前几秒 elapsed 太小→speed 看起来 0
+	var (
+		speedWindowStart    = startTime
+		speedWindowBytes    int64
+		lastEmittedBytes    int64
+		lastEmittedSpeed    int64 // 缓存最近一次有效 speed，让 UI 即便处于"窗口刷新缝隙"也有数显示
+	)
+
 	onProgress(types.ScanProgress{
-		Phase:       "ntfs",
-		Percent:     0,
-		CurrentFile: fmt.Sprintf("%s: 扫描 MFT 记录...", partitionLabel),
+		Phase:        "ntfs",
+		Percent:      0.5, // 非 0 占位，让前端跳出 indeterminate 模式
+		CurrentFile:  fmt.Sprintf("%s: 扫描 MFT 记录...", partitionLabel),
+		Elapsed:      "0s",
 	})
 
 	err := scanner.ScanMFT(ctx, boot, partition.Offset,
@@ -315,19 +324,31 @@ func (e *Engine) scanNTFSPartition(
 			}
 
 			percent := float64(current) / float64(total) * 60.0
-			bytesScanned := current * boot.MFTRecordSize
-			elapsed := time.Since(startTime).Seconds()
-			var speed int64
-			if elapsed > 0.5 {
-				speed = int64(float64(bytesScanned) / elapsed)
+			if percent < 0.5 {
+				percent = 0.5 // 永远不报"真 0"，避免前端走 indeterminate 路径
 			}
+			bytesScanned := current * boot.MFTRecordSize
+			now := time.Now()
+			elapsed := now.Sub(startTime).Seconds()
+
+			// 1s 滚动窗口：累计这 1s 里读了多少字节，得 speed
+			windowElapsed := now.Sub(speedWindowStart).Seconds()
+			if windowElapsed >= 1.0 {
+				lastEmittedSpeed = int64(float64(speedWindowBytes) / windowElapsed)
+				speedWindowStart = now
+				speedWindowBytes = 0
+			} else {
+				speedWindowBytes += bytesScanned - lastEmittedBytes
+			}
+			lastEmittedBytes = bytesScanned
+
 			onProgress(types.ScanProgress{
 				Phase:        "ntfs",
 				Percent:      percent,
 				BytesScanned: bytesScanned,
 				TotalBytes:   total * boot.MFTRecordSize,
 				FilesFound:   int(atomic.LoadInt64(&liveFilesFound)),
-				Speed:        speed,
+				Speed:        lastEmittedSpeed,
 				Elapsed:      formatElapsed(elapsed),
 				CurrentFile:  fmt.Sprintf("%s: 扫描 MFT 记录 %d/%d", partitionLabel, current, total),
 			})

@@ -125,6 +125,59 @@ func NewApp() *App {
 }
 
 // startup 是 Wails 的 startup hook，在应用启动时调用
+// emitScanHeartbeat 每 500ms 重发一次 "scan:progress"，使用 a.scanProgress 当前快照
+// + 实时更新的 Elapsed。底层扫描器可能在某些阶段（如 NTFS 读 MFT entry 0、USN
+// journal 慢扫、JPEG carver 长 seek）几秒不主动 emit 进度，前端就会卡在
+// indeterminate 动画 + "0.0%"。heartbeat 让 UI 至少能看到时间在走、scan 还活着。
+//
+// 调用方：开扫前 `go a.emitScanHeartbeat(stopCh, startTime)`，
+//        扫描 goroutine 结束后 `close(stopCh)`。
+func (a *App) emitScanHeartbeat(stopCh <-chan struct{}, startTime time.Time) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			a.scanSnapshotMu.Lock()
+			p := a.scanProgress
+			active := a.scanActive
+			filesCount := len(a.scanFiles)
+			a.scanSnapshotMu.Unlock()
+			if !active {
+				return
+			}
+			// 实时 elapsed
+			p.Elapsed = formatElapsedSeconds(time.Since(startTime).Seconds())
+			// 还没收到任何真实进度报告 → 发个"初始化"占位让 UI 跳出 indeterminate 模式
+			if p.Phase == "" {
+				p.Phase = "init"
+				p.CurrentFile = "正在初始化扫描…"
+				p.Percent = 0.5
+			}
+			// FilesFound 用 a.scanFiles 长度兜底（OnFileFound 累计的，更稳）
+			if filesCount > p.FilesFound {
+				p.FilesFound = filesCount
+			}
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+		}
+	}
+}
+
+// formatElapsedSeconds 把秒数格式化为 "12s" / "3m45s" / "1h02m"
+func formatElapsedSeconds(s float64) string {
+	if s < 60 {
+		return fmt.Sprintf("%ds", int(s))
+	}
+	if s < 3600 {
+		m := int(s / 60)
+		return fmt.Sprintf("%dm%02ds", m, int(s)-m*60)
+	}
+	h := int(s / 3600)
+	return fmt.Sprintf("%dh%02dm", h, int((s-float64(h)*3600)/60))
+}
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.engine = recovery.NewEngine()
@@ -382,6 +435,9 @@ func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mo
 	stopPersist := make(chan struct{})
 	go a.persistLoop(stopPersist)
 
+	stopHeartbeat := make(chan struct{})
+	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
+
 	go func() {
 		defer func() {
 			// 扫描结束统一关闭 reader 链（DecryptingReader.Close 会透传到 underlying）
@@ -392,6 +448,7 @@ func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mo
 
 		scanResult, err := a.engine.ScanWithReader(result.Reader, types.ScanMode(mode), callbacks)
 		close(stopPersist)
+		close(stopHeartbeat)
 
 		a.scanSnapshotMu.Lock()
 		a.scanActive = false
@@ -608,10 +665,14 @@ func (a *App) startScanWithUnlockedReader(reader *bitlocker.DecryptingReader, dr
 	stopPersist := make(chan struct{})
 	go a.persistLoop(stopPersist)
 
+	stopHeartbeat := make(chan struct{})
+	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
+
 	go func() {
 		defer reader.Close()
 		scanResult, err := a.engine.ScanWithReader(reader, types.ScanMode(mode), callbacks)
 		close(stopPersist)
+		close(stopHeartbeat)
 		a.scanSnapshotMu.Lock()
 		a.scanActive = false
 		a.scanSnapshotMu.Unlock()
@@ -773,10 +834,13 @@ func (a *App) StartRAIDScan(req RAIDScanRequest) error {
 
 	stopPersist := make(chan struct{})
 	go a.persistLoop(stopPersist)
+	stopHeartbeat := make(chan struct{})
+	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
 	go func() {
 		defer rdr.Close()
 		scanResult, err := a.engine.ScanWithReader(rdr, types.ScanMode(req.Mode), callbacks)
 		close(stopPersist)
+		close(stopHeartbeat)
 		a.scanSnapshotMu.Lock()
 		a.scanActive = false
 		a.scanSnapshotMu.Unlock()
@@ -1244,13 +1308,17 @@ func (a *App) StartScan(drivePath string, mode string) error {
 		},
 	}
 
-	// 在后台启动扫描，同时起会话持久化协程
+	// 在后台启动扫描，同时起会话持久化协程 + 进度心跳
 	stopPersist := make(chan struct{})
 	go a.persistLoop(stopPersist)
+
+	stopHeartbeat := make(chan struct{})
+	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
 
 	go func() {
 		result, err := a.engine.Scan(drivePath, types.ScanMode(mode), callbacks)
 		close(stopPersist)
+		close(stopHeartbeat)
 
 		a.scanSnapshotMu.Lock()
 		a.scanActive = false
@@ -1941,14 +2009,19 @@ func (a *App) LookupVirusTotal(sha256Hex, apiKey string) (*forensics.VTReport, e
 	return c.LookupHash(ctx, sha256Hex)
 }
 
-// RecoverGPTPartitions 从盘尾备份 GPT 恢复丢失的分区表
+// RecoverGPTPartitions 从盘尾备份 GPT 恢复丢失的分区表。
+//
+// **GPT 在物理盘上**，逻辑卷（\\.\C: / \\.\G:）只是其中一个分区，没有 GPT 头。
+// v2.8.3 修：自动把 Windows 逻辑卷路径解析回底层物理盘，避免"读 0 字节"错误。
 func (a *App) RecoverGPTPartitions(drivePath string) ([]gpt.Partition, error) {
 	if drivePath == "" {
 		return nil, fmt.Errorf("drivePath 为空")
 	}
-	r := disk.NewReader(drivePath)
+	// Windows 逻辑卷 → 物理盘（非 Windows 平台 no-op，原样返回）
+	resolved := disk.ResolveToPhysicalDriveWindows(drivePath)
+	r := disk.NewReader(resolved)
 	if err := r.Open(); err != nil {
-		return nil, fmt.Errorf("打开磁盘: %w", err)
+		return nil, fmt.Errorf("打开磁盘 %s: %w", resolved, err)
 	}
 	defer r.Close()
 	// 先试主表

@@ -1631,14 +1631,73 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
               toast.error("SMART 查询失败：" + (err?.message || err));
             }
           })}
-          {item("🔒 SED OPAL 锁定状态", () => runAsync(
-            () => wailsApp?.QuerySEDStatus?.(drivePath || ""),
-            (r) => r.note || `SED: locked=${r.locked}`
-          ))}
-          {item("🗂 GPT 备份表恢复", () => runAsync(
-            () => wailsApp?.RecoverGPTPartitions?.(drivePath || ""),
-            (parts) => `找到 ${parts?.length || 0} 个分区`
-          ))}
+          {item("🔒 SED OPAL 锁定状态", async () => {
+            setOpen(false);
+            if (!drivePath) {
+              toast.warning("请先选源盘再查 SED");
+              return;
+            }
+            try {
+              const r = await wailsApp?.QuerySEDStatus?.(drivePath);
+              if (!r) {
+                toast.warning("SED 查询无返回");
+                return;
+              }
+              if (!r.available) {
+                toast.warning({ title: "SED 检测不可用", description: r.note });
+                return;
+              }
+              if (r.locked) {
+                toast.error({
+                  title: "SED 已锁定",
+                  description: r.note + (r.opalVersion ? `\n\nOPAL 版本：${r.opalVersion}` : ""),
+                  duration: 0,
+                });
+              } else if (r.isSED) {
+                toast.success({
+                  title: r.lockingEnabled ? "SED 已启用 · 未锁定" : "SED 支持 · 未启用 locking",
+                  description: r.note + (r.opalVersion ? `\n\nOPAL 版本：${r.opalVersion}` : ""),
+                });
+              } else {
+                toast.info({ title: "盘不支持 TCG SED", description: r.note });
+              }
+            } catch (err: any) {
+              toast.error("SED 查询失败：" + (err?.message || err));
+            }
+          })}
+          {item("🗂 GPT 备份表恢复", async () => {
+            setOpen(false);
+            if (!drivePath) {
+              toast.warning("请先选源盘再恢复 GPT 备份表");
+              return;
+            }
+            try {
+              const parts = await wailsApp?.RecoverGPTPartitions?.(drivePath);
+              if (!parts || parts.length === 0) {
+                toast.info({
+                  title: "未找到备份 GPT 分区表",
+                  description: "可能盘是 MBR / 未分区 / 备份表也已损坏。提示：在物理盘（不是逻辑卷）上查 GPT 才有意义。",
+                });
+                return;
+              }
+              const lines = parts.slice(0, 6).map((p: any, i: number) =>
+                `${i + 1}. ${p.name || p.typeGUID || "未命名"}（${p.firstLBA}–${p.lastLBA}）`
+              );
+              const more = parts.length > 6 ? `\n…还有 ${parts.length - 6} 个` : "";
+              toast.success({
+                title: `找到 ${parts.length} 个分区`,
+                description: lines.join("\n") + more,
+                duration: 12000,
+              });
+            } catch (err: any) {
+              toast.error({
+                title: "GPT 备份恢复失败",
+                description: (err?.message || String(err)) +
+                  "\n\n提示：GPT 备份表在物理盘的最后一个 LBA。在逻辑卷（C: / G: 等）上读不到，请选物理盘（PhysicalDrive*）后再试。",
+                duration: 0,
+              });
+            }
+          })}
           {item("🖼 查找重复图片", () => {
             const dir = globalThis.prompt?.("输入要查重的目录路径：", outputDir || "");
             if (!dir) return;
@@ -1647,17 +1706,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
               (g) => `找到 ${g?.length || 0} 组相似图片`
             );
           })}
-          {item("🔎 OCR 搜图", () => {
-            const dir = globalThis.prompt?.("目录路径（含图片）：", outputDir || "");
-            if (!dir) return;
-            const kw = globalThis.prompt?.("搜索关键词：", "");
-            if (!kw) return;
-            // 这里简化：假设前端已有 imagePaths 列表；真实可通过 FS IPC 拿
-            toast.info({
-              title: "OCR 扫描已计划",
-              description: `在选中目录下运行 tesseract 扫描含 "${kw}" 的图片；需要本机装 tesseract。`,
-            });
-          })}
+          {/* v2.8.3 移除 "OCR 搜图" 菜单项：
+              - 它原本只是 toast 提示用户去自己跑 tesseract，并没有实际后端调用
+              - 数据恢复流程里 "在恢复输出目录中按文字搜图" 是非常边缘的需求
+              - 保留 backend OCRImage / OCRSearch 入口（API 仍可用），不放在主菜单 */}
           {item("📅 计划定时备份", () => {
             const src = globalThis.prompt?.("源目录：", outputDir || "");
             if (!src) return;

@@ -4,6 +4,96 @@
 
 ---
 
+## v2.8.3 (2026-04-28)
+
+**5 个用户反馈 bug 一次扫清**
+
+### Bug 1 — SMART 在 U 盘 / 逻辑卷上提示"不可用"
+
+**根因**：`internal/disk/smart_windows.go` 收到 `\\.\G:` 这种逻辑卷路径时直接 CreateFile，但 SMART IOCTL 只能在物理盘 handle 上跑。逻辑卷必须先解析回底层物理盘索引。
+
+**修复**：
+- 新 `internal/disk/path_windows.go` —— 用 `IOCTL_STORAGE_GET_DEVICE_NUMBER` 把 `\\.\G:` 解析到 `\\.\PhysicalDriveN`
+- `smart_windows.go` 调用 `resolveToPhysicalDriveWindows()` 在 CreateFile 之前
+- USB 桥不透传 SMART 时 `unavailableHint()` 改成"多见于 U 盘 / SD 卡（USB 桥不透传），对扫描没影响"
+
+### Bug 2 — SED OPAL 显示 `locked=undefined`
+
+**根因**：`internal/sed/sed.go` 的 `SEDStatus` 结构体**没有 JSON 标签**。Wails 序列化用 PascalCase（`Locked` / `Note`），前端用 camelCase（`r.locked` / `r.note`）读 → 全部 `undefined`。
+
+**修复**：
+- 给 `SEDStatus` 所有字段加 `json:"locked"` / `json:"note"` / 等标签
+- 加 `Source` 字段标记数据出处（"sedutil" / "unavailable"）
+- 前端 SED 工具按钮改用 rich toast：unlocked / locked / not-supported 各自不同 toast level，含 OPAL 版本副标题
+- 删除老 Note 里的 emoji（✅ / ⚠️ / ℹ️）—— 与 v2.8.0 全 emoji → SVG 图标策略一致
+
+### Bug 3 — GPT 备份恢复"读取的数据不足：需要偏移 0，仅读取 0 字节"
+
+**根因**：`app.go` `RecoverGPTPartitions(\\.\G:)` 在逻辑卷上找 GPT 备份头。GPT 在物理盘的最后一个 LBA，逻辑卷只是其中一个分区，没有 GPT 头。
+
+**修复**：
+- `app.go` 调 `disk.ResolveToPhysicalDriveWindows()` 把 `\\.\G:` → `\\.\PhysicalDrive0`
+- 前端 GPT 工具按钮改用 rich toast：成功列出前 6 个分区（编号 / 名称 / firstLBA-lastLBA），失败给可执行提示
+
+### Bug 4 — OCR 搜图：占位假实现
+
+**根因**：`App.tsx` 的 OCR 菜单项只是 `toast.info({ title: "OCR 扫描已计划", description: "在选中目录下运行 tesseract..." })`，没有任何后端调用。装了 tesseract 也没用。
+
+**用户合理质疑**："为什么会存在 OCR 识图？"
+
+**修复**：
+- 删除 OCR 菜单项 —— 数据恢复主流程里"按文字搜图"是非常边缘的需求；且占位假实现误导用户去装无用的依赖
+- 保留后端 `OCRImage` / `OCRSearch` API 入口，未来如果要做真正的 OCR 集成可以从这里接
+
+### Bug 5 — 扫描进度卡 0% / 已发现 0 文件 / 速度 0 B/s
+
+**根因**（两条独立问题）：
+
+a) **后端某些阶段长时间不 emit 进度**：NTFS 读 MFT entry 0 / 解析 boot sector / `ScanDeletedFileNames` 扫 USN journal 这几段都是几秒级 IO，期间没有 progress 事件。前端的 `scanProgress` 一直是初始值。
+
+b) **前端 indeterminate 动画造成视觉欺骗**：`percent === 0` 时进度条切到 indeterminate 模式，CSS 把宽度强制设为 40% + 滑动动画。用户看到"60% 蓝色填充"以为扫到 60% 了，实际百分比文字仍是 0.0%。
+
+**修复**：
+
+后端（`app.go`）：
+- 新 `(a *App) emitScanHeartbeat(stopCh, startTime)` —— 每 500ms 重发 `scan:progress`，自动更新 Elapsed 字段；底层扫描器静默期 UI 也能看到时间在走
+- `formatElapsedSeconds()` —— "12s" / "3m45s" / "1h02m"
+- 4 个 scan 入口（StartScan / StartImageScan / ScanWithDecrypted / 别处）都启动 heartbeat goroutine，扫描结束 close stopCh
+
+后端（`internal/recovery/ntfs_scan.go`）：
+- 速度从 since-start 改成 **1 秒滚动窗口** —— 开扫前几秒不再误报 speed=0
+- 永不 emit `Percent: 0` —— 最低 0.5%，让前端不走 indeterminate 路径
+- 初始 progress 也带 `Percent: 0.5` + `Elapsed: "0s"`
+
+前端（`Workbench.tsx`）：
+- indeterminate 判断从 `percent === 0` 改成 `!hasAnyProgressData`（任何进度数据存在就退出 indeterminate 模式）
+- 进度条统计行加"已用：XmYs" 让用户看到 elapsed
+
+### Files
+
+- 新增：`internal/disk/path_windows.go`（逻辑卷 → 物理盘解析）
+- 新增：`internal/disk/path_other.go`（非 Windows 平台 no-op stub）
+- 修改：`internal/disk/smart.go` / `internal/disk/smart_windows.go`（用解析助手 + 改文案）
+- 修改：`internal/sed/sed.go`（JSON 标签 + Source 字段 + Note 文案）
+- 修改：`internal/recovery/ntfs_scan.go`（速度滚动窗口 + 永不 emit 真 0%）
+- 修改：`app.go`（emitScanHeartbeat + 4 处 scan 入口启停 + GPT 路径解析）
+- 修改：`frontend/src/App.tsx`（SED / GPT rich toast + 删除 OCR 菜单项）
+- 修改：`frontend/src/components/Workbench.tsx`（indeterminate 判断 + Elapsed 显示）
+
+### Verify
+
+```bash
+go test -race ./internal/disk/...
+GOOS=linux GOARCH=amd64 go build ./...
+GOOS=windows GOARCH=amd64 go build ./...
+GOOS=darwin GOARCH=arm64 go build ./...
+go vet ./...
+cd frontend && pnpm build
+# 全部 ✓
+```
+
+---
+
 ## v2.8.2 (2026-04-27)
 
 **SMART 健康检查三平台原生集成 —— 不再依赖外部 smartctl**

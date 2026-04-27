@@ -161,8 +161,8 @@ var _ = binary.LittleEndian
 // unavailableHint 返回"SMART 不可用"时给用户的解释。各平台不同：
 //   - macOS：可能是 USB 桥不透传 SMART
 //   - Linux：可能是 USB 设备 / nvme / 没有 root
-//   - Windows：可能是没有管理员 / 虚拟盘
+//   - Windows：可能是没有管理员 / 虚拟盘 / USB 桥
 func unavailableHint() string {
-	return "无法读取 SMART —— 可能是 USB 桥不透传、虚拟盘、或权限不足（需要管理员 / root）。" +
-		"对扫描没影响，可以继续。"
+	return "无法读取 SMART —— 多见于 U 盘 / SD 卡（USB 桥不透传 SMART 命令），" +
+		"以及虚拟盘、镜像文件、网络盘。对扫描没影响，可以继续。"
 }

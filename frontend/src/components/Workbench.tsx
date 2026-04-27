@@ -200,6 +200,17 @@ export default function Workbench({
 
   const percent = clampPercent(scanProgress?.percent || 0);
   const phaseLabel = phaseText(scanProgress?.phase, scanActive);
+  // v2.8.3：indeterminate 只在"扫描激活但完全没拿到任何 progress 数据"时显示。
+  // 之前是 percent === 0 就 indeterminate —— 但后端可能合法报 percent=0 的初始进度，
+  // 又因 indeterminate 动画 40% 占位 width 让用户误以为"扫到 60% 了"。
+  const hasAnyProgressData =
+    !!scanProgress && (
+      (scanProgress.percent ?? 0) > 0 ||
+      (scanProgress.bytesScanned ?? 0) > 0 ||
+      !!scanProgress.currentFile ||
+      !!scanProgress.elapsed
+    );
+  const showIndeterminate = scanActive && !hasAnyProgressData;
 
   return (
     <div className={`workbench${viewMode === "buckets" ? " workbench--buckets" : ""}`}>
@@ -244,7 +255,7 @@ export default function Workbench({
             </div>
           </div>
           {/* 进度条 */}
-          <div className={scanActive && percent === 0 ? "progress progress--indeterminate" : "progress"}>
+          <div className={showIndeterminate ? "progress progress--indeterminate" : "progress"}>
             <div className="progress__fill" style={{ width: `${percent}%` }} />
           </div>
           {/* 次行：紧凑统计 */}
@@ -264,6 +275,9 @@ export default function Workbench({
             )}
             <span className="progress-strip__stat"><b>{formatSize(scanProgress?.bytesScanned || 0)}</b> / {formatSize(scanProgress?.totalBytes || 0)}</span>
             <span className="progress-strip__stat">{t("wb.speed")}: <b>{formatSpeed(scanProgress?.speed || 0)}</b></span>
+            {scanProgress?.elapsed && (
+              <span className="progress-strip__stat">已用: <b>{scanProgress.elapsed}</b></span>
+            )}
           </div>
           {/* 底行：当前文件 */}
           {scanProgress?.currentFile && (
