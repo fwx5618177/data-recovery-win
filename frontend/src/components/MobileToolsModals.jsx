@@ -774,3 +774,587 @@ export function IOSBackupModal({ wailsApp, outputDir, onClose, onStarted }) {
     </GenericModal>
   );
 }
+
+// =============================================================================
+// 5. PTPCameraModal —— gphoto2 数码相机/老 Android 拉照片
+// =============================================================================
+
+export function PTPCameraModal({ wailsApp, outputDir, onClose, onStarted }) {
+  const [phase, setPhase] = useState("checking"); // checking → input → starting
+  const [tools, setTools] = useState(null);
+  const [devs, setDevs] = useState([]);
+  const [port, setPort] = useState("");
+  const [outDir, setOutDir] = useState(outputDir || "");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await wailsApp?.PTPCheck?.();
+        if (cancelled) return;
+        setTools(status);
+        if (!status?.available) {
+          setPhase("input");
+          return;
+        }
+        const list = await wailsApp?.PTPListDevices?.();
+        if (cancelled) return;
+        setDevs(list || []);
+        if (list?.[0]) setPort(list[0].port);
+        setPhase("input");
+      } catch (e) {
+        if (!cancelled) {
+          setErr(String(e?.message || e));
+          setPhase("input");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wailsApp]);
+
+  async function start() {
+    setErr("");
+    setPhase("starting");
+    try {
+      await wailsApp?.PTPPullAllAndScan?.(port, outDir, "full");
+      onStarted?.();
+      onClose();
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setPhase("input");
+    }
+  }
+
+  return (
+    <GenericModal
+      title="📷 PTP 数码相机拉照片"
+      onClose={onClose}
+      width={560}
+      footer={
+        <>
+          <button className="btn btn--sm" onClick={onClose}>取消</button>
+          {tools?.available && (
+            <button
+              className="btn btn--sm btn--primary"
+              onClick={start}
+              disabled={!port || !outDir || phase === "starting"}
+            >
+              {phase === "starting" ? "启动中…" : "开始拉取并扫描"}
+            </button>
+          )}
+        </>
+      }
+    >
+      {phase === "checking" && <div className="muted">检测 gphoto2…</div>}
+
+      {phase !== "checking" && tools && !tools.available && (
+        <div className="banner banner--danger" style={{ margin: 0 }}>
+          <div className="banner__content">
+            <div className="banner__title">gphoto2 未安装</div>
+            <div className="banner__text" style={{ whiteSpace: "pre-line" }}>
+              macOS: brew install gphoto2{"\n"}Linux: apt install gphoto2{"\n"}Windows: 装 libgphoto2 + WinGphoto2 (zadig USB driver)
+            </div>
+          </div>
+        </div>
+      )}
+
+      {phase !== "checking" && tools?.available && (
+        <>
+          {tools.version && (
+            <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>{tools.version}</div>
+          )}
+          {devs.length === 0 ? (
+            <div className="banner banner--info" style={{ margin: "0 0 12px 0" }}>
+              <div className="banner__content">
+                <div className="banner__title">未发现 PTP 相机</div>
+                <div className="banner__text">用 USB 接相机并开机，然后重新打开此对话框</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <Field label="选相机">
+                <select
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  style={{
+                    width: "100%", padding: "6px 10px",
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    background: "var(--bg-surface)", color: "var(--text)", fontSize: 13,
+                  }}
+                >
+                  {devs.map((d) => (
+                    <option key={d.port} value={d.port}>
+                      {d.model} → {d.port}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label="拉到本地目录"
+                hint="拉所有照片（含 raw / video）到这个目录，然后启动扫描"
+              >
+                <TextInput value={outDir} onChange={setOutDir} placeholder="/path/to/photos" />
+              </Field>
+            </>
+          )}
+        </>
+      )}
+
+      {err && (
+        <div className="banner banner--danger" style={{ margin: "12px 0 0 0" }}>
+          <div className="banner__content">
+            <div className="banner__title">失败</div>
+            <div className="banner__text">{err}</div>
+          </div>
+        </div>
+      )}
+    </GenericModal>
+  );
+}
+
+// =============================================================================
+// 6. ADBPullModal —— Android adb pull 目录到本地后扫描
+// =============================================================================
+
+export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }) {
+  const [phase, setPhase] = useState("loading"); // loading → input → starting
+  const [devs, setDevs] = useState([]);
+  const [serial, setSerial] = useState("");
+  const [src, setSrc] = useState("/sdcard/DCIM");
+  const [dst, setDst] = useState(outputDir || "");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await wailsApp?.MTPCheck?.();
+        if (cancelled) return;
+        if (!status?.available) {
+          setErr("adb 未安装\n请装 Android Platform Tools:\nhttps://developer.android.com/tools/releases/platform-tools");
+          setPhase("input");
+          return;
+        }
+        const list = await wailsApp?.MTPListDevices?.();
+        if (cancelled) return;
+        setDevs(list || []);
+        if (list?.[0]) setSerial(list[0].serial);
+        setPhase("input");
+      } catch (e) {
+        if (!cancelled) {
+          setErr(String(e?.message || e));
+          setPhase("input");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wailsApp]);
+
+  async function start() {
+    setErr("");
+    setPhase("starting");
+    try {
+      await wailsApp?.MTPPullDirectoryAndScan?.(serial, src, dst, "full");
+      onStarted?.();
+      onClose();
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setPhase("input");
+    }
+  }
+
+  const COMMON_PATHS = [
+    "/sdcard/DCIM",
+    "/sdcard/Pictures",
+    "/sdcard/Download",
+    "/sdcard/WhatsApp",
+    "/sdcard/Documents",
+    "/sdcard",
+  ];
+
+  return (
+    <GenericModal
+      title="📂 ADB 拉手机目录"
+      onClose={onClose}
+      width={560}
+      footer={
+        <>
+          <button className="btn btn--sm" onClick={onClose}>取消</button>
+          <button
+            className="btn btn--sm btn--primary"
+            onClick={start}
+            disabled={!serial || !src || !dst || phase === "starting"}
+          >
+            {phase === "starting" ? "启动中…" : "开始 pull + 扫描"}
+          </button>
+        </>
+      }
+    >
+      {phase === "loading" && <div className="muted">检测 adb + 列设备…</div>}
+      {phase !== "loading" && (
+        <>
+          {devs.length === 0 ? (
+            <div className="banner banner--info" style={{ margin: "0 0 12px 0" }}>
+              <div className="banner__content">
+                <div className="banner__title">未发现 Android 设备</div>
+                <div className="banner__text">手机开 USB 调试 → 接 USB → 点手机弹出的"允许 USB 调试"</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <Field label="选 Android 设备">
+                <select
+                  value={serial}
+                  onChange={(e) => setSerial(e.target.value)}
+                  style={{
+                    width: "100%", padding: "6px 10px",
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    background: "var(--bg-surface)", color: "var(--text)", fontSize: 13,
+                  }}
+                >
+                  {devs.map((d) => (
+                    <option key={d.serial} value={d.serial}>
+                      {d.model || d.serial} ({d.state}) {d.product || ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label="手机端目录"
+                hint="不要选 /sdcard/ 根（含 100GB+ 媒体文件，全拉慢）"
+              >
+                <TextInput value={src} onChange={setSrc} placeholder="/sdcard/DCIM" />
+                <div style={{ marginTop: 6, display: "flex", gap: 4, flexWrap: "wrap" }}>
+                  {COMMON_PATHS.map((p) => (
+                    <button
+                      key={p}
+                      className="btn btn--sm btn--ghost"
+                      style={{ fontSize: 10, padding: "2px 8px" }}
+                      onClick={() => setSrc(p)}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <Field label="本地目标目录">
+                <TextInput value={dst} onChange={setDst} placeholder="/path/to/local" />
+              </Field>
+            </>
+          )}
+        </>
+      )}
+      {err && (
+        <div className="banner banner--danger" style={{ margin: "12px 0 0 0" }}>
+          <div className="banner__content">
+            <div className="banner__title">失败</div>
+            <div className="banner__text" style={{ whiteSpace: "pre-line" }}>{err}</div>
+          </div>
+        </div>
+      )}
+    </GenericModal>
+  );
+}
+
+// =============================================================================
+// 7. DiskDumpModal —— 整盘镜像 dump (.img)
+// =============================================================================
+
+export function DiskDumpModal({ wailsApp, selectedDrive, onClose, onStarted }) {
+  const [outImg, setOutImg] = useState("");
+  const [phase, setPhase] = useState("input"); // input → starting
+  const [err, setErr] = useState("");
+
+  const drivePath = selectedDrive?.path || "";
+  const driveSize = selectedDrive?.size || 0;
+
+  useEffect(() => {
+    if (selectedDrive?.label && !outImg) {
+      const safeName = selectedDrive.label.replace(/[^a-zA-Z0-9_-]/g, "_") || "disk";
+      setOutImg(`~/Desktop/${safeName}.img`);
+    }
+  }, [selectedDrive, outImg]);
+
+  async function start() {
+    setErr("");
+    setPhase("starting");
+    try {
+      await wailsApp?.DumpDisk?.(drivePath, outImg);
+      onStarted?.();
+      onClose();
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setPhase("input");
+    }
+  }
+
+  return (
+    <GenericModal
+      title="💾 整盘镜像 dump (.img)"
+      onClose={onClose}
+      width={560}
+      footer={
+        <>
+          <button className="btn btn--sm" onClick={onClose}>取消</button>
+          <button
+            className="btn btn--sm btn--primary"
+            onClick={start}
+            disabled={!drivePath || !outImg || phase === "starting"}
+          >
+            {phase === "starting" ? "启动中…" : "开始 dump"}
+          </button>
+        </>
+      }
+    >
+      {!drivePath ? (
+        <div className="banner banner--info" style={{ margin: 0 }}>
+          <div className="banner__content">
+            <div className="banner__title">未选源盘</div>
+            <div className="banner__text">先回主面板选要 dump 的源盘，再打开本对话框</div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <Field label="源盘">
+            <div className="mono" style={{
+              padding: "6px 10px", border: "1px solid var(--border)",
+              borderRadius: 6, background: "var(--bg-inset)", fontSize: 12,
+            }}>
+              {drivePath}
+              {driveSize > 0 && (
+                <span className="muted" style={{ marginLeft: 8 }}>
+                  ({(driveSize / 1024 / 1024 / 1024).toFixed(1)} GB)
+                </span>
+              )}
+            </div>
+          </Field>
+          <Field
+            label="输出 .img 路径"
+            hint="⚠️ 必须在**不同**物理盘上（避免覆盖源盘扇区）"
+          >
+            <TextInput value={outImg} onChange={setOutImg} placeholder="~/Desktop/disk.img" />
+          </Field>
+          {driveSize > 0 && (
+            <div className="muted" style={{ fontSize: 11 }}>
+              预计耗时：{Math.ceil(driveSize / (200 * 1024 * 1024) / 60)} - {Math.ceil(driveSize / (50 * 1024 * 1024) / 60)} 分钟
+              （SATA SSD ~200 MB/s / SATA HDD ~50 MB/s 估算）
+            </div>
+          )}
+        </>
+      )}
+      {err && (
+        <div className="banner banner--danger" style={{ margin: "12px 0 0 0" }}>
+          <div className="banner__content">
+            <div className="banner__title">失败</div>
+            <div className="banner__text">{err}</div>
+          </div>
+        </div>
+      )}
+    </GenericModal>
+  );
+}
+
+// =============================================================================
+// 8. AboutModal —— 版本 / 能力 / 依赖 / 鸣谢
+// =============================================================================
+
+export function AboutModal({ wailsApp, onClose }) {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    const v = wailsApp?.GetAppVersion?.();
+    if (v && typeof v.then === "function") {
+      v.then((s) => setVersion(s || "dev")).catch(() => setVersion("dev"));
+    } else if (typeof v === "string") {
+      setVersion(v);
+    } else {
+      setVersion("dev");
+    }
+  }, [wailsApp]);
+
+  const features = [
+    { icon: "💾", label: "文件系统", items: "NTFS / APFS / ext4 / FAT / exFAT / Btrfs / ZFS / HFS+ / F2FS / XFS / ReFS" },
+    { icon: "🔐", label: "加密卷", items: "BitLocker / VeraCrypt / LUKS1+2 / FileVault" },
+    { icon: "🧊", label: "VC cipher", items: "AES / Twofish / Serpent / Kuznyechik (GOST 国标) + 全 cascade 组合" },
+    { icon: "🪞", label: "RAID", items: "0/1/5/6/10 + mdadm / LVM / Storage Spaces" },
+    { icon: "📱", label: "移动端", items: "iOS 备份解密 / Android .ab / ADB 直连 / 块级 dump / PTP 相机 / iOS libimobiledevice" },
+    { icon: "☁️", label: "云盘", items: "iCloud / OneDrive / Google Drive / Dropbox / Box / MEGA / pCloud / Nextcloud（本地同步根扫描）" },
+    { icon: "🌐", label: "NAS", items: "SMB (go-smb2) / NFSv3 (自实现 RPC + portmap)" },
+    { icon: "🎨", label: "JPEG 修复", items: "Annex K Huffman 注入 / RST 截尾 / 合成 RST stitching / in-tree partial decoder（71% 中段损坏可救）" },
+    { icon: "🍎", label: "APFS LZFSE v2", items: "纯 Go bvx2 decoder（Apple compression_tool round-trip 通过）" },
+    { icon: "🔍", label: "取证", items: "Ed25519 + RFC 3161 timestamp / DFXML / Custody chain / NSRL hash / VirusTotal" },
+  ];
+
+  return (
+    <GenericModal
+      title="📦 关于数据恢复大师"
+      onClose={onClose}
+      width={680}
+      footer={<button className="btn btn--sm btn--primary" onClick={onClose}>关闭</button>}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: 12, background: "var(--accent-soft)",
+          display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32,
+        }}>
+          🛡
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>数据恢复大师</div>
+          <div className="mono muted" style={{ fontSize: 12 }}>{version}</div>
+          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+            离线 / 零网络 / 单二进制 / Go + Wails + React
+          </div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 12, marginBottom: 8 }}><b>支持的能力</b></div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 6, columnGap: 12, fontSize: 12, marginBottom: 16 }}>
+        {features.map((f) => (
+          <React.Fragment key={f.label}>
+            <div style={{ whiteSpace: "nowrap" }}>{f.icon} <b>{f.label}</b></div>
+            <div className="muted">{f.items}</div>
+          </React.Fragment>
+        ))}
+      </div>
+
+      <div className="muted" style={{ fontSize: 11, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+        <div>所有解锁/扫描在本机完成；除显式"检查更新"外不连任何外网。</div>
+        <div>第三方依赖：go-smb2 (BSD-3) · aead/serpent (BSD-2) · klauspost/compress (BSD-3) · wails v2 (MIT) · React (MIT)</div>
+      </div>
+    </GenericModal>
+  );
+}
+
+// =============================================================================
+// 9. TasksSidebar —— 左侧"今日任务"侧栏，跟踪所有 in-flight 移动端任务
+// =============================================================================
+
+const TASK_KIND_META = {
+  "android-dump": { icon: "💽", color: "#3b82f6", title: "Android 块级 dump" },
+  "adb-pull":     { icon: "📂", color: "#8b5cf6", title: "ADB 拉手机目录" },
+  "ios-backup":   { icon: "🍎", color: "#10b981", title: "iOS 系统级备份" },
+  "ptp-pull":     { icon: "📷", color: "#f59e0b", title: "PTP 数码相机" },
+  "disk-dump":    { icon: "💾", color: "#ef4444", title: "整盘镜像 dump" },
+};
+
+export function TasksSidebar({ tasks, collapsed, onToggleCollapsed, onDismiss }) {
+  // tasks 是 Map<kind, task>；render 时转 array 按 startedAt 排序
+  const list = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+
+  if (list.length === 0 && collapsed) return null; // 没任务且折叠 → 完全不显示
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: 0,
+        top: 64, // 在 topbar 之下
+        bottom: 0,
+        width: collapsed ? 36 : 280,
+        background: "var(--bg-surface)",
+        borderRight: "1px solid var(--border)",
+        boxShadow: collapsed ? "none" : "2px 0 12px rgba(0,0,0,0.08)",
+        transition: "width 0.2s ease-out",
+        zIndex: 80,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: collapsed ? "8px 4px" : "10px 12px",
+        borderBottom: "1px solid var(--border)",
+      }}>
+        {!collapsed && (
+          <div style={{ fontSize: 12, fontWeight: 600 }}>
+            🗂 今日任务 {list.length > 0 && <span className="muted" style={{ fontWeight: 400 }}>({list.length})</span>}
+          </div>
+        )}
+        <button
+          className="btn btn--sm btn--ghost"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "展开" : "折叠"}
+          style={{ padding: "0 6px", fontSize: 14 }}
+        >
+          {collapsed ? "›" : "‹"}
+        </button>
+      </div>
+
+      {!collapsed && (
+        <div style={{ overflowY: "auto", flex: 1, padding: "8px" }}>
+          {list.length === 0 ? (
+            <div className="muted" style={{ fontSize: 11, padding: 8, textAlign: "center" }}>
+              当前无运行中的移动端任务
+              <div style={{ marginTop: 6, fontSize: 10, opacity: 0.7 }}>
+                启动 Android dump / iOS 备份 / PTP 拉取 / 镜像 dump 后会出现在这里
+              </div>
+            </div>
+          ) : (
+            list.map((t) => {
+              const meta = TASK_KIND_META[t.kind] || { icon: "🔄", color: "#6b7280", title: t.kind };
+              const elapsed = t.startedAt ? Math.floor((Date.now() - t.startedAt) / 1000) : 0;
+              return (
+                <div
+                  key={t.kind}
+                  style={{
+                    background: t.error ? "var(--bg-danger-soft, #fee)" : "var(--bg-inset)",
+                    border: `1px solid ${t.error ? "var(--danger)" : "var(--border)"}`,
+                    borderLeft: `3px solid ${t.error ? "var(--danger)" : meta.color}`,
+                    borderRadius: 6,
+                    padding: "8px 10px",
+                    marginBottom: 8,
+                    fontSize: 11,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                    <span style={{ fontSize: 13 }}>{meta.icon}</span>
+                    <span style={{ flex: 1, fontWeight: 600, fontSize: 11 }}>{meta.title}</span>
+                    <button
+                      onClick={() => onDismiss(t.kind)}
+                      style={{
+                        border: "none", background: "transparent", cursor: "pointer",
+                        fontSize: 12, color: "var(--text-muted)", padding: "0 4px",
+                      }}
+                      title="关闭"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, marginBottom: 6, color: "var(--text)" }}>{t.label}</div>
+                  {!t.done && (
+                    <>
+                      {typeof t.progress === "number" && t.progress > 0 && t.totalBytes > 0 ? (
+                        <div className="progress" style={{ height: 4 }}>
+                          <div className="progress__fill" style={{ width: `${Math.min(100, (t.progress / t.totalBytes) * 100)}%` }} />
+                        </div>
+                      ) : (
+                        <div className="progress" style={{ height: 4 }}>
+                          <div
+                            className="progress__fill"
+                            style={{ width: "100%", animation: "progressPulse 2s ease-in-out infinite" }}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {elapsed > 0 && (
+                    <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>
+                      已用 {elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`}
+                    </div>
+                  )}
+                  {t.error && (
+                    <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
+                      {t.error}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

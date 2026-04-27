@@ -4,6 +4,65 @@
 
 ---
 
+## v2.5.0 (2026-04-27)
+
+**完整移动端 / 备份 / 云端 工作流 UI 体验** —— 多任务并行 + 4 个新 modal +
+WelcomePage 快速入口 + About + 仍走 prompt 的菜单项全部升级。
+
+### Added — 多任务并行可视化 (TasksSidebar)
+
+之前：只能跟踪 1 个 mobile 任务（单 toast）；多个并行任务后来的覆盖前者。
+现在：`mobileTasks: Map<kind, task>` 同时跟踪所有 in-flight 任务。
+
+**`TasksSidebar` 左侧可折叠侧栏**：
+- 折叠态：36px 窄竖条只露 ›/‹ 切换按钮（不挡主面板）
+- 展开态：280px 宽，每个任务一张卡片（图标 / 标题 / 进度 / 已用时长 / 错误信息）
+- 任务按 startedAt 排序，新任务底部追加
+- 每张卡片左边框颜色按 kind 区分：💽 dump 蓝 / 📂 pull 紫 / 🍎 iOS 绿 / 📷 PTP 黄 / 💾 disk 红
+- 完成 5 秒自动消失；错误持久显示直到用户 ✕ 关闭
+- 不确定进度走 progressPulse 动画；有具体字节的实时计算百分比
+- 没任务 + 折叠 = 完全不渲染（不挡视野）
+
+新事件来源：`image:dumpStarted/Progress/Completed/Error`（v2.4.1 漏的）
+
+### Added — 3 个新 modal（剩余 prompt() 全部升级）
+
+`MobileToolsModals.jsx` 追加 4 个组件（约 +500 行）：
+
+5. **PTPCameraModal** —— gphoto2 检测 → 设备列表 → 选 port → 输出目录 → 启动
+6. **ADBPullModal** —— adb 检测 + 设备列表 + 6 个常用路径快捷按钮 (DCIM / WhatsApp / etc)
+7. **DiskDumpModal** —— 自动从 selectedDrive 取源盘 + 自动建议输出文件名 + 时间预估
+8. **AboutModal** —— 版本号 + 10 大类支持能力（FS/加密/RAID/移动/云盘/NAS/JPEG/LZFSE/取证）+ 第三方依赖
+
+### Added — WelcomePage 4 个 quick-entry cards
+
+新用户打开应用就看到："也可以从其他来源恢复（不一定是本机磁盘）"：
+- 📱 iOS / Android 备份 → 打开云盘扫描 modal
+- 🔌 手机直连 → 打开 ADB pull modal
+- 📷 数码相机 (PTP) → 打开 gphoto2 modal
+- 📡 NAS (SMB / NFS) → 打开 SMB 扫描 modal
+
+不再需要挖"🧰 工具"下拉就能用最常见的非本机源恢复路径。卡片有 hover 动画
+（accent 边框 / 浅蓝背景 / 上移 1px）。
+
+### Changed — ToolsMenu 剩余 prompt() 全部改 modal
+
+之前 v2.4.1 还有 3 个走 prompt：📂 ADB pull (3 个 prompt) / 📷 PTP (3 个) / 💾 disk dump (1 个)。本 release 全部改 onOpenMobileModal。
+
+加 1 个新菜单项 📦 关于本工具 → AboutModal。
+
+### 工程指标
+- frontend `vite build` 成功（282 KB → gzip 90 KB，比 v2.4.1 +14 KB = 4 modal + sidebar）
+- backend 未动；`go test -short ./...` 全绿
+- 升级后 ToolsMenu **0 prompt**：所有需要 ≥2 步输入的菜单项都有 modal
+
+### 后续仍可改进
+- TasksSidebar 加历史任务 tab（不只 in-flight）
+- WelcomePage cards 支持自定义/拖拽顺序
+- 移动端任务支持取消（当前只能等完成 / 关闭浮窗，但 backend 任务继续跑）
+
+---
+
 ## v2.4.1 (2026-04-27)
 
 **v2.4.0 的 prompt() 升级为完整 modal dialog + 全局移动端进度状态栏**

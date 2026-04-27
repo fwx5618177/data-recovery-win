@@ -12,6 +12,47 @@ import { formatSize } from "../formatters";
 import { t, onLocaleChange } from "../i18n";
 
 /**
+ * QuickCard —— WelcomePage 顶部快速入口卡片（云端 / 手机直连 / 相机 / NAS）。
+ * 让新用户不用挖"🧰 工具" 下拉就能从主流"非本机磁盘"来源恢复。
+ */
+function QuickCard({ icon, title, desc, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="card"
+      style={{
+        textAlign: "left",
+        padding: "12px 14px",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        background: "var(--bg-surface)",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        transition: "all 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = "var(--accent)";
+        e.currentTarget.style.background = "var(--accent-soft)";
+        e.currentTarget.style.transform = "translateY(-1px)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = "var(--border)";
+        e.currentTarget.style.background = "var(--bg-surface)";
+        e.currentTarget.style.transform = "translateY(0)";
+      }}
+    >
+      <div style={{ fontSize: 24, lineHeight: 1 }}>{icon}</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{title}</div>
+        <div className="muted" style={{ fontSize: 11 }}>{desc}</div>
+      </div>
+    </button>
+  );
+}
+
+/**
  * WelcomePage —— 选源盘 + 权限提示 + 会话恢复。
  * 移除了旧版本冗长的教学内容；关键信息都用 banner 一屏内呈现。
  */
@@ -35,6 +76,9 @@ export default function WelcomePage({
   encryptedVolumes,
   onUnlockBitLocker,
   onUnlockBitLockerMemory,
+  // 新：快速入口卡片回调（v2.5.0）
+  // 调用 setOpenMobileModal("kind") 让 App 打开对应 modal
+  onOpenMobileModal,
 }) {
   const needsElevation = !isAdmin;
   // locale 变化触发重 render
@@ -109,6 +153,48 @@ export default function WelcomePage({
               <button className="btn btn--sm" onClick={onRefreshDrives}>
                 <IconRefresh size={14} /> 重试
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ============== 快速入口卡片（v2.5.0 新）让新用户不挖工具菜单也能用 ============== */}
+        {onOpenMobileModal && (
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              💡 也可以从其他来源恢复（不一定是本机磁盘）：
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: 10,
+                marginBottom: 16,
+              }}
+            >
+              <QuickCard
+                icon="📱"
+                title="iOS / Android 备份"
+                desc="本机或云盘里 iTunes / .ab 备份"
+                onClick={() => onOpenMobileModal("cloud")}
+              />
+              <QuickCard
+                icon="🔌"
+                title="手机直连"
+                desc="ADB 拉目录 / 块级 dump / iOS 触发备份"
+                onClick={() => onOpenMobileModal("adb-pull")}
+              />
+              <QuickCard
+                icon="📷"
+                title="数码相机 (PTP)"
+                desc="gphoto2 拉相机所有照片 + 扫描"
+                onClick={() => onOpenMobileModal("ptp-camera")}
+              />
+              <QuickCard
+                icon="📡"
+                title="NAS (SMB / NFS)"
+                desc="扫局域网共享盘 + 直接恢复"
+                onClick={() => onOpenMobileModal("nas-smb")}
+              />
             </div>
           </div>
         )}

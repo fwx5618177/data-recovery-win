@@ -14,6 +14,11 @@ import {
   NASScanModal,
   AndroidDumpModal,
   IOSBackupModal,
+  PTPCameraModal,
+  ADBPullModal,
+  DiskDumpModal,
+  AboutModal,
+  TasksSidebar,
 } from "./components/MobileToolsModals";
 import {
   DEFAULT_SCAN_MODE,
@@ -150,11 +155,38 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(null);
   const [pendingUpdate, setPendingUpdate] = useState(null);
 
-  // 移动端工具的 modal 显示开关 + 全局 mobile 进度状态
+  // 移动端工具的 modal 显示开关
   // openModal: null | "cloud" | "nas-smb" | "nas-nfs" | "android-dump" | "ios-backup"
+  //          | "ptp-camera" | "adb-pull" | "disk-dump" | "about"
   const [openMobileModal, setOpenMobileModal] = useState(null);
-  // mobileTask: { kind, label, progress?, error?, done? } —— 显示在底部状态栏
-  const [mobileTask, setMobileTask] = useState(null);
+
+  // 多个移动端任务并行：Map<kind, task>
+  // task = { kind, label, progress (number bytes 或 -1 不确定), error, done, startedAt }
+  // 同 kind 只能有一个 in-flight task（系统约束：一次只一个 dump / 一次只一个 backup）
+  const [mobileTasks, setMobileTasks] = useState(() => new Map());
+
+  const upsertTask = useCallback((kind, patch) => {
+    setMobileTasks((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(kind) || { kind, startedAt: Date.now() };
+      next.set(kind, { ...existing, ...patch });
+      return next;
+    });
+  }, []);
+  const dismissTask = useCallback((kind) => {
+    setMobileTasks((prev) => {
+      const next = new Map(prev);
+      next.delete(kind);
+      return next;
+    });
+  }, []);
+  // 完成任务 5 秒后自动移除
+  const autoDismissTask = useCallback((kind) => {
+    setTimeout(() => dismissTask(kind), 5000);
+  }, [dismissTask]);
+
+  // sidebar 折叠状态
+  const [tasksSidebarCollapsed, setTasksSidebarCollapsed] = useState(false);
 
   /* =====================================================================
      1. 加载 Wails bridge
@@ -420,50 +452,92 @@ export default function App() {
       alert("下载更新失败：" + (msg?.message || msg || "未知错误"));
     });
 
-    // 移动端 / 备份 / NAS 全局进度事件 —— 显示在状态栏上
+    // 移动端 / 备份 / NAS 全局进度事件 —— 推到 mobileTasks Map
+    // 多个并行任务（如同时 Android dump + iOS backup + PTP pull）每个独立显示
     const offMobile = [
+      // Android dump
       wailsRuntime.EventsOn("mtp:dumpStarted", (p) => {
-        setMobileTask({ kind: "android-dump", label: `Android dump 启动: ${p?.block || "?"}`, progress: 0 });
+        upsertTask("android-dump", {
+          label: `Android dump: ${p?.block || "?"}`,
+          progress: 0, totalBytes: 0,
+        });
       }),
       wailsRuntime.EventsOn("mtp:dumpProgress", (b) => {
-        setMobileTask((prev) => prev ? { ...prev, progress: b, label: `Android dump 中: ${(b / 1024 / 1024).toFixed(1)} MB` } : prev);
+        const bytes = typeof b === "number" ? b : Number(b) || 0;
+        upsertTask("android-dump", {
+          progress: bytes,
+          label: `Android dump: ${(bytes / 1024 / 1024).toFixed(1)} MB`,
+        });
       }),
       wailsRuntime.EventsOn("mtp:dumpCompleted", () => {
-        setMobileTask({ kind: "android-dump", label: "Android dump 完成 ✓", progress: -1, done: true });
-        setTimeout(() => setMobileTask(null), 5000);
+        upsertTask("android-dump", { label: "Android dump 完成 ✓", done: true });
+        autoDismissTask("android-dump");
       }),
       wailsRuntime.EventsOn("mtp:dumpError", (e) => {
-        setMobileTask({ kind: "android-dump", label: "Android dump 失败", error: String(e), done: true });
+        upsertTask("android-dump", { label: "Android dump 失败", error: String(e), done: true });
       }),
-      wailsRuntime.EventsOn("mtp:pullStarted", () => {
-        setMobileTask({ kind: "adb-pull", label: "adb pull 中…", progress: -1 });
+      // ADB pull directory
+      wailsRuntime.EventsOn("mtp:pullStarted", (p) => {
+        upsertTask("adb-pull", {
+          label: `ADB pull: ${typeof p === "object" ? p?.src || "" : p || ""}`,
+          progress: -1,
+        });
       }),
-      wailsRuntime.EventsOn("mtp:pullCompleted", () => {
-        setMobileTask({ kind: "adb-pull", label: "adb pull 完成 ✓", done: true });
-        setTimeout(() => setMobileTask(null), 5000);
+      wailsRuntime.EventsOn("mtp:pullCompleted", (dst) => {
+        upsertTask("adb-pull", { label: `ADB pull 完成 → ${dst || ""}`, done: true });
+        autoDismissTask("adb-pull");
       }),
       wailsRuntime.EventsOn("mtp:pullError", (e) => {
-        setMobileTask({ kind: "adb-pull", label: "adb pull 失败", error: String(e), done: true });
+        upsertTask("adb-pull", { label: "ADB pull 失败", error: String(e), done: true });
       }),
+      // iOS backup
       wailsRuntime.EventsOn("ios:backupStarted", (udid) => {
-        setMobileTask({ kind: "ios-backup", label: `iOS 备份启动 (${String(udid).slice(0, 12)}…)`, progress: -1 });
+        upsertTask("ios-backup", {
+          label: `iOS 备份 (${String(udid).slice(0, 12)}…)`,
+          progress: -1,
+        });
       }),
       wailsRuntime.EventsOn("ios:backupCompleted", () => {
-        setMobileTask({ kind: "ios-backup", label: "iOS 备份完成 ✓", done: true });
-        setTimeout(() => setMobileTask(null), 5000);
+        upsertTask("ios-backup", { label: "iOS 备份完成 ✓", done: true });
+        autoDismissTask("ios-backup");
       }),
       wailsRuntime.EventsOn("ios:backupError", (e) => {
-        setMobileTask({ kind: "ios-backup", label: "iOS 备份失败", error: String(e), done: true });
+        upsertTask("ios-backup", { label: "iOS 备份失败", error: String(e), done: true });
       }),
-      wailsRuntime.EventsOn("ptp:pullStarted", () => {
-        setMobileTask({ kind: "ptp-pull", label: "PTP 相机 pull 中…", progress: -1 });
+      // PTP camera pull
+      wailsRuntime.EventsOn("ptp:pullStarted", (port) => {
+        upsertTask("ptp-pull", {
+          label: `PTP 相机 (${port || "?"})`,
+          progress: -1,
+        });
       }),
-      wailsRuntime.EventsOn("ptp:pullCompleted", () => {
-        setMobileTask({ kind: "ptp-pull", label: "PTP pull 完成 ✓", done: true });
-        setTimeout(() => setMobileTask(null), 5000);
+      wailsRuntime.EventsOn("ptp:pullCompleted", (dst) => {
+        upsertTask("ptp-pull", { label: `PTP pull 完成 → ${dst || ""}`, done: true });
+        autoDismissTask("ptp-pull");
       }),
       wailsRuntime.EventsOn("ptp:pullError", (e) => {
-        setMobileTask({ kind: "ptp-pull", label: "PTP pull 失败", error: String(e), done: true });
+        upsertTask("ptp-pull", { label: "PTP pull 失败", error: String(e), done: true });
+      }),
+      // 镜像 dump
+      wailsRuntime.EventsOn("image:dumpStarted", (p) => {
+        upsertTask("disk-dump", {
+          label: `镜像 dump: ${typeof p === "object" ? p?.src || "" : p || ""}`,
+          progress: 0,
+        });
+      }),
+      wailsRuntime.EventsOn("image:dumpProgress", (b) => {
+        const bytes = typeof b === "number" ? b : Number(b) || 0;
+        upsertTask("disk-dump", {
+          progress: bytes,
+          label: `镜像 dump: ${(bytes / 1024 / 1024).toFixed(1)} MB`,
+        });
+      }),
+      wailsRuntime.EventsOn("image:dumpCompleted", () => {
+        upsertTask("disk-dump", { label: "镜像 dump 完成 ✓", done: true });
+        autoDismissTask("disk-dump");
+      }),
+      wailsRuntime.EventsOn("image:dumpError", (e) => {
+        upsertTask("disk-dump", { label: "镜像 dump 失败", error: String(e), done: true });
       }),
     ];
 
@@ -1005,6 +1079,7 @@ export default function App() {
             encryptedVolumes={encryptedVolumes}
             onUnlockBitLocker={unlockBitLockerAndScan}
             onUnlockBitLockerMemory={unlockBitLockerMemoryAndScan}
+            onOpenMobileModal={setOpenMobileModal}
           />
         )}
 
@@ -1090,54 +1165,43 @@ export default function App() {
           onStarted={() => setCurrentPage("workbench")}
         />
       )}
-
-      {/* ============== 移动端任务全局状态栏（底部） ============== */}
-      {mobileTask && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 16,
-            right: 16,
-            background: mobileTask.error ? "var(--bg-danger-soft, #fee)" : "var(--bg-surface)",
-            border: `1px solid ${mobileTask.error ? "var(--danger)" : "var(--border)"}`,
-            borderRadius: 8,
-            padding: "10px 14px",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
-            zIndex: 999,
-            fontSize: 12,
-            minWidth: 240,
-            maxWidth: 360,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14 }}>
-              {mobileTask.kind === "android-dump" ? "💽"
-                : mobileTask.kind === "adb-pull" ? "📂"
-                : mobileTask.kind === "ios-backup" ? "🍎"
-                : mobileTask.kind === "ptp-pull" ? "📷" : "🔄"}
-            </span>
-            <span style={{ flex: 1, fontWeight: 600 }}>{mobileTask.label}</span>
-            <button
-              className="btn btn--sm btn--ghost"
-              onClick={() => setMobileTask(null)}
-              title="关闭"
-              style={{ padding: "0 6px" }}
-            >
-              ✕
-            </button>
-          </div>
-          {!mobileTask.done && mobileTask.progress === -1 && (
-            <div className="progress" style={{ marginTop: 8, height: 6 }}>
-              <div className="progress__fill" style={{ width: "100%", animation: "progressPulse 2s ease-in-out infinite" }} />
-            </div>
-          )}
-          {mobileTask.error && (
-            <div style={{ marginTop: 6, color: "var(--danger)", fontSize: 11 }}>
-              {mobileTask.error}
-            </div>
-          )}
-        </div>
+      {openMobileModal === "ptp-camera" && (
+        <PTPCameraModal
+          wailsApp={wailsApp}
+          outputDir={outputDir}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
       )}
+      {openMobileModal === "adb-pull" && (
+        <ADBPullModal
+          wailsApp={wailsApp}
+          outputDir={outputDir}
+          onClose={() => setOpenMobileModal(null)}
+          onStarted={() => setCurrentPage("workbench")}
+        />
+      )}
+      {openMobileModal === "disk-dump" && (
+        <DiskDumpModal
+          wailsApp={wailsApp}
+          selectedDrive={selectedDrive}
+          onClose={() => setOpenMobileModal(null)}
+        />
+      )}
+      {openMobileModal === "about" && (
+        <AboutModal
+          wailsApp={wailsApp}
+          onClose={() => setOpenMobileModal(null)}
+        />
+      )}
+
+      {/* ============== 左侧 "今日任务" 侧栏（多任务并行可视化） ============== */}
+      <TasksSidebar
+        tasks={mobileTasks}
+        collapsed={tasksSidebarCollapsed}
+        onToggleCollapsed={() => setTasksSidebarCollapsed((v) => !v)}
+        onDismiss={dismissTask}
+      />
     </div>
   );
 }
@@ -1498,16 +1562,8 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
           ))}
 
           {item("📂 ADB 拉手机目录扫描", () => {
-            const serial = globalThis.prompt?.("Android 设备 serial（adb devices 显示的）：", "");
-            if (!serial) return;
-            const src = globalThis.prompt?.("手机端目录（如 /sdcard/DCIM）：", "/sdcard/DCIM");
-            if (!src) return;
-            const dst = globalThis.prompt?.("本地目标目录：", outputDir || "");
-            if (!dst) return;
-            runAsync(
-              () => wailsApp?.MTPPullDirectoryAndScan?.(serial, src, dst, "full"),
-              () => "✅ 已启动 adb pull + 扫描；详见主面板进度"
-            );
+            setOpen(false);
+            onOpenMobileModal?.("adb-pull");
           })}
 
           {item("💽 Android root 块级 dump", () => {
@@ -1515,30 +1571,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             onOpenMobileModal?.("android-dump");
           })}
 
-          {item("📷 PTP 相机（gphoto2）拉照片扫描", () => runAsync(
-            async () => {
-              const status = await wailsApp?.PTPCheck?.();
-              if (!status?.available) {
-                throw new Error("gphoto2 未安装\nmacOS: brew install gphoto2\nLinux: apt install gphoto2");
-              }
-              const devs = await wailsApp?.PTPListDevices?.();
-              if (!devs || devs.length === 0) throw new Error("未发现 PTP 相机");
-              const port = devs.length === 1
-                ? devs[0].port
-                : globalThis.prompt?.(
-                    "选相机 port（多个相机时）：\n\n" +
-                      devs.map((d) => `  ${d.model} → ${d.port}`).join("\n") +
-                      "\n\n输入 port：",
-                    devs[0].port
-                  );
-              if (!port) return null;
-              const dst = globalThis.prompt?.("拉到本地哪个目录：", outputDir || "");
-              if (!dst) return null;
-              await wailsApp?.PTPPullAllAndScan?.(port, dst, "full");
-              return port;
-            },
-            (p) => p ? `✅ 已启动相机 ${p} 拉取；详见主面板` : "已取消"
-          ))}
+          {item("📷 PTP 相机（gphoto2）拉照片扫描", () => {
+            setOpen(false);
+            onOpenMobileModal?.("ptp-camera");
+          })}
 
           {item("🍎 iOS 直连备份触发（libimobiledevice）", () => {
             setOpen(false);
@@ -1567,16 +1603,14 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
           ))}
 
           {item("💾 整盘镜像 dump (.img)", () => {
-            if (!drivePath) {
-              globalThis.alert?.("请先在主面板选一块源盘");
-              return;
-            }
-            const dst = globalThis.prompt?.(`输出 .img 路径（必须**不同**物理盘！${drivePath} 是 ~XXX GB）：`, "");
-            if (!dst) return;
-            runAsync(
-              () => wailsApp?.DumpDisk?.(drivePath, dst),
-              () => "✅ 已启动镜像 dump；监听 image:dumpProgress 事件"
-            );
+            setOpen(false);
+            onOpenMobileModal?.("disk-dump");
+          })}
+
+          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+          {item("📦 关于本工具", () => {
+            setOpen(false);
+            onOpenMobileModal?.("about");
           })}
         </div>
       )}
