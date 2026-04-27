@@ -2080,9 +2080,9 @@ body { word-break: break-word; overflow-wrap: anywhere; }
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  /* 限三行；超出再用 title tooltip 兜底 */
+  /* 限 8 行；超出再用 title tooltip 兜底（足够 SMART rich 信息） */
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 8;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

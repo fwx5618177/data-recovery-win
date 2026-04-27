@@ -4,6 +4,86 @@
 
 ---
 
+## v2.8.2 (2026-04-27)
+
+**SMART 健康检查三平台原生集成 —— 不再依赖外部 smartctl**
+
+### 用户反馈
+
+> SMART 的那个工具为啥不修复集成呢？
+
+v2.8.1 把 SMART 的 native alert 换成了 toast，但 fallback 文案还是
+"smartctl 未安装；装 smartmontools 可看磁盘健康"。用户的本意是：
+**集成进应用本身**，而不是让用户去装外部工具。
+
+### Added — 三平台原生 SMART 实现
+
+| 平台 | 实现 | 文件 |
+| --- | --- | --- |
+| Linux | `HDIO_DRIVE_CMD` ioctl 直接发 ATA SMART READ DATA / RETURN STATUS / IDENTIFY DEVICE | `internal/disk/smart_linux.go` |
+| Windows | `IOCTL_STORAGE_PREDICT_FAILURE` + `SMART_RCV_DRIVE_DATA`（DeviceIoControl，复用 `golang.org/x/sys/windows`） | `internal/disk/smart_windows.go` |
+| macOS | `/usr/sbin/diskutil info` + `/usr/sbin/system_profiler SPSerialATADataType` —— 都是 OS 自带 | `internal/disk/smart_darwin.go` |
+
+**零外部依赖**：Linux / Windows 直接 ioctl，macOS 走系统命令。
+不需要 cgo，也不需要用户装 smartmontools。
+
+### Changed — `smart.go` 重构成调度器 + 共享解析
+
+- 新 `QuerySmart()` 调度链：原生 → smartctl 退路 → "不可用 + 解释"
+- `parseATASmartData()`（共享）：解析标准 ATA SMART 512 字节属性表
+  - ID 5 → Reallocated_Sector_Ct
+  - ID 9 → Power_On_Hours（取低 32 位避开 vendor flag 噪声）
+  - ID 194 → Temperature_Celsius
+  - ID 197 → Current_Pending_Sector
+  - ID 198 → Offline_Uncorrectable
+- `writeNotes()`（共享）：把 SmartHealth 各项数据合成一句给用户看的话，三平台一致
+- smartctl 路径单独到 `smart_smartctl.go`，作为 graceful fallback
+- `SmartHealth` 加 `Source: "native" | "smartctl" | "diskutil" | "unavailable"` 字段，UI 可显示数据出处
+
+### Changed — 前端 SMART 工具按钮 rich toast
+
+之前：`toast.info("SMART: ⚠ 异常\nsmartctl 未安装...")`（孤零零一行）
+
+现在：用户点"🩺 磁盘 SMART 健康"后弹出结构化 toast，含：
+- title：`SMART：健康` / `SMART：异常`（按 healthy 走 success / error 配色）
+- 摘要：`SMART 健康检查通过。` 或 `已重映射 X 个坏扇区...`
+- 详情：型号 / 序列号 / 通电时长（自动换算年）/ 温度 / 各类坏扇区数
+
+健康时 10s 自动消失；异常时 `duration: 0` 不自动关，强制用户看。
+
+### Added — 单元测试
+
+- `TestParseATASmartData_Healthy` —— 构造 30 槽位 ATA buffer 验证解析正确
+- `TestParseATASmartData_Failing` —— 验证有坏扇区时 `Healthy=false` + `HasCriticalIssue()=true`
+- `TestParseATASmartData_TooShort` —— 短 buffer 不崩
+- `TestQuerySmart_EmptyPath` —— 空路径 fast-fail
+
+### Files
+
+- 新增：`internal/disk/smart_linux.go`
+- 新增：`internal/disk/smart_windows.go`
+- 新增：`internal/disk/smart_darwin.go`
+- 新增：`internal/disk/smart_smartctl.go`（从 smart.go 抽出）
+- 修改：`internal/disk/smart.go`（重构成调度器 + 共享 parseATASmartData / writeNotes）
+- 修改：`internal/disk/smart_test.go`（+4 测试，老测试适配新 writeNotes 拆分）
+- 修改：`frontend/src/App.tsx`（SMART 菜单项改用 rich toast，结构化展示型号 / 通电 / 温度等）
+- 修改：`frontend/src/style.css`（`.toast__desc` line-clamp 4 → 8 行，容纳 SMART 详情）
+
+### Verify
+
+```bash
+go test -race ./internal/disk/...
+# ok  data-recovery/internal/disk
+GOOS=linux GOARCH=amd64 go build ./internal/disk/...
+GOOS=windows GOARCH=amd64 go build ./internal/disk/...
+GOOS=darwin GOARCH=arm64 go build ./internal/disk/...
+# all OK
+go vet ./...
+# (no output)
+```
+
+---
+
 ## v2.8.1 (2026-04-27)
 
 **全局 Toast 通知系统 —— 替代散落的 native `alert()` 调用**

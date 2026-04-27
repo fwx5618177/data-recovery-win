@@ -1599,10 +1599,38 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             />
           </div>
           <div style={{ padding: "var(--space-1) 0" }}>
-          {item("🩺 磁盘 SMART 健康", () => runAsync(
-            () => wailsApp?.QueryDiskHealth?.(drivePath || ""),
-            (r) => `SMART: ${r.healthy ? "✅ 健康" : "⚠️ 异常"}\n${r.notes || ""}`
-          ))}
+          {item("🩺 磁盘 SMART 健康", async () => {
+            setOpen(false);
+            try {
+              const r = await wailsApp?.QueryDiskHealth?.(drivePath || "");
+              if (!r) {
+                toast.warning("SMART 查询无返回");
+                return;
+              }
+              if (!r.available) {
+                toast.warning({ title: "SMART 不可用", description: r.notes || "无法读取 SMART" });
+                return;
+              }
+              // 拼装多行 description：型号 / 通电时长 / 温度 / 坏扇区
+              const lines: string[] = [];
+              if (r.model) lines.push(`型号：${r.model}`);
+              if (r.serial) lines.push(`序列号：${r.serial}`);
+              if (r.powerOnHours) {
+                const years = (r.powerOnHours / 24 / 365).toFixed(1);
+                lines.push(`通电：${r.powerOnHours.toLocaleString()} 小时（约 ${years} 年）`);
+              }
+              if (r.temperature) lines.push(`温度：${r.temperature} °C`);
+              if (r.reallocated) lines.push(`已重映射坏扇区：${r.reallocated}`);
+              if (r.pendingSectors) lines.push(`摇摆扇区：${r.pendingSectors}`);
+              if (r.uncorrectableErrors) lines.push(`不可纠正错误：${r.uncorrectableErrors}`);
+              const desc = [r.notes, lines.length ? lines.join("\n") : ""].filter(Boolean).join("\n\n");
+              const title = `SMART：${r.healthy ? "健康" : "异常"}`;
+              if (r.healthy) toast.success({ title, description: desc, duration: 10000 });
+              else           toast.error({ title, description: desc, duration: 0 });
+            } catch (err: any) {
+              toast.error("SMART 查询失败：" + (err?.message || err));
+            }
+          })}
           {item("🔒 SED OPAL 锁定状态", () => runAsync(
             () => wailsApp?.QuerySEDStatus?.(drivePath || ""),
             (r) => r.note || `SED: locked=${r.locked}`

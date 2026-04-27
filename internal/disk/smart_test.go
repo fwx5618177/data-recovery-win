@@ -59,7 +59,9 @@ func TestParseSmartctlOutput_HealthyDrive(t *testing.T) {
 	if h.HasCriticalIssue() {
 		t.Errorf("健康盘 HasCriticalIssue 应为 false")
 	}
-	if !strings.Contains(h.Notes, "✅") {
+	// Notes 在 v2.8.2 重构后由 writeNotes 单独写入；分开测
+	writeNotes(h)
+	if !strings.Contains(h.Notes, "通过") {
 		t.Errorf("Notes 应是健康提示: %q", h.Notes)
 	}
 }
@@ -84,6 +86,7 @@ func TestParseSmartctlOutput_FailingDrive(t *testing.T) {
 	if !h.HasCriticalIssue() {
 		t.Error("FAILED 盘 HasCriticalIssue 应 true")
 	}
+	writeNotes(h)
 	if !strings.Contains(h.Notes, "失败状态") {
 		t.Errorf("Notes 应警告失败: %q", h.Notes)
 	}
@@ -101,5 +104,86 @@ func TestQuerySmart_NoSmartctl(t *testing.T) {
 	}
 	if h != nil && h.Available {
 		t.Error("没装 smartctl 时 Available 应 false")
+	}
+}
+
+// 辅助：构造一个 30 个属性槽位的 ATA SMART 512 字节缓冲。
+// 每个 attribute 12 字节：[id][flags lo][flags hi][cur][worst][raw 6 字节][reserved]
+func mkATABuf(attrs map[byte]uint64) []byte {
+	buf := make([]byte, 512)
+	// rev number 占 byte 0-1
+	buf[0] = 0x10
+	buf[1] = 0x00
+	i := 0
+	for id, raw := range attrs {
+		off := 2 + i*12
+		buf[off] = id
+		buf[off+1] = 0x32
+		buf[off+2] = 0x00
+		buf[off+3] = 100   // current value
+		buf[off+4] = 100   // worst value
+		// raw 6 字节小端
+		buf[off+5] = byte(raw)
+		buf[off+6] = byte(raw >> 8)
+		buf[off+7] = byte(raw >> 16)
+		buf[off+8] = byte(raw >> 24)
+		buf[off+9] = byte(raw >> 32)
+		buf[off+10] = byte(raw >> 40)
+		i++
+	}
+	return buf
+}
+
+func TestParseATASmartData_Healthy(t *testing.T) {
+	buf := mkATABuf(map[byte]uint64{
+		5:   0,    // Reallocated_Sector_Ct
+		9:   1234, // Power_On_Hours
+		194: 35,   // Temperature
+		197: 0,    // Pending
+		198: 0,    // Uncorrectable
+	})
+	h := parseATASmartData(buf)
+	if !h.Available || !h.Healthy {
+		t.Errorf("应该 healthy: %+v", h)
+	}
+	if h.PowerOnHours != 1234 {
+		t.Errorf("PowerOnHours=%d want 1234", h.PowerOnHours)
+	}
+	if h.Temperature != 35 {
+		t.Errorf("Temperature=%d want 35", h.Temperature)
+	}
+}
+
+func TestParseATASmartData_Failing(t *testing.T) {
+	buf := mkATABuf(map[byte]uint64{
+		5:   523,
+		9:   62000,
+		194: 65,
+		197: 137,
+		198: 42,
+	})
+	h := parseATASmartData(buf)
+	if h.Healthy {
+		t.Error("有坏扇区应 unhealthy")
+	}
+	if h.Reallocated != 523 || h.PendingSectors != 137 || h.UncorrectableErrors != 42 {
+		t.Errorf("attrs 解析错: %+v", h)
+	}
+	if !h.HasCriticalIssue() {
+		t.Error("HasCriticalIssue 应 true")
+	}
+}
+
+func TestParseATASmartData_TooShort(t *testing.T) {
+	h := parseATASmartData(make([]byte, 10))
+	if h.Available {
+		t.Error("数据 < 362 字节应 Available=false")
+	}
+}
+
+func TestQuerySmart_EmptyPath(t *testing.T) {
+	_, err := QuerySmart(context.Background(), "")
+	if err == nil {
+		t.Error("空路径应返回 error")
 	}
 }
