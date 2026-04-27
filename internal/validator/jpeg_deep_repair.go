@@ -26,6 +26,8 @@ package validator
 
 import (
 	"bytes"
+	"errors"
+	"image"
 	"image/jpeg"
 )
 
@@ -201,7 +203,8 @@ func InjectStandardDHT(data []byte) (patched []byte, info string) {
 //   2) RepairJPEG（边界修复 + RST 对齐截尾）
 //   3) InjectStandardDHT（缺 DHT 段时）
 //   4) RepairJPEG → 再 InjectStandardDHT 组合
-//   5) StitchHuffmanState（合成 RST 注入 + 损坏点重同步）—— 终极策略
+//   5) StitchHuffmanState（合成 RST 注入 + 损坏点重同步）
+//   6) PartialDecode（in-tree partial JPEG decoder，碰损坏返回部分图像）—— 终极策略
 //
 // 返回 (final, true) 仅当某个策略产生的字节通过 image/jpeg.Decode。
 // 失败返回 (nil, false)。
@@ -245,5 +248,29 @@ func DeepRepairJPEG(data []byte) (final []byte, ok bool) {
 			}
 		}
 	}
+	// 策略 6：in-tree partial JPEG decoder
+	// 碰损坏返回部分图像（已 decode MCU + 灰填充）。
+	// **注意**：这条路径输出的是 image.Image 而不是 JPEG 字节；调用方
+	// 用 EncodePartialAsJPEG 包装回 JPEG 字节供 manifest 落盘。
+	if pi, err := PartialDecode(data); err == nil && pi.DecodedMCUs > 0 {
+		if encoded, err := encodePartialAsJPEG(pi.Image); err == nil {
+			return encoded, true
+		}
+	}
 	return nil, false
 }
+
+// encodePartialAsJPEG 把 image.Image 重编码为 JPEG bytes（quality 90）
+func encodePartialAsJPEG(img interface{ Bounds() image.Rectangle }) ([]byte, error) {
+	src, ok := img.(image.Image)
+	if !ok {
+		return nil, errBadImage
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 90}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+var errBadImage = errors.New("encodePartialAsJPEG: 不是 image.Image")

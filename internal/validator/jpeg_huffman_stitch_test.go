@@ -99,8 +99,7 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-// 测 DeepRepairJPEG 整链（含 stitching）—— 此测试要 DeepRepairJPEG 接进 stitching
-// 暂未接，保留为标记
+// 测 DeepRepairJPEG 整链（含 stitching + partial decode）
 func TestDeepRepairChainInvariant(t *testing.T) {
 	src := makeTestJPEG(t, 96, 96)
 	out, ok := DeepRepairJPEG(src)
@@ -110,4 +109,34 @@ func TestDeepRepairChainInvariant(t *testing.T) {
 	if len(out) == 0 {
 		t.Error("DeepRepairJPEG 返回空")
 	}
+}
+
+// 端到端：损坏的 JPEG → DeepRepairJPEG 应能用 partial decoder 救回部分图像
+func TestDeepRepairChain_PartialDecodeRecovery(t *testing.T) {
+	// 64×64 文件含 16 个 MCU；损坏 entropy 中段
+	src := makeTestJPEG(t, 64, 64)
+	sosPos := findSOS(src)
+	if sosPos < 0 {
+		t.Fatal("test fixture 没 SOS")
+	}
+	corrupt := append([]byte(nil), src...)
+	if sosPos+150 < len(corrupt) {
+		corrupt[sosPos+150] = 0xFF
+		corrupt[sosPos+151] = 0x88 // 非法 marker → entropy 损坏
+	}
+	// stdlib jpeg.Decode 应该失败（验证 fixture 的损坏程度）
+	if _, err := jpeg.Decode(bytes.NewReader(corrupt)); err == nil {
+		t.Skip("test fixture 修改后 stdlib 仍能解，跳过（损坏程度不够）")
+	}
+
+	out, ok := DeepRepairJPEG(corrupt)
+	if !ok {
+		t.Error("DeepRepairJPEG 对中段损坏文件应能用 partial decode 救回")
+		return
+	}
+	// 救回的 JPEG 应能再被 stdlib 解
+	if _, err := jpeg.Decode(bytes.NewReader(out)); err != nil {
+		t.Errorf("DeepRepair 输出仍解不开: %v", err)
+	}
+	t.Logf("中段损坏文件成功救回（输出 %d 字节）", len(out))
 }

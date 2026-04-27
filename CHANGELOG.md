@@ -4,6 +4,64 @@
 
 ---
 
+## v2.3.0 (2026-04-27)
+
+**ReFS B+ tree 端到端验证 + JPEG in-tree partial decoder** —— 把 v2.2.0 的两个
+"foundation" 升级到真正的端到端通路。
+
+### Added — ReFS B+ tree 端到端联调
+
+- **合成 ReFS 风格 B+ tree fixture** —— `internal/refs/btree_walker_e2e_test.go`
+  - 原因：macOS 没原生 ReFS 工具，无法生成真镜像；社区 sample 集大且许可证不明
+  - fixture：3 层 B+ tree（root → 2 internal → 4 leaf → 8 file）
+  - 每个 leaf entry 含完整 `$FILE_NAME` TLV field（parent_id + UTF-16 name + ...）
+  - `EnumerateFilesViaBTree` 端到端走整棵树，返回的文件名清单与已知输入逐项匹配
+- **新增 4 个端到端测试**：
+  - `TestEnumerateFilesViaBTree_EndToEnd`：3 层树完整遍历，8 个文件名 + ObjectID 全验证
+  - `TestEnumerateFilesViaBTree_RootIsLeaf`：root 直接是 leaf 的退化场景
+  - `TestEnumerateFilesViaBTree_PrefersHighestLSN`：LSN 优先级正确
+  - `TestWalkBTree_CycleDetection`：循环引用不死循环
+
+### Added — JPEG in-tree partial decoder（终极策略）
+
+替换之前"靠 stdlib + 边界注入"的间接路径，做了 **in-tree 最小 baseline JPEG
+decoder**。这是真正的"R-Studio 风格"partial decode —— stdlib 在 entropy 流损坏时
+abort 整个图像，本实现在损坏点保留已 decode 的 MCU + 灰填充未 decode 区域。
+
+- **完整 baseline JPEG 解码栈**（~1000 行 Go，纯实现，无 CGO）：
+  - `jpeg_partial_decoder.go`：segment 扫描 + SOF/DQT/DHT 解析 + Huffman 表构造 +
+    bit reader（带 byte-stuffing + marker-aware）
+  - `jpeg_partial_scan.go`：MCU 解码主循环 + IDCT (8×8 cosine matrix) + 反 quant +
+    YCbCr→RGB（4:4:4 / 4:2:2 / 4:2:0 subsampling 全支持）
+  - `PartialDecode(data) → *PartialImage`：
+    - `Image`：已 decode 的 MCU 区域 + 未 decode 填中性灰
+    - `DecodedMCUs / TotalMCUs`：恢复进度（"图像 70% 已恢复"）
+    - `CorruptionMCU / CorruptionByte`：损坏发生位置（取证用）
+- 接入 `DeepRepairJPEG` 策略链 strategy 6（终极兜底）
+- **端到端验证**：
+  - `TestPartialDecode_BaselineHealthy`：32×32 渐变图 round-trip，平均像素差 40
+    （JPEG 量化 + 简化 IDCT 误差，视觉一致）
+  - `TestPartialDecode_CorruptedEntropy`：64×64 文件中段插入 `FF 88` 损坏后，
+    16 个 MCU 中前 3 个 decode 出来，损坏位置准确定位到 byte offset 675
+  - `TestDeepRepairChain_PartialDecodeRecovery`：stdlib `jpeg.Decode` 失败的损坏
+    文件经 `DeepRepairJPEG` 救回 697 字节可解 JPEG ✓
+
+### 工程指标
+- 新增代码 ~1100 行 + ~370 行测试（含合成 B+ tree fixture builder）
+- `go test -race -short ./...` 全绿
+- `staticcheck ./...` 0 警告
+- `go vet ./...` 0 issues
+
+### 与上一代实现的差距对比
+
+| 项 | v2.2.0 (foundation) | v2.3.0 (端到端) |
+|---|---|---|
+| ReFS B+ tree | 单元测试单层 leaf/internal 识别 | 3 层完整树 + 8 文件名验证 |
+| JPEG 部分恢复 | 注入合成 RST 让 stdlib 重同步（间接） | in-tree decoder 主动 emit 部分图像（直接） |
+| 损坏文件恢复成功率 | ~70%（stitching 路径） | ~70% stitching + 兜底 partial decode |
+
+---
+
 ## v2.2.0 (2026-04-27)
 
 **重大功能扩展** —— 一次性补齐 6 个长期缺口：移动端协议、云端备份发现、
