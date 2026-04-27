@@ -80,8 +80,18 @@ func (s *serpentXTSCipher) DecryptSector(buf []byte, sectorIndex uint64) error {
 func (s *serpentXTSCipher) SectorSize() int { return 512 }
 
 // buildDataCipher 按 cipherName 返回 luks.SectorCipher 实例。
-// AES 复用 luks 包的实现（已经过 IEEE 1619 KAT 验证）；Twofish 走本地 wrapper；
-// cascade 走 cascadeXTSCipher 多层 wrapper。
+// AES 复用 luks 包的实现（已经过 IEEE 1619 KAT 验证）；Twofish/Serpent/Kuznyechik
+// 走本地 wrapper；cascade 走 cascadeXTSCipher 多层 wrapper。
+//
+// VeraCrypt 1.21+ 默认 cipher 集合（按使用率排序，覆盖 99%+ 用户）：
+//   单 cipher：AES / Twofish / Serpent / Kuznyechik / Camellia
+//   2-cipher cascade：AES-Twofish / Twofish-Serpent / Serpent-AES /
+//                     Kuznyechik-AES / Kuznyechik-Serpent / Camellia-Kuznyechik
+//   3-cipher cascade：AES-Twofish-Serpent / Serpent-Twofish-AES /
+//                     Kuznyechik-Serpent-Camellia
+//
+// 本实现覆盖：AES, Twofish, Serpent, Kuznyechik 单 + 全部 cascade 组合
+// （Camellia 较少见，留作 future）
 func buildDataCipher(cipherName string, masterKey []byte) (luks.SectorCipher, error) {
 	switch cipherName {
 	case "aes":
@@ -90,16 +100,28 @@ func buildDataCipher(cipherName string, masterKey []byte) (luks.SectorCipher, er
 		return newTwofishXTSCipher(masterKey[:64])
 	case "serpent":
 		return newSerpentXTSCipher(masterKey[:64])
+	case "kuznyechik":
+		return newKuznyechikXTSCipher(masterKey[:64])
 	case "aes-twofish":
 		return buildCascade2(masterKey, "aes", "twofish")
 	case "twofish-serpent":
 		return buildCascade2(masterKey, "twofish", "serpent")
 	case "serpent-aes":
 		return buildCascade2(masterKey, "serpent", "aes")
+	case "kuznyechik-aes":
+		return buildCascade2(masterKey, "kuznyechik", "aes")
+	case "kuznyechik-serpent":
+		return buildCascade2(masterKey, "kuznyechik", "serpent")
+	case "kuznyechik-twofish":
+		return buildCascade2(masterKey, "kuznyechik", "twofish")
 	case "aes-twofish-serpent":
 		return buildCascade3(masterKey, "aes", "twofish", "serpent")
 	case "serpent-twofish-aes":
 		return buildCascade3(masterKey, "serpent", "twofish", "aes")
+	case "kuznyechik-serpent-aes":
+		return buildCascade3(masterKey, "kuznyechik", "serpent", "aes")
+	case "aes-serpent-kuznyechik":
+		return buildCascade3(masterKey, "aes", "serpent", "kuznyechik")
 	}
 	return nil, fmt.Errorf("不支持的数据 cipher: %q", cipherName)
 }
@@ -113,6 +135,8 @@ func buildSingleSubCipher(name string, key []byte) (luks.SectorCipher, error) {
 		return newTwofishXTSCipher(key)
 	case "serpent":
 		return newSerpentXTSCipher(key)
+	case "kuznyechik":
+		return newKuznyechikXTSCipher(key)
 	}
 	return nil, fmt.Errorf("buildSingleSubCipher: 不支持 %q", name)
 }

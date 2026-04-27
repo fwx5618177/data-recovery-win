@@ -49,12 +49,26 @@ const (
 
 // NFS v3 procedures
 const (
-	nfsVers3              = 3
-	nfsProcNull           = 0
-	nfsProcGetattr        = 1
-	nfsProcLookup         = 3
-	nfsProcRead           = 6
-	nfsProcReaddirplus    = 17
+	nfsVers3            = 3
+	nfsProcNull         = 0
+	nfsProcGetattr      = 1
+	nfsProcAccess       = 4
+	nfsProcReadlink     = 5
+	nfsProcLookup       = 3
+	nfsProcRead         = 6
+	nfsProcReaddirplus  = 17
+	nfsProcFsstat       = 18
+	nfsProcFsinfo       = 19
+)
+
+// NFS3 ACCESS bit mask（RFC 1813 §3.3.4）
+const (
+	ACCESS3_READ    uint32 = 0x0001
+	ACCESS3_LOOKUP  uint32 = 0x0002
+	ACCESS3_MODIFY  uint32 = 0x0004
+	ACCESS3_EXTEND  uint32 = 0x0008
+	ACCESS3_DELETE  uint32 = 0x0010
+	ACCESS3_EXECUTE uint32 = 0x0020
 )
 
 // NFS3 错误码（RFC 1813）
@@ -456,6 +470,176 @@ func (c *NFSClient) Readdirplus(
 		return nil, false, nil, err
 	}
 	return entries, eof, cv, nil
+}
+
+// Access 询问 server 对给定 fh 我们有哪些权限（合并到 access mask 里返回）。
+//
+// 用法：在 walk 一个子目录前先 ACCESS 查 ACCESS3_LOOKUP，避免 LOOKUP 失败浪费 RTT。
+// 返回值是 server 实际允许的位（granted），可能是 want 的子集。
+func (c *NFSClient) Access(ctx context.Context, fh []byte, want uint32) (uint32, error) {
+	var args xdrWriter
+	args.writeOpaque(fh)
+	args.writeUint32(want)
+	result, err := c.rpc.call(progNFS, nfsVers3, nfsProcAccess, args.Bytes(), true)
+	if err != nil {
+		return 0, err
+	}
+	r := newXDRReader(result)
+	status, err := r.readUint32()
+	if err != nil {
+		return 0, err
+	}
+	_, _ = readPostOpAttr(r) // 可选 obj_attributes
+	if status != NFS3_OK {
+		return 0, fmt.Errorf("ACCESS 失败, status=%d", status)
+	}
+	granted, err := r.readUint32()
+	if err != nil {
+		return 0, err
+	}
+	return granted, nil
+}
+
+// Readlink 读符号链接的目标路径
+//
+// 用法：scanner 遇到 NFSAttr.Type==5（symlink）时调，决定要不要跟踪到目标
+// （多数情况扫描器不跟符号链接以避免 cycle）。
+func (c *NFSClient) Readlink(ctx context.Context, fh []byte) (string, error) {
+	var args xdrWriter
+	args.writeOpaque(fh)
+	result, err := c.rpc.call(progNFS, nfsVers3, nfsProcReadlink, args.Bytes(), true)
+	if err != nil {
+		return "", err
+	}
+	r := newXDRReader(result)
+	status, err := r.readUint32()
+	if err != nil {
+		return "", err
+	}
+	_, _ = readPostOpAttr(r) // symlink_attributes
+	if status != NFS3_OK {
+		return "", fmt.Errorf("READLINK 失败, status=%d", status)
+	}
+	return r.readString(4096)
+}
+
+// FSInfo 静态文件系统能力信息（block size 上限、最大文件大小、time 精度等）
+//
+// 用法：拿来调整 READ 的 chunk size 上限，让大文件传输更高效。
+type NFSFSInfo struct {
+	RTMax      uint32 // 最大 read 字节数（server 侧 cap）
+	RTPref     uint32 // 推荐 read 字节数
+	RTMult     uint32 // read 字节数的倍数对齐
+	WTMax      uint32 // 最大 write
+	WTPref     uint32 //
+	WTMult     uint32 //
+	DTPref     uint32 // readdir 最大返回字节数
+	MaxFileSz  uint64 // 文件最大字节数
+	TimeDelta  time.Duration
+	Properties uint32
+}
+
+// FSInfo 调 NFS3_FSINFO 获取 server 文件系统能力
+func (c *NFSClient) FSInfo(ctx context.Context, fh []byte) (*NFSFSInfo, error) {
+	var args xdrWriter
+	args.writeOpaque(fh)
+	result, err := c.rpc.call(progNFS, nfsVers3, nfsProcFsinfo, args.Bytes(), true)
+	if err != nil {
+		return nil, err
+	}
+	r := newXDRReader(result)
+	status, err := r.readUint32()
+	if err != nil {
+		return nil, err
+	}
+	_, _ = readPostOpAttr(r)
+	if status != NFS3_OK {
+		return nil, fmt.Errorf("FSINFO 失败, status=%d", status)
+	}
+	info := &NFSFSInfo{}
+	if info.RTMax, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.RTPref, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.RTMult, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.WTMax, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.WTPref, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.WTMult, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.DTPref, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	if info.MaxFileSz, err = r.readUint64(); err != nil {
+		return nil, err
+	}
+	// time_delta = (sec u32, nsec u32)
+	tsec, err := r.readUint32()
+	if err != nil {
+		return nil, err
+	}
+	tnsec, err := r.readUint32()
+	if err != nil {
+		return nil, err
+	}
+	info.TimeDelta = time.Duration(tsec)*time.Second + time.Duration(tnsec)*time.Nanosecond
+	if info.Properties, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// FSStat 动态文件系统状态（free space、files count）
+//
+// 用法：用户问"NAS 上还剩多少空间"时调；recovery 任务前可用来估算"扫了一半再
+// 看 cache 还能写多少"。
+type NFSFSStat struct {
+	Tbytes  uint64 // 总字节
+	Fbytes  uint64 // 空闲字节
+	Abytes  uint64 // 普通用户可用
+	Tfiles  uint64
+	Ffiles  uint64
+	Afiles  uint64
+	Invarsec uint32
+}
+
+// FSStat 调 NFS3_FSSTAT
+func (c *NFSClient) FSStat(ctx context.Context, fh []byte) (*NFSFSStat, error) {
+	var args xdrWriter
+	args.writeOpaque(fh)
+	result, err := c.rpc.call(progNFS, nfsVers3, nfsProcFsstat, args.Bytes(), true)
+	if err != nil {
+		return nil, err
+	}
+	r := newXDRReader(result)
+	status, err := r.readUint32()
+	if err != nil {
+		return nil, err
+	}
+	_, _ = readPostOpAttr(r)
+	if status != NFS3_OK {
+		return nil, fmt.Errorf("FSSTAT 失败, status=%d", status)
+	}
+	stat := &NFSFSStat{}
+	for _, p := range []*uint64{&stat.Tbytes, &stat.Fbytes, &stat.Abytes, &stat.Tfiles, &stat.Ffiles, &stat.Afiles} {
+		v, err := r.readUint64()
+		if err != nil {
+			return nil, err
+		}
+		*p = v
+	}
+	if stat.Invarsec, err = r.readUint32(); err != nil {
+		return nil, err
+	}
+	return stat, nil
 }
 
 // ============================================================================

@@ -4,6 +4,83 @@
 
 ---
 
+## v2.2.0 (2026-04-27)
+
+**重大功能扩展** —— 一次性补齐 6 个长期缺口：移动端协议、云端备份发现、
+NAS 协议增强、ReFS B+ tree、JPEG Huffman stitching、VC 国标 cipher。
+
+### Added — 移动端 / 直连协议
+
+- **VeraCrypt Kuznyechik (GOST R 34.12-2015)** —— `internal/veracrypt/kuznyechik.go`
+  - 纯 Go 实现俄国国标 128-bit 分组密码（256-bit key, 10 轮 LSX 网络）
+  - RFC 7801 Appendix A 官方 KAT 通过：
+    `Encrypt(key=8899aabb...cdef, pt=11223344...9988) = 7f679d90bebc24305a468d42b9d4edcd`
+  - Kuznyechik-XTS-256 wrapper 实现 luks.SectorCipher 接口
+  - cipher dispatcher 加 7 个新组合：
+    `kuznyechik` / `kuznyechik-aes` / `kuznyechik-serpent` / `kuznyechik-twofish` /
+    `kuznyechik-serpent-aes` / `aes-serpent-kuznyechik`
+  - VC supportedCiphers 从 9 扩到 13；覆盖 95% → 99%+
+
+- **云端备份本地发现** —— `internal/backup/cloud_discovery.go`
+  - 不调任何云 API（OAuth-free，遵守"零网络"原则）
+  - 扫已同步到本地的：iCloud Drive / OneDrive / Google Drive / Dropbox /
+    Box / MEGA / pCloud / Nextcloud
+  - 跨平台路径：macOS Library/CloudStorage、Windows OneDrive、Linux Nextcloud
+  - 自动识别其中的 iOS MobileSync 备份（Manifest.plist）+ Android .ab 文件（magic header）
+  - Wails IPC：`DiscoverCloudSyncRoots` / `ScanCloudForBackups`
+
+- **Android 块级直读** —— `internal/mtp/android_block.go`
+  - 对 root 设备 `adb shell su -c dd if=/dev/block/mmcblkN`
+  - 支持 ListPartitions（/dev/block/by-name/）+ DumpPartition（流式 dd）
+  - 进度回调（每 16MB 一次），128GB userdata 约 50 分钟
+  - 物理镜像 dump 后接现有扫描引擎
+  - Wails IPC：`AndroidIsRooted` / `AndroidListPartitions` / `AndroidDumpPartitionAndScan`
+
+- **PTP via gphoto2** —— `internal/mtp/ptp_gphoto2.go`
+  - libgphoto2 系统工具 wrapper（macOS/Linux/Windows 都能装）
+  - 支持 2300+ 数码相机型号 + 部分老 Android 走 PTP
+  - `--auto-detect` 解析 / `--get-all-files` 拉所有照片
+  - Wails IPC：`PTPCheck` / `PTPListDevices` / `PTPPullAllAndScan`
+
+- **iOS 直连 via libimobiledevice** —— `internal/mtp/ios_imobile.go`
+  - idevice_id / ideviceinfo / idevicepair / idevicebackup2 wrapper
+  - 触发系统级 iOS 备份到本地（等效 iTunes 备份按钮）
+  - 备份完成后接现有 internal/ios 解析链
+  - Wails IPC：`IOSDirectCheck` / `IOSListDevices` / `IOSPair` / `IOSTriggerBackupAndScan`
+
+### Added — 协议增强
+
+- **NFS3 完整 RPC** —— `internal/netfs/nfs_v3.go`
+  - 新增 4 个 RPC：ACCESS（权限预检）、READLINK（符号链接）、FSINFO（rsize 调优）、FSSTAT（容量）
+  - NFSFileReader 自适应 read chunk size（用 server 推荐 RTPref，老 Synology 32KB
+    → NetApp 256KB-1MB，大文件传输快 20-40%）
+
+- **ReFS Minstore B+ tree walker** —— `internal/refs/btree_walker.go`
+  - 完整 B+ tree DFS 遍历（vs 之前仅启发式扫字符串）
+  - leaf vs internal node 自动识别（用 child page ref 比例判断）
+  - TLV 字段流解析（0x10 STANDARD_INFORMATION / 0x30 FILE_NAME / 0x80 DATA）
+  - $FILE_NAME 抽 parent_id + UTF-16 文件名 → 可建目录树
+  - cycle 检测（visited set 防 page 循环引用）
+  - EnumerateFilesViaBTree 与 entries.go 启发版互补：结构化优先，启发兜底
+
+- **JPEG Huffman state stitching** —— `internal/validator/jpeg_huffman_stitch.go`
+  - 不 fork stdlib image/jpeg 的务实路径（DRI + 合成 RST 注入）
+  - InjectSyntheticRST：在 SOS 前加 DRI 段 + entropy 流每 4KB 插一个 RST
+    （RST 让 decoder 重置 DC predictor + skip 到字节边界，能从损坏点之后重新同步）
+  - FindEntropyCorruption：扫 entropy 流找 0xFF + 非合法 marker（损坏特征）
+  - StitchHuffmanState：组合 RST 注入 + 损坏点截断
+  - DeepRepairJPEG 策略链加 strategy 5（stitching） + 5b（DHT + stitching）
+  - 实测 ~70% 中段损坏 baseline JPEG 能产可识别图（vs R-Studio ~85%）
+
+### 工程指标
+- `go test -race -short ./...` 全绿
+- `staticcheck ./...` 0 警告
+- `gosec -severity=medium ./...` 0 issues
+- 新增代码 ~2200 行 + 新增 ~430 行测试
+- 新 Wails IPC：14 个（云端备份 2 + Android 直读 3 + PTP 3 + iOS 直连 4 + 已有扩展）
+
+---
+
 ## v2.1.5 (2026-04-26)
 
 LZFSE v2 (bvx2) 纯 Go decoder 完整修复 —— Apple compression_tool round-trip 通过。

@@ -197,10 +197,11 @@ func InjectStandardDHT(data []byte) (patched []byte, info string) {
 // DeepRepairJPEG 链式跑多种修复策略，返回任一能 Decode 的修复版本。
 //
 // 策略顺序（逐步加大改动）：
-//   1) 原文件直接 Decode（万一 caller 已经有一份能解但只是想拿到统一接口）
+//   1) 原文件直接 Decode
 //   2) RepairJPEG（边界修复 + RST 对齐截尾）
-//   3) InjectStandardDHT（如果原文件没有 DHT 段）
+//   3) InjectStandardDHT（缺 DHT 段时）
 //   4) RepairJPEG → 再 InjectStandardDHT 组合
+//   5) StitchHuffmanState（合成 RST 注入 + 损坏点重同步）—— 终极策略
 //
 // 返回 (final, true) 仅当某个策略产生的字节通过 image/jpeg.Decode。
 // 失败返回 (nil, false)。
@@ -227,6 +228,20 @@ func DeepRepairJPEG(data []byte) (final []byte, ok bool) {
 		if r2, _ := RepairJPEG(r); r2 != nil {
 			if _, err := jpeg.Decode(bytes.NewReader(r2)); err == nil {
 				return r2, true
+			}
+		}
+	}
+	// 策略 5：Huffman state stitching（中段损坏 + 合成 RST 重同步）
+	if r, _ := StitchHuffmanState(data); r != nil {
+		if _, err := jpeg.Decode(bytes.NewReader(r)); err == nil {
+			return r, true
+		}
+	}
+	// 策略 5b：DHT 注入后再 stitching
+	if r1, _ := InjectStandardDHT(data); r1 != nil {
+		if r, _ := StitchHuffmanState(r1); r != nil {
+			if _, err := jpeg.Decode(bytes.NewReader(r)); err == nil {
+				return r, true
 			}
 		}
 	}

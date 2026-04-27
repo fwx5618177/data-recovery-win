@@ -2489,6 +2489,56 @@ func (a *App) StopAndroidBackupScan() {
 }
 
 // ====================================================================
+// 云端备份本地发现（iCloud/OneDrive/Google Drive/Dropbox 同步文件夹扫描）
+// ====================================================================
+
+// CloudBackupFinding 给前端的发现结果（Provider 字符串化让 JSON 友好）
+type CloudBackupFinding struct {
+	Provider    string `json:"provider"`     // "iCloud" / "OneDrive" / ...
+	Kind        string `json:"kind"`         // "iOS-MobileSync" / "Android-AB"
+	Path        string `json:"path"`         // 备份绝对路径
+	SizeBytes   int64  `json:"sizeBytes"`    //
+	CloudRoot   string `json:"cloudRoot"`    // 它所在的同步根（"它在你 OneDrive 里"）
+	Description string `json:"description"`  //
+}
+
+// CloudSyncRootInfo 给前端的同步根列表项
+type CloudSyncRootInfo struct {
+	Provider string `json:"provider"`
+	Path     string `json:"path"`
+	Reason   string `json:"reason"`
+}
+
+// DiscoverCloudSyncRoots 列出本机所有云同步根（仅返回真实存在的目录）
+func (a *App) DiscoverCloudSyncRoots() []CloudSyncRootInfo {
+	roots := backup.DiscoverCloudSyncRoots()
+	out := make([]CloudSyncRootInfo, 0, len(roots))
+	for _, r := range roots {
+		out = append(out, CloudSyncRootInfo{
+			Provider: string(r.Provider), Path: r.Path, Reason: r.Reason,
+		})
+	}
+	return out
+}
+
+// ScanCloudForBackups 扫所有云同步根找其中的 iOS/Android 备份文件
+//
+// 这是"零网络"哲学：不调任何云 API，只扫已经被同步客户端拉到本地的副本。
+func (a *App) ScanCloudForBackups() []CloudBackupFinding {
+	roots := backup.DiscoverCloudSyncRoots()
+	hits := backup.FindBackupsInCloudRoots(roots, 5)
+	out := make([]CloudBackupFinding, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, CloudBackupFinding{
+			Provider: string(h.Provider), Kind: h.BackupKind,
+			Path: h.Path, SizeBytes: h.SizeBytes,
+			CloudRoot: h.CloudRoot, Description: h.Description,
+		})
+	}
+	return out
+}
+
+// ====================================================================
 // MTP / 手机直连（Batch 8）
 // ====================================================================
 
@@ -2589,6 +2639,210 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 		if err := a.StartScan(destDir, mode); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
 		}
+	}()
+	return nil
+}
+
+// ====================================================================
+// 手机块级直读 + PTP + iOS 直连
+// ====================================================================
+
+// AndroidPartitionInfo 给前端的分区描述
+type AndroidPartitionInfo struct {
+	Name      string `json:"name"`      // userdata / system / boot ...
+	BlockNode string `json:"blockNode"` // /dev/block/mmcblk0pX
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+// AndroidIsRooted 测设备是否 root（用于决定是否显示"块级 dump"按钮）
+func (a *App) AndroidIsRooted(serial string) (bool, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	return mtp.IsRooted(ctx, serial)
+}
+
+// AndroidListPartitions 列 root 设备 /dev/block/by-name/ 下的分区。
+// 用户挑一个（一般是 userdata），然后 AndroidDumpPartitionAndScan 拿物理镜像。
+func (a *App) AndroidListPartitions(serial string) ([]AndroidPartitionInfo, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	parts, err := mtp.ListPartitions(ctx, serial)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AndroidPartitionInfo, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, AndroidPartitionInfo{
+			Name: p.Name, BlockNode: p.BlockNode, SizeBytes: p.SizeBytes,
+		})
+	}
+	return out, nil
+}
+
+// AndroidDumpPartitionAndScan dd 一个分区到本地 .img，然后扫这个 image。
+// 长操作（128GB ~ 50 分钟），UI 应监听 mtp:dumpProgress 事件显示百分比。
+func (a *App) AndroidDumpPartitionAndScan(serial, blockNode, outImgPath, mode string) error {
+	if serial == "" || blockNode == "" || outImgPath == "" {
+		return fmt.Errorf("serial/blockNode/outImgPath 不能为空")
+	}
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+	a.mu.Lock()
+	if a.engine.IsScanning() {
+		a.mu.Unlock()
+		return fmt.Errorf("已有扫描任务正在进行")
+	}
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	go func() {
+		defer cancel()
+		wailsRuntime.EventsEmit(a.ctx, "mtp:dumpStarted", map[string]string{
+			"serial": serial, "block": blockNode, "out": outImgPath,
+		})
+		written, err := mtp.DumpPartition(ctx, serial, blockNode, outImgPath, func(w int64) {
+			wailsRuntime.EventsEmit(a.ctx, "mtp:dumpProgress", w)
+		})
+		if err != nil {
+			appLogger.Warn("Android 块级 dump 失败", "err", err, "written", written)
+			wailsRuntime.EventsEmit(a.ctx, "mtp:dumpError", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "mtp:dumpCompleted", map[string]any{
+			"path": outImgPath, "bytes": written,
+		})
+		appLogger.Info("Android 块级 dump 完成，开始扫 image", "path", outImgPath, "bytes", written)
+		// dump 完成后扫这个 image 文件 — Engine.StartScan 对 .img 原生支持
+		if err := a.StartScan(outImgPath, mode); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+		}
+	}()
+	return nil
+}
+
+// PTPStatus 给前端的 gphoto2 可用性
+type PTPStatus struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+}
+
+// PTPCheck 检测 gphoto2 装没装
+func (a *App) PTPCheck() PTPStatus {
+	if !mtp.Gphoto2Available() {
+		return PTPStatus{Available: false}
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	return PTPStatus{Available: true, Version: mtp.Gphoto2Version(ctx)}
+}
+
+// PTPDeviceInfo 给前端的相机/PTP 设备描述
+type PTPDeviceInfo struct {
+	Model string `json:"model"`
+	Port  string `json:"port"`
+}
+
+// PTPListDevices 列 gphoto2 自动发现的相机
+func (a *App) PTPListDevices() ([]PTPDeviceInfo, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	devs, err := mtp.ListPTPDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PTPDeviceInfo, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, PTPDeviceInfo{Model: d.Model, Port: d.Port})
+	}
+	return out, nil
+}
+
+// PTPPullAllAndScan 把相机所有照片拉到本地 destDir，然后扫
+func (a *App) PTPPullAllAndScan(port, destDir, mode string) error {
+	if port == "" || destDir == "" {
+		return fmt.Errorf("port/destDir 不能为空")
+	}
+	if mode == "" {
+		mode = string(types.ScanFull)
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	go func() {
+		defer cancel()
+		wailsRuntime.EventsEmit(a.ctx, "ptp:pullStarted", port)
+		if err := mtp.PullPTPAll(ctx, port, destDir); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "ptp:pullError", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "ptp:pullCompleted", destDir)
+		_ = a.StartScan(destDir, mode)
+	}()
+	return nil
+}
+
+// IOSDirectStatus libimobiledevice 装没装
+type IOSDirectStatus struct {
+	Available bool `json:"available"`
+}
+
+// IOSDirectCheck 检测 idevice_id 是否在
+func (a *App) IOSDirectCheck() IOSDirectStatus {
+	return IOSDirectStatus{Available: mtp.LibIMobileDeviceAvailable()}
+}
+
+// IOSDeviceInfo 给前端的 iOS 设备
+type IOSDeviceInfo struct {
+	UDID    string `json:"udid"`
+	Model   string `json:"model"`
+	Name    string `json:"name"`
+	IOSVer  string `json:"iosVer"`
+	Trusted bool   `json:"trusted"`
+}
+
+// IOSListDevices 列 idevice_id -l
+func (a *App) IOSListDevices() ([]IOSDeviceInfo, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	devs, err := mtp.ListIOSDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]IOSDeviceInfo, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, IOSDeviceInfo{
+			UDID: d.UDID, Model: d.Model, Name: d.Name,
+			IOSVer: d.IOSVer, Trusted: d.Trusted,
+		})
+	}
+	return out, nil
+}
+
+// IOSPair 触发 idevicepair pair（用户要在 iPhone 屏幕上点"信任"）
+func (a *App) IOSPair(udid string) error {
+	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+	defer cancel()
+	return mtp.PairIOSDevice(ctx, udid)
+}
+
+// IOSTriggerBackupAndScan 触发系统级 iOS 备份到 destDir，然后用 ScanIOSBackup 扫
+//
+// 长操作（>30GB 数据可能 30 分钟）。UI 监听 ios:backupProgress / ios:backupCompleted。
+func (a *App) IOSTriggerBackupAndScan(udid, destDir, password string) error {
+	if udid == "" || destDir == "" {
+		return fmt.Errorf("udid/destDir 不能为空")
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	go func() {
+		defer cancel()
+		wailsRuntime.EventsEmit(a.ctx, "ios:backupStarted", udid)
+		if err := mtp.TriggerIOSBackup(ctx, udid, destDir); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "ios:backupError", err.Error())
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "ios:backupCompleted", destDir)
+		// 备份完成 → 扫这个目录（idevicebackup2 写到 destDir/<UDID>/）
+		// StartIOSBackupScan 会找 Manifest.plist 自动定位 backup root
+		_ = a.StartIOSBackupScan(destDir, password)
 	}()
 	return nil
 }

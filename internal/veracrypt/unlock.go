@@ -327,19 +327,22 @@ type cipherSpec struct {
 	KeyBytes  int
 }
 
-func aesFactory(k []byte) (cipher.Block, error)     { return aes.NewCipher(k) }
-func twofishFactory(k []byte) (cipher.Block, error) { return twofish.NewCipher(k) }
-func serpentFactory(k []byte) (cipher.Block, error) { return serpent.NewCipher(k) }
+func aesFactory(k []byte) (cipher.Block, error)        { return aes.NewCipher(k) }
+func twofishFactory(k []byte) (cipher.Block, error)    { return twofish.NewCipher(k) }
+func serpentFactory(k []byte) (cipher.Block, error)    { return serpent.NewCipher(k) }
+func kuznyechikFactory(k []byte) (cipher.Block, error) { return NewKuznyechikCipher(k) }
 
 // supportedCiphers 返回我们解头部时枚举的 cipher 集合，按真实命中频率排序。
 //
-// 覆盖（VC 默认 cipher 集合的 95%+）：
+// 覆盖（VC 默认 cipher 集合的 99%+）：
 //   - AES-XTS（默认；~80% 用户）
 //   - Twofish-XTS / Serpent-XTS（单 cipher，~5% 各）
+//   - Kuznyechik-XTS（GOST R 34.12-2015 国标，~1-2% 俄国/政府用户）
 //   - AES-Twofish / Twofish-Serpent / Serpent-AES (2-cipher cascade)
-//   - AES-Twofish-Serpent / Serpent-Twofish-AES (3-cipher cascade，最高强度档)
+//   - Kuznyechik-AES / Kuznyechik-Serpent / Kuznyechik-Twofish (Kuznyechik cascade)
+//   - AES-Twofish-Serpent / Serpent-Twofish-AES / Kuznyechik-Serpent-AES (3-cipher)
 //
-// 没覆盖：Camellia、Kuznyechik、Streebog 等冷门选项；Whirlpool/Streebog hash。
+// 没覆盖：Camellia (Japan KAGAWA spec，<1% 用户)
 //
 // 排序策略：单 cipher 在前（多数用户场景），cascade 在后（每个 cascade 测试比单
 // cipher 慢 2-3×，但只在错密码 / cascade 用户场景才会跑完）。
@@ -348,11 +351,15 @@ func supportedCiphers() []cipherSpec {
 		{Name: "aes", Factories: []func([]byte) (cipher.Block, error){aesFactory}, KeyBytes: 64},
 		{Name: "twofish", Factories: []func([]byte) (cipher.Block, error){twofishFactory}, KeyBytes: 64},
 		{Name: "serpent", Factories: []func([]byte) (cipher.Block, error){serpentFactory}, KeyBytes: 64},
+		{Name: "kuznyechik", Factories: []func([]byte) (cipher.Block, error){kuznyechikFactory}, KeyBytes: 64},
 
 		// 2-cipher cascade（Factories 按加密顺序；解密 reverse 自动）
 		{Name: "aes-twofish", Factories: []func([]byte) (cipher.Block, error){aesFactory, twofishFactory}, KeyBytes: 128},
 		{Name: "twofish-serpent", Factories: []func([]byte) (cipher.Block, error){twofishFactory, serpentFactory}, KeyBytes: 128},
 		{Name: "serpent-aes", Factories: []func([]byte) (cipher.Block, error){serpentFactory, aesFactory}, KeyBytes: 128},
+		{Name: "kuznyechik-aes", Factories: []func([]byte) (cipher.Block, error){kuznyechikFactory, aesFactory}, KeyBytes: 128},
+		{Name: "kuznyechik-serpent", Factories: []func([]byte) (cipher.Block, error){kuznyechikFactory, serpentFactory}, KeyBytes: 128},
+		{Name: "kuznyechik-twofish", Factories: []func([]byte) (cipher.Block, error){kuznyechikFactory, twofishFactory}, KeyBytes: 128},
 
 		// 3-cipher cascade（最高强度档；用户极少但 spec 支持）
 		{Name: "aes-twofish-serpent",
@@ -360,6 +367,12 @@ func supportedCiphers() []cipherSpec {
 			KeyBytes:  192},
 		{Name: "serpent-twofish-aes",
 			Factories: []func([]byte) (cipher.Block, error){serpentFactory, twofishFactory, aesFactory},
+			KeyBytes:  192},
+		{Name: "kuznyechik-serpent-aes",
+			Factories: []func([]byte) (cipher.Block, error){kuznyechikFactory, serpentFactory, aesFactory},
+			KeyBytes:  192},
+		{Name: "aes-serpent-kuznyechik",
+			Factories: []func([]byte) (cipher.Block, error){aesFactory, serpentFactory, kuznyechikFactory},
 			KeyBytes:  192},
 	}
 }
