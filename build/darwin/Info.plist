@@ -23,6 +23,21 @@
         <string>true</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
+
+        <!-- macOS 权限文案（v2.7.2 加）：当系统弹"App 想访问 X"对话框时显示这些
+             人类可读说明。比默认的"App 想访问可移除卷"更具体，提升用户授权率。 -->
+        <key>NSRemovableVolumesUsageDescription</key>
+        <string>数据恢复大师需要访问可移除卷（U 盘 / 外接硬盘 / SD 卡）来扫描已删除文件。所有操作都是只读的，绝不会修改源盘。</string>
+        <key>NSDocumentsFolderUsageDescription</key>
+        <string>数据恢复大师需要访问"文稿"文件夹来：(1) 读取你拖入的磁盘镜像 .img 文件；(2) 把恢复出的文件写到你指定的输出目录。</string>
+        <key>NSDesktopFolderUsageDescription</key>
+        <string>数据恢复大师需要访问"桌面"文件夹（默认输出目录），用于保存恢复出来的文件。</string>
+        <key>NSDownloadsFolderUsageDescription</key>
+        <string>数据恢复大师需要访问"下载"文件夹来读取你下载的磁盘镜像或备份文件。</string>
+        <key>NSAppleEventsUsageDescription</key>
+        <string>数据恢复大师在首次启动时使用 AppleScript 申请管理员权限（用于读取物理磁盘扇区）。这是一次性提示，密码不落盘。</string>
+        <key>NSSystemAdministrationUsageDescription</key>
+        <string>数据恢复大师需要管理员权限来读取磁盘扇区。这是数据恢复工具的固有需求。所有读取均为只读，不修改源盘。</string>
         {{if .Info.FileAssociations}}
         <key>CFBundleDocumentTypes</key>
         <array>

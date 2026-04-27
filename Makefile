@@ -1,4 +1,4 @@
-.PHONY: dev build build-windows build-windows-arm64 build-darwin build-darwin-universal \
+.PHONY: dev dev-elevated check-perms build build-windows build-windows-arm64 build-darwin build-darwin-universal \
         build-linux build-linux-arm64 build-all test lint clean deps install-wails check-wails \
         verify-platforms drift-check drift-check-strict
 
@@ -27,8 +27,24 @@ check-wails:
 	}
 
 # 开发模式（本地平台）
+#
+# **DEV 模式行为**（v2.7.2 起）：
+#   - DATA_RECOVERY_DEV_MODE=1 → app 跳过物理盘枚举（不弹 macOS 权限框）
+#   - 不弹 Touch ID / 密码框（admin_unix.go 走 dev 短路）
+#   - 用户用 .img 镜像 + 拖文件 / 用户主目录测试足够
+#   - 真要测物理盘扫描：跑 `make dev-elevated`（要 sudo）
 dev: check-wails
-	$(WAILS) dev
+	@DATA_RECOVERY_DEV_MODE=1 $(WAILS) dev
+
+# 提权 dev 模式 —— 真需要测物理盘扫描时用（一次性 sudo 提权后跑）
+dev-elevated: check-wails
+	@echo "🔐 提权 dev 模式：会要 sudo 密码（仅这一次），用于测试物理磁盘读取"
+	@echo "   日常开发请用 'make dev'（默认跳物理盘，免权限框）"
+	@sudo -E $(WAILS) dev
+
+# macOS 权限自检 —— 不申请权限（macOS 沙盒限制无法自动），只报告 + 给指引
+check-perms:
+	@bash scripts/check-macos-permissions.sh
 
 # 本地构建（自动识别平台）
 build: check-wails

@@ -34,7 +34,25 @@ func listDrivesPlatform() ([]*types.DriveInfo, error) {
 }
 
 // listDrivesMacOS 扫描 macOS 磁盘设备
+//
+// **DEV 模式** (`DATA_RECOVERY_DEV_MODE=1`)：跳过物理盘枚举，直接返回空列表
+// + 提示信息。原因：每次 os.Open("/dev/disk0") 在没有 Full Disk Access 时会
+// 触发 macOS 系统级权限框（不光是错误返回，是 modal 弹窗 → 严重伤开发体验）。
+// dev 模式下用户应该用 .img 镜像文件 + 拖入测试，不需要真物理盘。
 func listDrivesMacOS() ([]*types.DriveInfo, error) {
+	if os.Getenv("DATA_RECOVERY_DEV_MODE") == "1" {
+		// dev 模式：返回单条"占位"提示卡，让 UI 知道不是 bug
+		return []*types.DriveInfo{{
+			Path:        "",
+			Name:        "[DEV-MODE] 物理盘枚举已跳过",
+			Size:        0,
+			SizeHuman:   "—",
+			DriveType:   "dev-placeholder",
+			FileSystem:  "",
+			IsRemovable: false,
+		}}, nil
+	}
+
 	var drives []*types.DriveInfo
 
 	// 扫描 /dev/disk* 设备（仅整盘，排除分区如 disk0s1）

@@ -4,6 +4,70 @@
 
 ---
 
+## v2.7.2 (2026-04-27)
+
+**修 macOS `make dev` 每次都弹权限框** —— DEV 模式 + Info.plist 文案 + 自检脚本
+
+### 用户问题：现在 make dev 后，macOS 总是会提示权限问题
+
+诊断：
+- `ensureAdminPrivileges()` 在 dev TTY 下不被 `isNonInteractiveContext` 拦截 → 每次都跑 osascript 弹 Touch ID/密码框
+- `listDrivesMacOS()` 每次枚举都 `os.Open("/dev/disk0")` → 系统弹"App 想访问可移除卷"框
+- Info.plist 没有任何权限文案 → macOS 弹默认通用文案
+
+### Added — DEV 模式（彻底跳物理盘）
+
+新 env var `DATA_RECOVERY_DEV_MODE=1`：
+- `admin_unix.go`: `ensureAdminPrivileges` 短路返回，不弹 osascript
+- `internal/disk/drives_other.go`: `listDrivesMacOS` 跳过 `os.Open(/dev/disk*)`，
+  返回单条 "[DEV-MODE] 物理盘枚举已跳过" 占位卡，让 UI 知道不是 bug
+- 用户测扫描就用 .img 镜像 / 拖文件 / 用户主目录路径
+
+### Added — Makefile dev / dev-elevated / check-perms targets
+
+- `make dev` —— 默认设 `DATA_RECOVERY_DEV_MODE=1`，**完全免权限框**
+- `make dev-elevated` —— 真需要测物理盘扫描时用，会要一次 sudo 密码
+- `make check-perms` —— 跑 `scripts/check-macos-permissions.sh` 自检
+
+### Added — `scripts/check-macos-permissions.sh`
+
+一次性 macOS 权限健康检查（不申请权限，只报告 + 给指引）：
+- ✓ wails CLI 是否在 PATH
+- ⚠ DEV_MODE env 是否设置
+- ⚠ 是否 root（dev 模式下 OK 不需要）
+- ✓ /dev/disk0 是否可见（ls 检查，不真打开）
+- ⚠ Full Disk Access (TCC) 状态 —— 读 ~/Library/Application Support/com.apple.TCC/TCC.db
+- 推荐工作流总结
+
+### Added — Info.plist 6 个权限文案
+
+`build/darwin/Info.plist` 加：
+- `NSRemovableVolumesUsageDescription` —— 可移除卷（U 盘 / SD 卡）
+- `NSDocumentsFolderUsageDescription` —— "文稿"文件夹（读镜像 / 写恢复输出）
+- `NSDesktopFolderUsageDescription` —— "桌面"文件夹（默认输出目录）
+- `NSDownloadsFolderUsageDescription` —— "下载"文件夹（读镜像 / 备份）
+- `NSAppleEventsUsageDescription` —— AppleScript 申请管理员权限提示
+- `NSSystemAdministrationUsageDescription` —— 管理员权限说明
+
+每条都用人类可读的中文说明，强调"只读，不修改源盘"，让 macOS 系统弹框时
+用户更愿意授权（vs 默认通用提示文案）。
+
+### 修复后的开发体验
+
+| 场景 | v2.7.1 之前 | v2.7.2 之后 |
+|------|-----------|-----------|
+| `make dev` 启动 | 每次弹 Touch ID / 密码框 | 直接启，0 弹框 |
+| 启动后 GetDrives | 每次弹"想访问可移除卷" | 占位卡片，无弹框 |
+| 真要测物理盘 | 没专门入口 | `make dev-elevated`（明示） |
+| 不知权限状态 | 没法查 | `make check-perms` |
+
+### 工程指标
+- backend `go build` 通过；frontend 未动
+- 4 文件改：admin_unix.go / drives_other.go / Makefile / Info.plist
+- 1 新文件：scripts/check-macos-permissions.sh
+
+---
+
 ## v2.7.1 (2026-04-27)
 
 **Hotfix：TasksSidebar 折叠按钮点击后白屏** —— React Rules of Hooks 违规。

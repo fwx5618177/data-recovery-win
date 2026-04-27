@@ -38,6 +38,14 @@ func ensureAdminPrivileges() (bool, error) {
 		return false, nil
 	}
 
+	// **DEV 模式**：开发阶段每次 make dev 都弹 Touch ID/密码框是糟糕的开发体验。
+	// DATA_RECOVERY_DEV_MODE=1 让 dev 进程以普通用户身份起，
+	// app 启动后只能扫 .img 镜像 + 用户主目录。物理盘列表会用 [DEV-MODE]
+	// 标记并跳过。Makefile 的 `dev` target 自动设这个 env。
+	if os.Getenv("DATA_RECOVERY_DEV_MODE") == "1" {
+		return false, nil
+	}
+
 	// 非交互场景一律跳过 auto-sudo，否则会出现：
 	//   - Wails build 期间生成 bindings 跑临时二进制 → 我们调 syscall.Kill 杀自己 →
 	//     Wails 看到 "dead parent" → bindings 失败 → CI 红
