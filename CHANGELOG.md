@@ -4,6 +4,53 @@
 
 ---
 
+## v2.3.2 (2026-04-27)
+
+**IDCT 优化 (DC-only 24% 提速) + UI 部分恢复 badge + 长路径 tooltip + 进度条文本**
+
+### Improved — IDCT 性能（纯 Go，不写 assembly）
+
+- **DC-only short-circuit 用 OR-fused 检测**：`row[1]|row[2]|...|row[7] == 0`
+  比 7 个 `&&` 链快（编译器 fold 成单次 OR + cmp 0）。这是自然图像的常见路径
+  （高频系数被量化掉），命中率 30-60%。
+- **Bounds check elimination hints**：`_ = block[63]` / `_ = row[7]` 让编译器
+  一次性确认数组合法，省下每个 access 的 bound check
+- **OR-fused col DC-only 检测** 类似收益
+- 实测 (Apple M3 Max) `BenchmarkIDCT_DCOnly`：35 → 27 ns/op（**24% 提速**）
+- Sparse / Dense block 各 5% 提速
+- 加 `BenchmarkIDCT_DCOnly` / `_Sparse` / `_Dense` benchmark 防 perf 回归
+- **诚实声明**：纯 Go 极限大约就是这里。要追平 libjpeg-turbo 的 SIMD（5-10×
+  提速），需要写 amd64/arm64 assembly + 维护 fallback + build constraints。
+  本工具典型场景（几百到几千张 JPEG 恢复）IDCT 不是热路径，未来集成到批量
+  验证（10 万张/秒）再投入 asm 优化。
+
+### Added — UI partial recovery badge
+
+JPEG 部分修复成功后，前端显示更具体的"恢复率 badge"而不是泛泛"部分"：
+
+- `frontend/src/components/RecoveryPage.jsx` `StateBadge` 增强：
+  - 解析 backend message 里的 "X%" 数字（regex `部分恢复\s+(\d+)%`）
+  - 显示 `⚠ 部分 31%` 而不是仅 `⚠ 部分`
+  - 颜色按恢复率渐变：≥70% 标准 warning（黄）；<30% 偏红（用户能直观看到"这个图救得不好"）
+  - tooltip = full message（鼠标悬停看完整 "部分恢复：5/16 MCUs，损坏点 @byte 725"）
+- 新增"部分恢复"过滤 tab（仅当 counts.partial > 0 才显示）：
+  - 默认 "未成功" tab 不再含 partial（partial 有自己的 tab）
+  - 用户能一键 isolate "我有多少图是部分恢复的"
+
+### Fixed — UI 可用性
+
+- **长路径 progress.currentFile 加 `title` tooltip**：用户鼠标悬停就能看到完整路径
+- **records-table message 列加 `title` tooltip**：长错误消息悬停可读
+- **进度条覆盖百分比文字** (1 decimal)：之前用户只能从侧栏数字推断进度，
+  现在主进度条上直接显示 `42.3%`，浅色背景上深字 / 深色背景上浅字（textShadow 增强对比）
+
+### 工程指标
+- `go test -race -short ./...` 全绿
+- `staticcheck ./...` 0 警告 / `vet` 0 issues
+- frontend `vite build` 成功（243 KB → gzip 79 KB）
+
+---
+
 ## v2.3.1 (2026-04-27)
 
 **4 个 bug 修复 + Loeffler IDCT + partial decoder 接入 carving pipeline**

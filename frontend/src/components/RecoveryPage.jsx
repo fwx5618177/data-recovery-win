@@ -58,7 +58,11 @@ export default function RecoveryPage({
     if (!records) return [];
     if (filter === "all") return records;
     if (filter === "success") return records.filter((r) => r.state === "success");
-    if (filter === "failed") return records.filter((r) => r.state !== "success");
+    if (filter === "partial") return records.filter((r) => r.state === "partial");
+    if (filter === "failed") {
+      // "未成功" 默认不含 partial（partial 有自己的 tab）
+      return records.filter((r) => r.state !== "success" && r.state !== "partial");
+    }
     return records;
   }, [records, filter]);
 
@@ -93,7 +97,26 @@ export default function RecoveryPage({
                 </button>
               </div>
             </div>
-            <div className="progress"><div className="progress__fill" style={{ width: `${percent}%` }} /></div>
+            <div className="progress" style={{ position: "relative" }}>
+              <div className="progress__fill" style={{ width: `${percent}%` }} />
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  fontVariantNumeric: "tabular-nums",
+                  color: percent > 50 ? "white" : "var(--text)",
+                  pointerEvents: "none",
+                  textShadow: percent > 50 ? "0 1px 1px rgba(0,0,0,0.3)" : "none",
+                }}
+              >
+                {percent.toFixed(1)}%
+              </div>
+            </div>
             <div className="flex items-center gap-3" style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)", flexWrap: "wrap" }}>
               <span>✓ 成功 <b style={{ color: "var(--success)" }}>{progress?.success ?? 0}</b></span>
               <span>⚠ 部分 <b style={{ color: "var(--warning)" }}>{progress?.partial ?? 0}</b></span>
@@ -101,7 +124,11 @@ export default function RecoveryPage({
               <span>已写入 <b>{formatSize(progress?.bytesWritten || 0)}</b></span>
             </div>
             {progress?.currentFile && (
-              <div className="mono muted" style={{ marginTop: 12, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <div
+                className="mono muted"
+                title={progress.currentFile}
+                style={{ marginTop: 12, fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+              >
                 当前：{progress.currentFile}
               </div>
             )}
@@ -191,7 +218,8 @@ export default function RecoveryPage({
               <div className="file-table-toolbar__left">
                 <div className="btn-group">
                   {[
-                    { v: "failed", label: `未成功 (${counts.failed + counts.partial + counts.skipped})` },
+                    { v: "failed", label: `未成功 (${counts.failed + counts.skipped})` },
+                    ...(counts.partial > 0 ? [{ v: "partial", label: `部分恢复 (${counts.partial})` }] : []),
                     { v: "success", label: `成功 (${counts.success})` },
                     { v: "all", label: `全部 (${records.length})` },
                   ].map((opt) => (
@@ -220,10 +248,10 @@ export default function RecoveryPage({
                 <tbody>
                   {filteredRecords.map((r) => (
                     <tr key={r.fileId}>
-                      <td><StateBadge state={r.state} /></td>
+                      <td><StateBadge state={r.state} message={r.message} /></td>
                       <td className="file-name" title={r.fileName} style={{ maxWidth: 260 }}>{r.fileName}</td>
                       <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{r.sizeHuman}</td>
-                      <td className="wrap mono" style={{ fontSize: 11.5 }}>
+                      <td className="wrap mono" style={{ fontSize: 11.5 }} title={r.state === "success" ? r.outputPath : r.message}>
                         {r.state === "success" ? r.outputPath : r.message || "无错误消息"}
                       </td>
                     </tr>
@@ -238,12 +266,45 @@ export default function RecoveryPage({
   );
 }
 
-function StateBadge({ state }) {
+// extractPartialPct 从 backend 写的 message 里抽"X%"恢复率。
+//
+// 格式来自 internal/recovery/engine.go 的 jpegRepair 路径：
+//   "[JPEG 部分恢复 31% via partial-decode] 部分恢复：5/16 MCUs (31%)，损坏点 @byte offset 725"
+//
+// 抽到 "31%" 显示在 badge 里 → 用户一眼看到"这个文件救回了多少"。
+// 抽不到 → 退化到只显示"部分"。
+function extractPartialPct(message) {
+  if (!message) return null;
+  const m = message.match(/部分恢复\s+(\d+)%/) || message.match(/(\d+)%/);
+  if (!m) return null;
+  const pct = parseInt(m[1], 10);
+  if (isNaN(pct) || pct < 0 || pct > 100) return null;
+  return pct;
+}
+
+function StateBadge({ state, message }) {
   switch (state) {
     case "success":
       return <span className="badge badge--success"><IconCheckCircle size={12} /> 成功</span>;
-    case "partial":
-      return <span className="badge badge--warning"><IconAlertTriangle size={12} /> 部分</span>;
+    case "partial": {
+      const pct = extractPartialPct(message);
+      // 颜色随恢复率渐变：>70% 偏黄绿，30-70% 标准 warning，<30% 偏红
+      let style = null;
+      if (pct !== null) {
+        if (pct >= 70) style = { background: "#fef3c7", color: "#854d0e", borderColor: "#fde68a" };
+        else if (pct < 30) style = { background: "#fee2e2", color: "#991b1b", borderColor: "#fecaca" };
+      }
+      return (
+        <span
+          className="badge badge--warning"
+          style={style}
+          title={message || "部分恢复"}
+        >
+          <IconAlertTriangle size={12} />
+          {pct !== null ? ` 部分 ${pct}%` : " 部分"}
+        </span>
+      );
+    }
     case "skipped":
       return <span className="badge"><IconX size={12} /> 跳过</span>;
     case "failed":
