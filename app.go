@@ -519,14 +519,14 @@ func (a *App) UnlockBitLockerWithMemoryImage(
 	sectorCipher, err := bitlocker.BuildSectorCipherForMethodPublic(fvek, method)
 	if err != nil {
 		underlying.Close()
-		return err
+		return fmt.Errorf("构造 BitLocker sector cipher (method=0x%04X) 失败: %w", method, err)
 	}
 	// 8192 sector cache ≈ 4MB @ 512B / 32MB @ 4096B —— 覆盖 NTFS MFT hot 区，
 	// 加密卷扫描时同 sector 反复解密的代价省掉
 	dec, err := bitlocker.NewDecryptingReaderWithCache(underlying, sectorCipher, bvolume.OEMID, 8192)
 	if err != nil {
 		underlying.Close()
-		return err
+		return fmt.Errorf("构造 BitLocker decrypting reader 失败: %w", err)
 	}
 	dec.SetVolumeOffset(bvolume.Offset)
 	if vh := mb.FindVolumeHeaderInfo(); vh != nil && vh.PlaintextHeaderSize > 0 {
@@ -992,7 +992,13 @@ func (a *App) DownloadUpdate(version, assetURL, assetName string, assetSize int6
 
 	pendingDir, err := updater.PendingDir()
 	if err != nil {
-		return err
+		// **关键**：goroutine 还没起，必须手动释放下载锁，否则后续所有
+		// 下载请求都被静默吞掉（"下载已在进行" 分支），用户只能重启 app。
+		// 历史 bug：曾直接 return err，导致下载功能永久 hang。
+		a.mu.Lock()
+		a.downloadActive = false
+		a.mu.Unlock()
+		return fmt.Errorf("获取 pending 目录失败: %w", err)
 	}
 	// 每个版本独立子目录，避免不同版本互相覆盖
 	versionDir := filepath.Join(pendingDir, version)
@@ -1997,7 +2003,7 @@ func (a *App) UnlockFileVaultVolume(drivePath, volumeUUID, password string, salt
 	}
 	r := disk.NewReader(drivePath)
 	if err := r.Open(); err != nil {
-		return err
+		return fmt.Errorf("打开磁盘 %s 失败（FileVault unlock）: %w", drivePath, err)
 	}
 	defer r.Close()
 

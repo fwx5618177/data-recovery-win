@@ -67,9 +67,10 @@ func TestPartialDecode_BaselineHealthy(t *testing.T) {
 	}
 	avgDist /= float64(count)
 	t.Logf("avg pixel distance = %.2f", avgDist)
-	// IDCT + JPEG 量化误差 + 我们的简化实现 → 容差较大。视觉一致即可。
-	if avgDist > 80 {
-		t.Errorf("像素差距过大 (%.2f > 80)", avgDist)
+	// Loeffler IDCT + JPEG 量化误差 ≈ stdlib 同等水平（多数情况 < 10）。
+	// 收紧到 12 防止精度回归（早期朴素 IDCT 实现是 40 左右）。
+	if avgDist > 12 {
+		t.Errorf("像素差距过大 (%.2f > 12) —— IDCT 精度可能退化", avgDist)
 	}
 }
 

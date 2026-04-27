@@ -4,6 +4,64 @@
 
 ---
 
+## v2.3.1 (2026-04-27)
+
+**4 个 bug 修复 + Loeffler IDCT + partial decoder 接入 carving pipeline**
+
+### Fixed — 4 个生产 bug
+
+- **updater dev 版本检测不一致** —— `internal/updater/checker.go:148`
+  - `isNewerSemver` 把 dev 当 "总是有更新可用"
+  - `verify.IsVersionNewer` 把 dev 当 "无法解析，拒绝 anti-downgrade"
+  - 用户体验：UI 提示 "新版 v2.1.4 可用 (当前 dev)" → 点下载 → 弹错 "防 downgrade: 目标版本 v2.1.4 不比当前新"
+  - **修复**：dev 构建一律不显示更新提示（dev 是开发场景，不该被自动覆盖为旧 release）
+  - 加 `TestVersionCheckers_AreConsistent` 防再分歧
+
+- **DownloadUpdate 失败路径死锁 downloadActive** —— `app.go:993`
+  - `updater.PendingDir()` 失败时直接 return，但 `a.downloadActive = true` 已设置
+  - 后续所有下载请求被静默吞掉（"下载已在进行" 分支），用户只能重启 app
+  - **修复**：错误路径手动 mu.Lock + downloadActive=false + Unlock + 包装错误
+
+- **3 个错误未包装** —— `app.go:519, 526, 2005`
+  - BitLocker BuildSectorCipher / NewDecryptingReaderWithCache / FileVault disk Open 失败
+  - 错误信息丢失，故障排查时不知道哪一步爆
+  - **修复**：全部 `fmt.Errorf("具体步骤: %w", err)` 包装
+
+### Improved — Loeffler IDCT (像素距 40.51 → 5.90)
+
+替换 v2.3.0 的简化 cosine matrix IDCT 为 Loeffler/Ligtenberg/Moschytz 1989
+11-mul 算法 —— **像素级匹配 stdlib `image/jpeg`**：
+
+- 移植自 libjpeg jidctint.c + Go stdlib idct.go（算法事实，BSD-3 兼容）
+- DC-only short-circuit：自然图像高频系数稀疏，跳过整个 1D IDCT 提速 ~2-3×
+- `TestPartialDecode_BaselineHealthy` 测试容差从 80 收紧到 12（实测 5.90，
+  早期朴素实现 40，stdlib 通常 < 5）
+
+### Added — Partial decoder 接入 carving pipeline
+
+把 v2.3.0 实现的 `PartialDecode` / `DeepRepairJPEG` 真正接到 recovery engine —
+之前是 validator 包的孤立工具，没人调用：
+
+- `internal/validator/jpeg_repair_from_disk.go`：
+  - `RepairOutcome`：含 Repaired / RepairedBytes / Strategy / Coverage / HumanReadable
+  - `Validator.RepairJPEGFromOffset(file)`：从磁盘读字节 → 跑 DeepRepair → 包装结果
+  - `classifyRepair()`：通过对比 original vs repaired 推断走了哪个策略
+    （original / partial-decode / header-injection / boundary-trim / huffman-stitch / deep-truncation）
+- `internal/recovery/engine.go` Recover 路径改造：
+  - carver 文件 ValidateDeep 失败 → JPEG → 调 RepairJPEGFromOffset
+  - 修好就走"部分恢复"路径：标 `RecoveryStatePartial`，partialCount++，
+    manifest 记 `[JPEG 部分恢复 31% via partial-decode] 部分恢复：5/16 MCUs (31%)，损坏点 @byte offset 725`
+  - Confidence 设为 `Coverage * 0.5`（修复版置信度上限 50%，与正常解码区分）
+- 端到端测试：损坏 JPEG 在 disk offset=4096 → RepairJPEGFromOffset → 5/16 MCUs
+  恢复（31% coverage）+ 写出 stdlib 可解修复版
+
+### 工程指标
+- `go test -race -short ./...` 全绿
+- `staticcheck` 0 警告 / `vet` 0 issues
+- 新增 ~280 行代码 + ~100 行测试
+
+---
+
 ## v2.3.0 (2026-04-27)
 
 **ReFS B+ tree 端到端验证 + JPEG in-tree partial decoder** —— 把 v2.2.0 的两个

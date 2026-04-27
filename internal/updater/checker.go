@@ -142,7 +142,10 @@ func CheckLatest(ctx context.Context, owner, repo string) (*CheckResult, error) 
 // 支持：
 //   - "v1.2.3" / "1.2.3"（前缀 v 可选）
 //   - 忽略预发版尾巴（"v1.2.3-rc1" 只比 major/minor/patch）
-//   - local 是 "dev" / 空 / 格式非法时，只要 remote 合法就认为有更新
+//   - local 是 "dev" / 空 / 格式非法时 → **不**提示更新
+//     原因：dev 构建的开发者大概率比 GitHub release 还领先，下载 release 会
+//     倒退；与 verify.IsVersionNewer 的 anti-downgrade 语义保持一致，避免
+//     "UI 说有新版 → 用户点下载 → anti-downgrade 拒绝 → 用户困惑" 的反直觉流程。
 //
 // 故意不用第三方 semver 库——我们的版本号格式极简单，手写 20 行搞定避免依赖。
 func isNewerSemver(local, remote string) bool {
@@ -152,7 +155,11 @@ func isNewerSemver(local, remote string) bool {
 	}
 	lParts, lOK := parseSemverTriple(local)
 	if !lOK {
-		return true // local 是 "dev" 之类，远端有正式版就提示
+		// local = "dev" / 空 / 非法格式 → 不提示更新
+		// （历史 bug：曾返回 true 让 dev 用户看到 "新版可用" banner，
+		//  但点下载后被 verify.IsVersionNewer 的 anti-downgrade 拒绝。两个
+		//  检查应该一致：dev 构建是开发者场景，不该自动接受 release 覆盖。）
+		return false
 	}
 	for i := 0; i < 3; i++ {
 		if rParts[i] > lParts[i] {

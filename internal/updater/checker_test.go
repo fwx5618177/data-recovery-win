@@ -22,8 +22,12 @@ func TestIsNewerSemver(t *testing.T) {
 		{"v1.2.4", "v1.2.3", false, "本地更新"},
 		{"v1.2.3-rc1", "v1.2.3", false, "去掉预发版后同版本"},
 		{"v1.2.3", "v1.2.3-rc1", false, "预发版不提示"},
-		{"dev", "v1.0.0", true, "dev 任何正式版都提示"},
-		{"", "v1.0.0", true, "空版本视为未知"},
+		// 历史回归（fix in v2.3.1）：dev 构建不该看到"新版可用"banner，
+		// 因为 verify.IsVersionNewer 会拒绝 anti-downgrade，UX 反直觉。
+		// 一致语义：dev 当本地视为"我已经是最新"，不提示更新。
+		{"dev", "v1.0.0", false, "dev 不提示更新（与 anti-downgrade 一致）"},
+		{"dev", "v999.0.0", false, "dev 即便很大新版本也不提示"},
+		{"", "v1.0.0", false, "空版本同 dev 处理"},
 		{"v1.0.0", "not-a-version", false, "远端格式非法不提示"},
 		{"1.2.3", "1.2.4", true, "无 v 前缀也支持"},
 	}
@@ -32,6 +36,32 @@ func TestIsNewerSemver(t *testing.T) {
 		if got != c.want {
 			t.Errorf("isNewerSemver(%q, %q) = %v, want %v  [%s]",
 				c.local, c.remote, got, c.want, c.reason)
+		}
+	}
+}
+
+// 跨函数一致性：isNewerSemver 和 IsVersionNewer 必须对同一对 (current, new)
+// 给出相同结论，否则会出现"UI 提示新版可用 → 用户点下载 → anti-downgrade
+// 拒绝"的 UX 矛盾。
+func TestVersionCheckers_AreConsistent(t *testing.T) {
+	pairs := [][2]string{
+		{"v1.2.3", "v1.2.4"},
+		{"v1.2.3", "v1.2.3"},
+		{"v1.2.4", "v1.2.3"},
+		{"dev", "v1.0.0"},
+		{"dev", "v999.0.0"},
+		{"", "v1.0.0"},
+		{"v1.0.0", "junk"},
+		{"v2.0.0", "v1.99.99"},
+	}
+	for _, p := range pairs {
+		current, target := p[0], p[1]
+		offered := isNewerSemver(current, target)
+		applied := IsVersionNewer(current, target)
+		if offered != applied {
+			t.Errorf("不一致: isNewerSemver(%q, %q)=%v vs IsVersionNewer=%v —— "+
+				"两者必须一致，否则 UI 提示和 anti-downgrade 会冲突",
+				current, target, offered, applied)
 		}
 	}
 }

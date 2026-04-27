@@ -850,6 +850,7 @@ func (e *Engine) RecoverWithOptions(
 
 		// 对深度扫描来源文件做即时验证，避免导出明显不可用的数据片段。
 		// 这里走 ValidateDeep 做权威判定——用户真要落盘的每一个文件都值得 10-50ms 的真解码。
+		var jpegRepair *validator.RepairOutcome // 非 nil 表示走了 partial 修复路径
 		if file.Source == "carver" {
 			verify := recoverValidator.ValidateDeep(file)
 			file.IsValid = verify.IsValid
@@ -857,20 +858,38 @@ func (e *Engine) RecoverWithOptions(
 			file.ValidationMsg = verify.Message
 
 			if !verify.IsValid {
-				// validator 判 invalid = 文件打不开 → "skipped" 而非 "failed"
-				skippedCount++
-				appendRecord(file, RecoveryStateSkipped, "", "校验失败: "+verify.Message, started)
-				logger.Info("跳过低可靠文件", "file", file.FileName, "reason", verify.Message)
-				safeProgress(types.RecoveryProgress{
-					Current:      successCount + partialCount + failedCount + skippedCount,
-					Total:        total,
-					CurrentFile:  file.FileName,
-					BytesWritten: bytesWritten,
-					Success:      successCount,
-					Partial:      partialCount,
-					Failed:       failedCount,
-				})
-				continue
+				// **JPEG 兜底**：ValidateDeep 失败但是 jpg/jpeg → 跑 DeepRepair
+				// 链路（边界修复 / DHT 注入 / RST stitching / partial decode）。
+				// 70% 中段损坏的 JPEG 这条路能救出可识别图像。
+				// R-Studio 同款 "deep recovery" 哲学：宁要 X% 像素也不丢全图。
+				if file.Extension == "jpg" || file.Extension == "jpeg" {
+					out := recoverValidator.RepairJPEGFromOffset(file)
+					if out.Repaired {
+						jpegRepair = &out
+						file.IsValid = true
+						file.Confidence = out.Coverage * 0.5 // 修复版置信度 ≤ 0.5
+						file.ValidationMsg = out.HumanReadable
+						logger.Info("JPEG 部分修复成功", "file", file.FileName,
+							"strategy", out.Strategy, "coverage", out.Coverage)
+						// 不 continue — 走下面的写入路径，但用 jpegRepair.RepairedBytes
+					}
+				}
+				if jpegRepair == nil {
+					// validator 判 invalid 且无救 = 文件打不开 → "skipped" 而非 "failed"
+					skippedCount++
+					appendRecord(file, RecoveryStateSkipped, "", "校验失败: "+verify.Message, started)
+					logger.Info("跳过低可靠文件", "file", file.FileName, "reason", verify.Message)
+					safeProgress(types.RecoveryProgress{
+						Current:      successCount + partialCount + failedCount + skippedCount,
+						Total:        total,
+						CurrentFile:  file.FileName,
+						BytesWritten: bytesWritten,
+						Success:      successCount,
+						Partial:      partialCount,
+						Failed:       failedCount,
+					})
+					continue
+				}
 			}
 		}
 
@@ -937,8 +956,14 @@ func (e *Engine) RecoverWithOptions(
 			// Android `.ab` 备份（Batch 4）：tar 流式提取（重扫流到目标 entry）
 			writeErr = e.recoverAndroidFile(file, outputPath)
 		default:
-			// Carver 来源: 直接偏移读取
-			writeErr = writer.WriteFile(file, outputPath)
+			// Carver 来源
+			if jpegRepair != nil {
+				// 走 JPEG 修复路径：写修复后的 bytes（不读原 offset）
+				writeErr = os.WriteFile(outputPath, jpegRepair.RepairedBytes, 0o644) // #nosec G306
+			} else {
+				// 直接偏移读取
+				writeErr = writer.WriteFile(file, outputPath)
+			}
 		}
 
 		// 写入成功后做跨源 SHA-256 去重：同 hash 已落地过则删掉当前副本
@@ -969,14 +994,26 @@ func (e *Engine) RecoverWithOptions(
 		var partialErr *PartialWriteError
 		switch {
 		case writeErr == nil:
-			successCount++
-			bytesWritten += file.Size
-			// 输出路径含 _low_confidence 子目录 = validator 标低可靠（走 writer.GenerateOutputPath 规则）
-			if strings.Contains(outputPath, "_low_confidence") {
-				lowConfCount++
+			// JPEG 修复路径：标 Partial 而不是 Success（用户/manifest 可见这是部分恢复）
+			if jpegRepair != nil {
+				partialCount++
+				bytesWritten += int64(len(jpegRepair.RepairedBytes))
+				appendRecord(file, RecoveryStatePartial, outputPath,
+					fmt.Sprintf("[JPEG 部分恢复 %.0f%% via %s] %s",
+						jpegRepair.Coverage*100, jpegRepair.Strategy, jpegRepair.HumanReadable),
+					started)
+				logger.Info("JPEG 部分恢复落盘", "file", file.FileName, "output", outputPath,
+					"strategy", jpegRepair.Strategy, "coverage", jpegRepair.Coverage)
+			} else {
+				successCount++
+				bytesWritten += file.Size
+				// 输出路径含 _low_confidence 子目录 = validator 标低可靠（走 writer.GenerateOutputPath 规则）
+				if strings.Contains(outputPath, "_low_confidence") {
+					lowConfCount++
+				}
+				appendRecord(file, RecoveryStateSuccess, outputPath, "", started)
+				logger.Info("恢复文件成功", "file", file.FileName, "output", outputPath)
 			}
-			appendRecord(file, RecoveryStateSuccess, outputPath, "", started)
-			logger.Info("恢复文件成功", "file", file.FileName, "output", outputPath)
 		case errors.As(writeErr, &partialErr):
 			// 严格模式：部分恢复视为失败，删除不完整输出，避免导出不可用文件
 			if rmErr := os.Remove(partialErr.OutputPath); rmErr != nil {
