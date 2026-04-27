@@ -322,6 +322,138 @@ export const IconChevronUpDown = (p: IconProps) =>
     </>,
   );
 
+/* ============================================================
+   v2.8.2 新增 —— 替代 UI 里散落的 emoji。
+   ============================================================ */
+
+// 主题切换 ----------------------------------------------------
+// IconSunMoon —— "跟随系统" 用，半边日半边月
+export const IconSunMoon = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 8a4 4 0 0 0 0 8" fill="currentColor" />
+      <line x1="12" y1="2" x2="12" y2="4" />
+      <line x1="12" y1="20" x2="12" y2="22" />
+      <line x1="4" y1="12" x2="2" y2="12" />
+      <line x1="22" y1="12" x2="20" y2="12" />
+      <line x1="5.6" y1="5.6" x2="4.2" y2="4.2" />
+      <line x1="19.8" y1="19.8" x2="18.4" y2="18.4" />
+      <line x1="5.6" y1="18.4" x2="4.2" y2="19.8" />
+      <line x1="19.8" y1="4.2" x2="18.4" y2="5.6" />
+    </>,
+  );
+
+export const IconSun = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <line x1="12" y1="2" x2="12" y2="4" />
+      <line x1="12" y1="20" x2="12" y2="22" />
+      <line x1="4" y1="12" x2="2" y2="12" />
+      <line x1="22" y1="12" x2="20" y2="12" />
+      <line x1="5.6" y1="5.6" x2="4.2" y2="4.2" />
+      <line x1="19.8" y1="19.8" x2="18.4" y2="18.4" />
+      <line x1="5.6" y1="18.4" x2="4.2" y2="19.8" />
+      <line x1="19.8" y1="4.2" x2="18.4" y2="5.6" />
+    </>,
+  );
+
+export const IconMoon = (p: IconProps) =>
+  I(p, <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />);
+
+export const IconClock = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 15 14" />
+    </>,
+  );
+
+// 状态 / 动作 -------------------------------------------------
+export const IconXCircle = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <line x1="9" y1="9" x2="15" y2="15" />
+      <line x1="15" y1="9" x2="9" y2="15" />
+    </>,
+  );
+
+export const IconLock = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 1 1 8 0v4" />
+    </>,
+  );
+
+export const IconLockOpen = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0" />
+    </>,
+  );
+
+export const IconLightbulb = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+      <path d="M12 2a7 7 0 0 0-4 12.7c1 .9 1 1.5 1 2.3v1h6v-1c0-.8 0-1.4 1-2.3A7 7 0 0 0 12 2z" />
+    </>,
+  );
+
+// 平台 logo --------------------------------------------------
+// 简化形 —— 不画真实 logo，只是大致辨识 OS / FS 类型
+export const IconApple = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <path d="M16 12c0-2 1.5-3.5 3-3.5-1-1.5-2.5-2.5-4-2.5-1.5 0-2.5 1-3 1-.5 0-1.5-1-3-1-2 0-4 1.5-4 4.5 0 3.5 2.5 8.5 4.5 8.5 1 0 1.5-.7 2.5-.7s1.5.7 2.5.7c1 0 2-1 2.7-2.4-1.5-.7-2.2-2.5-2.2-4.6z" fill="currentColor" stroke="none"/>
+      <path d="M13 4c.5-1 1.5-2 2.5-2-.2 1-1 2-2.5 2z" fill="currentColor" stroke="none"/>
+    </>,
+  );
+
+export const IconWindows = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <rect x="3" y="4" width="8" height="8" />
+      <rect x="13" y="4" width="8" height="8" />
+      <rect x="3" y="14" width="8" height="8" />
+      <rect x="13" y="14" width="8" height="8" />
+    </>,
+  );
+
+export const IconBox = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+      <path d="M3 8v8l9 5 9-5V8" />
+      <line x1="12" y1="13" x2="12" y2="21" />
+    </>,
+  );
+
+export const IconGlobe = (p: IconProps) =>
+  I(
+    p,
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z" />
+    </>,
+  );
+
 type IconComponent = (props: IconProps) => JSX.Element;
 
 const categoryIcons: Record<string, IconComponent> = {

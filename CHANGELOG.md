@@ -4,6 +4,207 @@
 
 ---
 
+## v2.8.0 (2026-04-27)
+
+**UI 现代化重做 + 跟随时间自动主题切换 + Material 风格 `<Select>`**
+
+### 用户反馈
+
+> 样式 UI 极丑，必须重新设计，按照根据电脑时间的模式切换，
+> 有暗黑模式和光照模式。对比要采用现代 UI 设计的思路来设计和处理。
+
+WelcomePage 截图：light mode 是冷灰底色 + 扁平蓝按钮 + Win95 灰边框
+卡片 + 单层重阴影 ——「管理后台/扫描工具」气质，缺少现代 SaaS 桌面应用
+应该有的层次感和精致度。
+
+### Changed — design tokens 整体重做（`frontend/src/style.css`）
+
+**Light mode**：
+- 背景：冷灰 `#f5f7fa` → 暖白 `#f6f8fc` + 顶部 1200×600 径向 accent 高光（`--bg-base-gradient`）
+- 主 accent：呆板深蓝 `#2266dd` → 现代靛蓝 `#3563e3`，加 135° 紫蓝渐变 `--accent-gradient`
+- 阴影：单层 `0 4px 16px rgba(...)` → **三层叠加**（顶部 inset 高光 + 中距柔光 + 远距阴影），
+  阴影颜色用蓝色温（`rgba(20, 32, 56, ...)`）替代死黑
+
+**Dark mode**：
+- 背景：纯黑 `#0b0f14` → 略偏蓝 `#0a0e15` + 顶部 accent 径向高光，避免「廉价 OLED 死黑」
+- 主 accent：`#4f9eff` → 略提饱和的 `#5aa3ff`，夜里更"亮"
+- 阴影同样改成多层叠加，加 inset 顶部高光
+
+**新 tokens**：
+- `--bg-base-gradient` —— body 背景用，固定 attached 不滚动
+- `--accent-gradient` —— primary 按钮 / drive-card hover 装饰带 / 标题
+- `--shadow-glow` —— card 选中态用，accent 色光晕替代单纯升高
+
+### Changed — 组件现代化
+
+- **`.btn--primary`**：单色背景 → accent 渐变 + 三层阴影（带 accent 色光圈），hover 时升 1px
+- **`.card--hover`**：hover 时 transform translateY(-2px) + shadow-md 升起
+- **`.card--selected`**：用新 `--shadow-glow` 替代单纯换底色
+- **`.banner`**：加 `box-shadow: var(--shadow-sm)`，padding 12→14
+- **`.drive-card`**：
+  - 加顶部 2px accent 渐变高光带（hover 60% / selected 100% 显示）
+  - icon 容器 hover 时 `scale(1.05)` + 切 accent 软背景
+  - 整卡 hover 升 2px
+- **`.app-topbar`**：backdrop-filter 加 `saturate(140%)`，让背景虚化更"通透"
+- **`.page__title`**：22px → 28px，应用 `--accent-gradient` + `background-clip: text` 让主标题"上色"
+
+### Added — `theme.ts` 新增 `auto-time` 模式
+
+新 Theme value `"auto-time"`：
+- 06:00–18:00 → light（白天高对比度，视觉清醒）
+- 18:00–06:00 → dark（夜里护眼）
+- 每 60s 重新评估一次，用户在 17:59 → 18:00 自动跟着切换
+- 切到非 `auto-time` 时自动清掉 timer，无内存泄漏
+
+为啥要：`system` 模式依赖 OS 是否设了"日落黑模式"，老 macOS / Linux 桌面环境不一定支持；
+`auto-time` 走应用自己的时钟，对所有平台一致工作。
+
+### Added — `ThemeSwitcher` 新增 "🕐 跟随时间" 选项
+
+下拉菜单顺序：跟随系统 / **跟随时间** / 深色 / 浅色。
+
+### Added — Material 风格 `<Select>` 组件（`frontend/src/components/Select.tsx`）
+
+用户反馈："现在的 select 要参考 Material UI 的设计思想来设计"。
+
+原 `<ThemeSwitcher>` / `<LocaleSwitcher>` 用的是原生 `<select>`，macOS 上灰扑扑老气、
+Windows 上又是另一套 OS 风格 —— 跨平台不统一，且无法放图标 / 副标题 / 选中标记。
+
+新组件特性（参考 MUI Filled / Outlined Select）：
+- **触发器**：胶囊形（filled / ghost 双变体），右侧 `IconChevronDown`，打开时旋转 180° 染 accent 色
+- **浮层**：popover 形（`shadow-lg` + 圆角），slide-down 动画 140ms，按屏幕剩余空间自动 top/bottom
+- **每项**：左 emoji icon / 中 label + hint 副标题 / 右选中态 `IconCheck`
+- **选中态**：左侧 3px accent 条 + accent 文字色 + 右侧 check
+- **键盘可达**：Esc 关 / ↑↓ 在选项间跳 / Enter 提交 / Tab 离开关闭
+- **点击外部自动关闭**
+
+ThemeSwitcher 的 4 个选项现在带"副标题":
+| 主题 | 副标题 |
+| --- | --- |
+| 跟随系统 | 由 macOS / Windows 当前主题决定 |
+| 跟随时间 | 白天浅色 (6–18)，夜里深色 |
+| 深色     | 始终保持暗色 |
+| 浅色     | 始终保持亮色 |
+
+LocaleSwitcher 也用 emoji 旗（🇨🇳 / 🇺🇸）替代纯文字，一眼可识别。
+
+### Added — 原生 `<select>` 兜底美化
+
+`MobileToolsModals.tsx` 等表单里的原生 `<select>`（共 4 处）短期内不换组件成本较高
+（option 列表是动态的：网卡 / 设备 / 配置文件），但通过 CSS 美化保证至少不再像
+1995 年的灰扑扑系统下拉：
+- `appearance: none` 抹平浏览器默认样式
+- 用 inline SVG `data:` URI 在右侧绘自己的 chevron（light / dark 两套色）
+- 触发器底色 / 边框继承 `.input` token
+
+### Changed — emoji → SVG 图标全面替换
+
+用户反馈："现在很多 icon 都是 emoji 而不是 react-icons 的来代替"。
+
+emoji 在不同 OS 上渲染差异巨大（Apple Color Emoji vs Segoe UI Emoji vs Noto Color Emoji），
+跨平台不一致；color 不能用 currentColor 染；尺寸不可控；屏幕阅读器读法各异。
+
+**新增 SVG icons**（`frontend/src/icons.tsx`，沿用现有的 `currentColor` + 1.75 stroke 风格）：
+- 主题：`IconSunMoon` / `IconSun` / `IconMoon` / `IconClock`
+- 安全：`IconLock` / `IconLockOpen`
+- 状态：`IconXCircle`（IconX / IconCheck / IconAlertTriangle 已存在）
+- 平台：`IconApple` / `IconWindows` / `IconBox`（HFS+ / ReFS / APFS 卷类型用）
+- 通用：`IconLightbulb` / `IconGlobe`（提示文 / 语言切换）
+
+**替换点**：
+| 文件 | 之前 | 之后 |
+| --- | --- | --- |
+| `App.tsx` ThemeSwitcher | 🌗 🕐 🌙 ☀️ | `IconSunMoon` / `IconClock` / `IconMoon` / `IconSun` |
+| `App.tsx` LocaleSwitcher | 🇨🇳 🇺🇸 | `IconGlobe`（"语言"概念全球通用，不绑定单一国家） |
+| `WelcomePage.tsx` 加密卷类型 | 🔒 🍎 🍏 🪟 📦 | `IconLock` / `IconApple` / `IconWindows` / `IconBox`（带 warning 软色背景框） |
+| `WelcomePage.tsx` BitLocker modal title | 🔒 解锁 BitLocker 卷 | `<IconLock>` + 标题 |
+| `WelcomePage.tsx` "也可以从其他来源恢复" 提示 | 💡 | `IconLightbulb` |
+| `WelcomePage.tsx` pendingSession warning | ⚠️ | `IconAlertTriangle` + 行内布局 |
+| `WelcomePage.tsx` BitLocker 保护器列表 | ✅ ⚠️ | `IconCheck` / `IconAlertTriangle` |
+| `RecoveryPage.tsx` 进度统计 | ✓ ⚠ ✗ | `IconCheck` / `IconAlertTriangle` / `IconX` |
+| `RecoveryPage.tsx` stat-card 标签 | ✓ ⚠ ◑ ⊘ ✗ | 全部对应 SVG icon |
+| `ConfidenceBadge.tsx` | ✓ / ⚠ 文字前缀 | `<IconCheck>` / `<IconAlertTriangle>` 元素 |
+
+`stat-card__label` CSS 改为 inline-flex 让 icon 与文字基线对齐。
+
+### Fixed — 文字折行问题
+
+用户反馈："文字老有折行，文字有一个最大宽度，尽可能不要折行，过长就用 tooltip"。
+
+- `.drive-card__name` / `.drive-card__path`: **`word-break: break-all` → ellipsis + tooltip**
+  - 老规则把中文方块字硬拆（"我的-桌面" → "我的-/n桌面"）—— 极丑
+  - 改成 `overflow: hidden; text-overflow: ellipsis; white-space: nowrap;` + JSX 加 `title=`
+- `WelcomePage` QuickCard 标题 / desc: 加 `.ellipsis` + `title=` 兜底
+- `WelcomePage` 加密卷列表: 三层文字（kindLabel / location / note）全部 ellipsis + title
+- `WelcomePage` BitLocker 保护器 hint: ellipsis + title
+- 全局 `body { word-break: break-word; overflow-wrap: anywhere; }` —— 替代 break-all，CJK 友好
+- 新 utility `.line-clamp-2` / `.line-clamp-3`: WebKit line-clamp，多行优雅截断
+- `.select-trigger__label` 加 `max-width: 160px` —— 长 label 在 trigger 里 ellipsis 而非撑爆
+
+### Changed — visual polish
+
+- `.page__body` / `.page__header` 限宽 1400px 居中 —— 超宽屏（4K / ultrawide）下卡片 / banner 不被拉到撑满
+- `.app-topbar` 加 `gap: var(--space-4)` 防 brand / flow / actions 挤到一起；新加 `box-shadow: 0 1px 0 var(--border), 0 4px 12px -8px rgba(0, 0, 0, 0.12)` 让 stage 与 topbar 之间多一层 separator
+- `.app-brand__mark` 32px → 36px，背景从 `accent-soft` 换成 **accent gradient**（白色图标），加 inset 高光 + 外发光阴影 —— 像现代 SaaS 的 brand 元素
+- `.flow-track` 加 `flex-wrap: nowrap; overflow: hidden` —— 中间步骤指示器不会被挤换行
+- 加 inline-flex stat-card label 让 icon 与文字基线一致
+
+### Added — typography 对比增强
+
+新 utility classes：
+- `.text-strong` —— bg 色文字 + semibold + tighter letter-spacing
+- `.text-emphasis` —— 数据/状态值用，加 tabular-nums 防数字宽度跳动
+- `.text-accent-gradient` —— 关键词上 accent 渐变 + background-clip: text
+
+H1/H2/H3 加了对应的 size（`--text-3xl` / `--text-2xl` / `--text-xl`）+ tighter letter-spacing
+（中文标题用 negative letter-spacing 视觉更紧凑）。
+
+`.banner__title` 字号从 inherit 14 → `--text-md`（14）但 weight `600` → `--weight-semibold`，
+margin-bottom 2→4，line-height 显式 1.35。
+
+`.drive-card__name` 14px → `--text-lg` (15px) + tighter spacing。
+`.drive-card__meta dd` 加 `font-variant-numeric: tabular-nums`，"容量"列对齐更整齐。
+
+### Changed — `WelcomePage` DEV 占位卡专用样式
+
+之前 `[DEV-MODE] 物理盘枚举已跳过` 走通用 `DriveCard` 渲染：
+0 字节、空路径、tag 显示"逻辑盘" —— 看着像 bug。
+
+现在专用 `<DriveCard>` 分支 + `.drive-card--placeholder` CSS：
+- 虚线边框 + warning-soft 渐变背景
+- icon 改成 `IconAlertTriangle` + warning 色
+- 不可点击（`cursor: default`），hover 不动
+- 副标题改写："避免每次启动都触发 macOS 权限框"
+- 提示文案直接给修复指令：`make dev-elevated`
+
+### Backwards compatibility
+
+- 已存的 `data-recovery.theme` localStorage 值兼容（`system` / `dark` / `light` 不变）；
+  新加的 `auto-time` 不破坏老用户
+- 旧 CSS variables 全部保留，只是色值微调；外部组件无须改动
+
+### Files
+
+- 新增：`frontend/src/components/Select.tsx`（Material 风格下拉，约 200 行，0 dep）
+- 修改：`frontend/src/icons.tsx`（+13 个 SVG icon：IconSunMoon / IconSun / IconMoon / IconClock / IconLock / IconLockOpen / IconLightbulb / IconApple / IconWindows / IconBox / IconGlobe / IconXCircle）
+- 修改：`frontend/src/style.css`（tokens + button + card + drive-card + topbar + brand mark + Select + 原生 select 美化 + page max-width + line-clamp utility + stat-card label flex + body word-break）
+- 修改：`frontend/src/theme.ts`（加 `auto-time` 模式 + 60s tick）
+- 修改：`frontend/src/App.tsx`（ThemeSwitcher / LocaleSwitcher 改用 `<Select>` + SVG icons）
+- 修改：`frontend/src/components/WelcomePage.tsx`（DEV 占位卡专用渲染 / 加密卷列表 SVG 化 / BitLocker modal SVG 化 / 全部 emoji 替换 / 多处 ellipsis + title）
+- 修改：`frontend/src/components/RecoveryPage.tsx`（进度行 + stat-card 全部 SVG 化）
+- 修改：`frontend/src/components/ConfidenceBadge.tsx`（IconCheck / IconAlertTriangle 替代 ✓ ⚠ 字符）
+
+### Verify
+
+```bash
+cd frontend && pnpm build
+# ✓ built in ~430ms
+go vet ./...
+# ✓ no warnings
+```
+
+---
+
 ## v2.7.2 (2026-04-27)
 
 **修 macOS `make dev` 每次都弹权限框** —— DEV 模式 + Info.plist 文案 + 自检脚本

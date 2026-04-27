@@ -12,6 +12,12 @@ import {
   IconCamera,
   IconServer,
   IconGripVertical,
+  IconLock,
+  IconLightbulb,
+  IconApple,
+  IconWindows,
+  IconBox,
+  IconCheck,
 } from "../icons";
 import { formatSize } from "../formatters";
 import { t, onLocaleChange } from "../i18n";
@@ -41,21 +47,22 @@ function QuickCard({ Icon, title, desc, onClick, draggable, onDragStart, onDragO
         display: "flex",
         alignItems: "center",
         gap: "var(--space-3)",
-        transition: "all 150ms cubic-bezier(.4,0,.2,1)",
+        transition: "all 180ms cubic-bezier(.4,0,.2,1)",
         opacity: isDragging ? 0.4 : 1,
         userSelect: "none",
+        boxShadow: "var(--shadow-sm)",
       }}
       onMouseEnter={(e) => {
         if (isDragging) return;
         e.currentTarget.style.borderColor = "var(--accent-border)";
-        e.currentTarget.style.transform = "translateY(-1px)";
+        e.currentTarget.style.transform = "translateY(-2px)";
         e.currentTarget.style.boxShadow = "var(--shadow-md)";
       }}
       onMouseLeave={(e) => {
         if (isDragging) return;
         e.currentTarget.style.borderColor = isDragOver ? "var(--accent)" : "var(--border)";
         e.currentTarget.style.transform = "translateY(0)";
-        e.currentTarget.style.boxShadow = "none";
+        e.currentTarget.style.boxShadow = "var(--shadow-sm)";
       }}
     >
       {/* 拖拽手柄默认就显示（不再 hover 才出），让用户一眼就知道可拖 */}
@@ -76,8 +83,8 @@ function QuickCard({ Icon, title, desc, onClick, draggable, onDragStart, onDragO
       )}
       {/* SVG icon 在 accent 圆角方块里 — 替代 emoji，统一笔画风格 */}
       <div style={{
-        width: 36,
-        height: 36,
+        width: 38,
+        height: 38,
         borderRadius: "var(--radius-md)",
         background: "var(--accent-soft)",
         color: "var(--accent)",
@@ -85,12 +92,21 @@ function QuickCard({ Icon, title, desc, onClick, draggable, onDragStart, onDragO
         alignItems: "center",
         justifyContent: "center",
         flex: "none",
+        border: "1px solid var(--accent-border)",
       }}>
         {Icon ? <Icon size={20} /> : null}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: "var(--weight-medium)", fontSize: "var(--text-base)", marginBottom: 2 }}>{title}</div>
-        <div className="muted" style={{ fontSize: "var(--text-xs)" }}>{desc}</div>
+        <div
+          className="ellipsis"
+          style={{ fontWeight: "var(--weight-semibold)", fontSize: "var(--text-base)", marginBottom: 2, letterSpacing: "-0.005em" }}
+          title={title}
+        >
+          {title}
+        </div>
+        <div className="muted ellipsis" style={{ fontSize: "var(--text-xs)" }} title={desc}>
+          {desc}
+        </div>
       </div>
     </div>
   );
@@ -263,9 +279,12 @@ export default function WelcomePage({
                 目前已收集 {(pendingSession.files?.length || 0).toLocaleString()} 个文件（
                 {formatSize(pendingSession.progress?.bytesScanned || 0)} 已扫描）。
                 <br />
-                <span style={{ opacity: 0.8 }}>
-                  ⚠️ 如果上次因卡死被强关，请先 <b>丢弃</b> 旧会话后再重新扫描；
-                  恢复旧会话只会加载旧文件列表，不会重新扫描。
+                <span style={{ display: "inline-flex", alignItems: "flex-start", gap: 6, marginTop: 4, opacity: 0.85 }}>
+                  <IconAlertTriangle size={13} style={{ color: "var(--warning)", flex: "none", marginTop: 3 }} />
+                  <span>
+                    如果上次因卡死被强关，请先 <b>丢弃</b> 旧会话后再重新扫描；
+                    恢复旧会话只会加载旧文件列表，不会重新扫描。
+                  </span>
                 </span>
               </div>
             </div>
@@ -305,8 +324,23 @@ export default function WelcomePage({
         {/* ============== 快速入口卡片（v2.5.0 新 / v2.5.1 加拖拽重排） ============== */}
         {onOpenMobileModal && (
           <div>
-            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-              💡 也可以从其他来源恢复（不一定是本机磁盘）—— 拖拽重排卡片顺序：
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "var(--space-2)",
+                fontSize: "var(--text-sm)",
+                fontWeight: "var(--weight-medium)",
+                color: "var(--text)",
+                marginBottom: 10,
+                paddingLeft: 2,
+              }}
+            >
+              <IconLightbulb size={14} style={{ color: "var(--accent)", flex: "none" }} />
+              <span>也可以从其他来源恢复</span>
+              <span className="muted" style={{ fontWeight: "var(--weight-normal)" }}>
+                · 拖拽重排卡片顺序
+              </span>
             </div>
             <QuickCardsGrid
               cards={[
@@ -382,38 +416,61 @@ export default function WelcomePage({
               <span className="mono"> dislocker</span>（BitLocker，开源）/ R-Studio / 苹果 Recovery 工具（FileVault）。
             </div>
             <div className="flex-col gap-2">
-              {encryptedVolumes.map((v, i) => (
-                <div
-                  key={`${v.drivePath}-${v.offset}-${i}`}
-                  className="card"
-                  style={{ padding: "8px 12px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600 }}>
-                      {v.kind === "bitlocker" ? "🔒 BitLocker" :
-                       v.kind === "filevault" ? "🍎 FileVault" :
-                       v.kind === "hfsplus" ? "🍏 HFS+" :
-                       v.kind === "refs" ? "🪟 ReFS" :
-                       "📦 APFS 卷"}
-                      {v.name ? ` · ${v.name}` : ""}
+              {encryptedVolumes.map((v, i) => {
+                const KindIcon =
+                  v.kind === "bitlocker" ? IconLock :
+                  v.kind === "filevault" ? IconLock :
+                  v.kind === "hfsplus"   ? IconApple :
+                  v.kind === "refs"      ? IconWindows :
+                                           IconBox;
+                const kindLabel =
+                  v.kind === "bitlocker" ? "BitLocker" :
+                  v.kind === "filevault" ? "FileVault" :
+                  v.kind === "hfsplus"   ? "HFS+" :
+                  v.kind === "refs"      ? "ReFS" :
+                                           "APFS 卷";
+                const locationLine = `${v.drivePath} @ 0x${Number(v.offset || 0).toString(16)}${v.uuid ? ` · UUID ${v.uuid}` : ""}`;
+                return (
+                  <div
+                    key={`${v.drivePath}-${v.offset}-${i}`}
+                    className="card"
+                    style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 10 }}>
+                      <div style={{
+                        flex: "none",
+                        width: 28,
+                        height: 28,
+                        display: "grid",
+                        placeItems: "center",
+                        borderRadius: "var(--radius-sm)",
+                        background: "var(--warning-soft)",
+                        color: "var(--warning)",
+                      }}>
+                        <KindIcon size={16} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="ellipsis" style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)" }} title={`${kindLabel}${v.name ? ` · ${v.name}` : ""}`}>
+                          {kindLabel}{v.name ? <span className="muted" style={{ fontWeight: "var(--weight-normal)" }}> · {v.name}</span> : null}
+                        </div>
+                        <div className="muted ellipsis" style={{ fontSize: "var(--text-xs)" }} title={locationLine}>
+                          {locationLine}
+                        </div>
+                        <div className="muted ellipsis" style={{ fontSize: "var(--text-xs)", marginTop: 2 }} title={v.note}>{v.note}</div>
+                      </div>
                     </div>
-                    <div className="muted" style={{ fontSize: 11, wordBreak: "break-all" }}>
-                      {v.drivePath} @ 0x{Number(v.offset || 0).toString(16)}
-                      {v.uuid ? ` · UUID ${v.uuid}` : ""}
-                    </div>
-                    <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{v.note}</div>
+                    {v.kind === "bitlocker" && typeof onUnlockBitLocker === "function" && (
+                      <button
+                        className="btn btn--sm btn--primary"
+                        onClick={() => setUnlockingVolume(v)}
+                        title="输入 48 位 recovery key，本工具将在内存中透明解密后直接扫描卷"
+                      >
+                        <IconLock size={14} /> 解锁并扫描
+                      </button>
+                    )}
                   </div>
-                  {v.kind === "bitlocker" && typeof onUnlockBitLocker === "function" && (
-                    <button
-                      className="btn btn--sm btn--primary"
-                      onClick={() => setUnlockingVolume(v)}
-                      title="输入 48 位 recovery key，本工具将在内存中透明解密后直接扫描卷"
-                    >
-                      解锁并扫描
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -560,7 +617,10 @@ function BitLockerUnlockModal({ volume, wailsApp, onCancel, onSubmit }) {
         onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: 600, width: "92%", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}
       >
-        <div style={{ fontSize: 16, fontWeight: 600 }}>🔒 解锁 BitLocker 卷</div>
+        <div style={{ fontSize: "var(--text-xl)", fontWeight: "var(--weight-semibold)", display: "flex", alignItems: "center", gap: 10, letterSpacing: "-0.01em" }}>
+          <IconLock size={20} style={{ color: "var(--accent)" }} />
+          解锁 BitLocker 卷
+        </div>
 
         <div style={{ display: "flex", gap: 6 }}>
           <button style={tabBtn(mode === "recovery")} onClick={() => setMode("recovery")}>Recovery Key</button>
@@ -583,8 +643,12 @@ function BitLockerUnlockModal({ volume, wailsApp, onCancel, onSubmit }) {
           }}>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>卷上配置的保护器：</div>
             {protectors.map((p, i) => (
-              <div key={i} style={{ marginTop: 2 }}>
-                {p.solvable ? "✅" : "⚠️"} <b>{p.kind}</b> — <span className="muted">{p.hint}</span>
+              <div key={i} style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                {p.solvable
+                  ? <IconCheck size={14} style={{ color: "var(--success)", flex: "none" }} />
+                  : <IconAlertTriangle size={14} style={{ color: "var(--warning)", flex: "none" }} />}
+                <b>{p.kind}</b>
+                <span className="muted ellipsis" style={{ minWidth: 0 }} title={p.hint}>— {p.hint}</span>
               </div>
             ))}
           </div>
@@ -671,6 +735,30 @@ function BitLockerUnlockModal({ volume, wailsApp, onCancel, onSubmit }) {
 }
 
 function DriveCard({ drive, selected, onSelect }) {
+  // v2.7.2 起 macOS dev 模式会返回一个 driveType=dev-placeholder 的占位卡 ——
+  // 不可点、特殊样式，让用户一眼看出"这是 dev 跳过的提示"，而不是把它当成 0 字节的真盘。
+  if (drive.driveType === "dev-placeholder") {
+    return (
+      <div className="card drive-card drive-card--placeholder" aria-disabled="true">
+        <div className="drive-card__head">
+          <div className="drive-card__icon" style={{ background: "var(--warning-soft)", color: "var(--warning)" }}>
+            <IconAlertTriangle size={20} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="drive-card__name">DEV 模式：物理盘枚举已跳过</div>
+            <div className="drive-card__path" style={{ fontFamily: "var(--font-sans)" }}>
+              避免每次启动都触发 macOS 权限框
+            </div>
+          </div>
+        </div>
+        <div className="muted" style={{ fontSize: "var(--text-xs)", lineHeight: 1.6 }}>
+          要测真物理盘扫描，请用 <span className="mono">make dev-elevated</span>（要 sudo 密码）。
+          日常开发拖入 <span className="mono">.img</span> 镜像文件就够了。
+        </div>
+      </div>
+    );
+  }
+
   const Icon = drive.isRemovable ? IconUsb : IconHardDrive;
   return (
     <div
@@ -693,7 +781,7 @@ function DriveCard({ drive, selected, onSelect }) {
           <div className="drive-card__name" title={drive.name || drive.path}>
             {drive.name || drive.path}
           </div>
-          <div className="drive-card__path">{drive.path}</div>
+          <div className="drive-card__path" title={drive.path}>{drive.path}</div>
         </div>
       </div>
 

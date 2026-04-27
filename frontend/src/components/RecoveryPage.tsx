@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import {
   IconAlertTriangle,
   IconArrowLeft,
+  IconCheck,
   IconCheckCircle,
   IconDownload,
   IconFolderOpen,
@@ -124,11 +125,20 @@ export default function RecoveryPage({
                 {percent.toFixed(1)}%
               </div>
             </div>
-            <div className="flex items-center gap-3" style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)", flexWrap: "wrap" }}>
-              <span>✓ 成功 <b style={{ color: "var(--success)" }}>{progress?.success ?? 0}</b></span>
-              <span>⚠ 部分 <b style={{ color: "var(--warning)" }}>{progress?.partial ?? 0}</b></span>
-              <span>✗ 失败 <b style={{ color: "var(--danger)" }}>{progress?.failed ?? 0}</b></span>
-              <span>已写入 <b>{formatSize(progress?.bytesWritten || 0)}</b></span>
+            <div className="flex items-center gap-4" style={{ marginTop: 12, fontSize: "var(--text-sm)", color: "var(--text-muted)", flexWrap: "wrap" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <IconCheck size={13} style={{ color: "var(--success)" }} />
+                成功 <b style={{ color: "var(--success)", fontVariantNumeric: "tabular-nums" }}>{progress?.success ?? 0}</b>
+              </span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <IconAlertTriangle size={13} style={{ color: "var(--warning)" }} />
+                部分 <b style={{ color: "var(--warning)", fontVariantNumeric: "tabular-nums" }}>{progress?.partial ?? 0}</b>
+              </span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <IconX size={13} style={{ color: "var(--danger)" }} />
+                失败 <b style={{ color: "var(--danger)", fontVariantNumeric: "tabular-nums" }}>{progress?.failed ?? 0}</b>
+              </span>
+              <span>已写入 <b style={{ fontVariantNumeric: "tabular-nums" }}>{formatSize(progress?.bytesWritten || 0)}</b></span>
             </div>
             {progress?.currentFile && (
               <div
@@ -160,27 +170,27 @@ export default function RecoveryPage({
       <div className="page__body flex-col gap-3">
         <div className="report-summary">
           <div className="stat-card stat-card--success">
-            <div className="stat-card__label">✓ 高可靠</div>
+            <div className="stat-card__label"><IconCheck size={14} /> 高可靠</div>
             <div className="stat-card__value">{counts.highConfidence.toLocaleString()}</div>
             <div className="stat-card__hint">能正常打开（真实解码验证通过）</div>
           </div>
           <div className={`stat-card ${counts.lowConfidence > 0 ? "stat-card--warning" : ""}`}>
-            <div className="stat-card__label">⚠ 低可靠</div>
+            <div className="stat-card__label"><IconAlertTriangle size={14} /> 低可靠</div>
             <div className="stat-card__value">{counts.lowConfidence.toLocaleString()}</div>
             <div className="stat-card__hint">已归到 _low_confidence/，可能打不开</div>
           </div>
           <div className={`stat-card ${counts.partial > 0 ? "stat-card--warning" : ""}`}>
-            <div className="stat-card__label">◑ 部分恢复</div>
+            <div className="stat-card__label"><IconAlertTriangle size={14} /> 部分恢复</div>
             <div className="stat-card__value">{counts.partial.toLocaleString()}</div>
             <div className="stat-card__hint">大小不完整</div>
           </div>
           <div className={`stat-card ${counts.skipped > 0 ? "stat-card--muted" : ""}`}>
-            <div className="stat-card__label">⊘ 已拒绝</div>
+            <div className="stat-card__label"><IconX size={14} /> 已拒绝</div>
             <div className="stat-card__value">{counts.skipped.toLocaleString()}</div>
             <div className="stat-card__hint">validator 判废，未写盘</div>
           </div>
           <div className={`stat-card ${counts.failed > 0 ? "stat-card--danger" : ""}`}>
-            <div className="stat-card__label">✗ 失败</div>
+            <div className="stat-card__label"><IconX size={14} /> 失败</div>
             <div className="stat-card__value">{counts.failed.toLocaleString()}</div>
             <div className="stat-card__hint">读/写错误</div>
           </div>

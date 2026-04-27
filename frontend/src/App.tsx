@@ -9,6 +9,7 @@ import React, {
 import WelcomePage from "./components/WelcomePage";
 import Workbench from "./components/Workbench";
 import RecoveryPage from "./components/RecoveryPage";
+import Select from "./components/Select";
 import {
   CloudBackupsModal,
   NASScanModal,
@@ -27,7 +28,7 @@ import {
   mergeFileIntoIndex,
   normalizeRecoveryCompletion,
 } from "./recovery-helpers";
-import { IconAlertTriangle, IconShield } from "./icons";
+import { IconAlertTriangle, IconShield, IconSunMoon, IconSun, IconMoon, IconClock, IconGlobe } from "./icons";
 import { t, getLocale, setLocale, onLocaleChange, AVAILABLE_LOCALES } from "./i18n";
 import { getTheme, setTheme, onThemeChange, AVAILABLE_THEMES } from "./theme";
 import "./style.css";
@@ -1344,25 +1345,40 @@ function UpdateBanner({
 }
 
 /**
- * ThemeSwitcher —— 顶栏 light / dark / system 切换。
+ * ThemeSwitcher —— 顶栏 system / auto-time / dark / light 切换（v2.8.1 换用 Material 风格 <Select>）。
+ *
+ * 选项：
+ *   - 跟随系统  —— prefers-color-scheme，OS 设置说了算
+ *   - 跟随时间  —— 06-18 浅色 / 18-06 深色，跨平台一致
+ *   - 深色 / 浅色 —— 手动锁定
  */
 function ThemeSwitcher() {
   const [th, setTh] = React.useState(() => getTheme());
   React.useEffect(() => onThemeChange((v) => setTh(v)), []);
+  const META: Record<string, { label: string; Icon: React.ComponentType<any>; hint: string }> = {
+    system:      { label: "跟随系统", Icon: IconSunMoon, hint: "由 macOS / Windows 当前主题决定" },
+    "auto-time": { label: "跟随时间", Icon: IconClock,   hint: "白天浅色 (6–18)，夜里深色" },
+    dark:        { label: "深色",     Icon: IconMoon,    hint: "始终保持暗色" },
+    light:       { label: "浅色",     Icon: IconSun,     hint: "始终保持亮色" },
+  };
   return (
-    <select
+    <Select
       value={th}
-      onChange={(e) => setTheme(e.target.value)}
-      className="btn btn--sm btn--ghost"
-      style={{ paddingLeft: 6, paddingRight: 6 }}
+      onChange={(v) => setTheme(v as any)}
+      variant="ghost"
+      size="sm"
       title="主题 / Theme"
-    >
-      {AVAILABLE_THEMES.map((t) => (
-        <option key={t} value={t}>
-          {t === "system" ? "🌗 跟随系统" : t === "dark" ? "🌙 深色" : "☀️ 浅色"}
-        </option>
-      ))}
-    </select>
+      ariaLabel="切换主题"
+      options={AVAILABLE_THEMES.map((t) => {
+        const Icon = META[t]?.Icon;
+        return {
+          value: t,
+          icon: Icon ? <Icon size={15} /> : null,
+          label: META[t]?.label ?? t,
+          hint: META[t]?.hint,
+        };
+      })}
+    />
   );
 }
 
@@ -1373,18 +1389,25 @@ function ThemeSwitcher() {
 function LocaleSwitcher() {
   const [loc, setLoc] = React.useState(() => getLocale());
   React.useEffect(() => onLocaleChange((l) => setLoc(l)), []);
+  const META: Record<string, { label: string }> = {
+    zh: { label: "中文" },
+    en: { label: "English" },
+  };
   return (
-    <select
+    <Select
       value={loc}
-      onChange={(e) => setLocale(e.target.value)}
-      className="btn btn--sm btn--ghost"
-      style={{ paddingLeft: 6, paddingRight: 6 }}
+      onChange={(v) => setLocale(v)}
+      variant="ghost"
+      size="sm"
       title={loc === "zh" ? "切换语言" : "Switch language"}
-    >
-      {AVAILABLE_LOCALES.map((l) => (
-        <option key={l} value={l}>{l === "zh" ? "中文" : "English"}</option>
-      ))}
-    </select>
+      ariaLabel="Change language"
+      options={AVAILABLE_LOCALES.map((l) => ({
+        value: l,
+        // 用 IconGlobe 替代国旗 emoji ——"语言"概念全球通用，不绑定单一国家
+        icon: <IconGlobe size={15} />,
+        label: META[l]?.label ?? l,
+      }))}
+    />
   );
 }
 

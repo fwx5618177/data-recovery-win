@@ -1,5 +1,6 @@
 import React from "react";
 import { confidenceTier } from "../recovery-helpers";
+import { IconCheck, IconAlertTriangle } from "../icons";
 
 /**
  * ConfidenceBadge —— 4 档可视徽章，替代 FileTable 之前那条"87%"百分比条。
@@ -32,7 +33,8 @@ export default function ConfidenceBadge({ file, size = "sm" }) {
       }}
       title={`置信度 ${Math.round(Number(file?.confidence || 0) * 100)}% — ${tier.label}`}
     >
-      {tier.key === "high" ? "✓ " : tier.key === "low" ? "⚠ " : ""}
+      {tier.key === "high" ? <IconCheck size={size === "md" ? 13 : 11} /> : null}
+      {tier.key === "low"  ? <IconAlertTriangle size={size === "md" ? 13 : 11} /> : null}
       {tier.label}
     </span>
   );
