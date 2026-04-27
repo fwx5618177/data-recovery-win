@@ -1311,19 +1311,28 @@ export function TasksSidebar({
   onDismissHistory,
   onCancel,
 }: TasksSidebarProps) {
+  // **Hooks 必须全部在条件 return 之前调用** —— React Rules of Hooks。
+  // 历史 bug (v2.7.0)：在 `if (... && collapsed) return null` 后再调
+  // useReducer / useEffect → 用户点折叠按钮时 hook 数量从 3 变 1 → 白屏：
+  //   "Rendered fewer hooks than expected"
+  // 修复：所有 hooks 顶到函数最前；早返回之前不能再调任何 hook。
   const [tab, setTab] = React.useState<"active" | "history">("active");
+  const [, force] = React.useReducer((x: number) => x + 1, 0);
+
   const inflight = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   const histList = history || [];
-
-  if (inflight.length === 0 && histList.length === 0 && collapsed) return null;
+  const shouldHide = inflight.length === 0 && histList.length === 0 && collapsed;
 
   // 本地时钟刷新（让 elapsed 显示走起来；每秒 tick 一次）
-  const [, force] = React.useReducer((x) => x + 1, 0);
+  // 关键：useEffect 也必须在 early return 之前；折叠或隐藏时直接 return（cleanup OK）
   React.useEffect(() => {
-    if (collapsed || inflight.length === 0) return;
+    if (shouldHide || collapsed || inflight.length === 0) return;
     const id = setInterval(force, 1000);
     return () => clearInterval(id);
-  }, [collapsed, inflight.length]);
+  }, [shouldHide, collapsed, inflight.length]);
+
+  // 所有 hooks 调过了，现在可以条件渲染
+  if (shouldHide) return null;
 
   const list = tab === "active" ? inflight : histList;
 

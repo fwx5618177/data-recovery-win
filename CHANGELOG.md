@@ -4,6 +4,51 @@
 
 ---
 
+## v2.7.1 (2026-04-27)
+
+**Hotfix：TasksSidebar 折叠按钮点击后白屏** —— React Rules of Hooks 违规。
+
+### Fixed — `TasksSidebar` early return 在 hooks 之前
+
+用户截图复现：当左侧任务侧栏没有任务时点折叠箭头 → 白屏，控制台报：
+
+```
+Rendered fewer hooks than expected. This may be caused by an accidental
+early return statement.
+```
+
+**根因**：`MobileToolsModals.tsx:1318` 早期 `return null` 在 `useReducer` 和
+`useEffect` 之前：
+
+```tsx
+const [tab, setTab] = useState(...);
+const inflight = ...;
+if (inflight.length === 0 && histList.length === 0 && collapsed) return null;  // ← 早返回
+const [, force] = useReducer(...);  // ← hook 在 early return 之后
+useEffect(...);                     // ← hook 在 early return 之后
+```
+
+正常情况（有任务）：3 个 hooks 调用。
+折叠且无任务（用户截图情形）：1 个 hook（早返回）。
+React 比对前后 hook 数量不一致 → throw → 白屏。
+
+**修复**：所有 hooks 全部上提到函数最前；`if (shouldHide) return null` 放在
+所有 hook 调用之后。`useEffect` 内部用 `if (shouldHide || ...) return` 提前
+退出 setInterval（cleanup OK）。
+
+加注释明确说明这是 v2.7.0 的 regression，防止未来又踩。
+
+### 顺手扫了：其他 React 组件的早返回都在 hooks 之后 ✓
+
+`CacheStatsPanel` (line 46) / `RecoveryPage extractPartialPct` 都是 helper
+function 或 useState/useEffect 之后的 return，不违反 Rules of Hooks。
+
+### 工程指标
+- frontend `pnpm typecheck` 0 errors / `vite build` 通过
+- backend 未动
+
+---
+
 ## v2.7.0 (2026-04-27)
 
 **TypeScript 迁移 + 类型化 IPC + 顺手修了 5 个 TS 抓出来的真 bug + sortable 列指示器**
