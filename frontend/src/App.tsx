@@ -12,6 +12,7 @@ import RecoveryPage from "./components/RecoveryPage";
 import Select from "./components/Select";
 import ToastViewport from "./components/ToastViewport";
 import OCRSearchModal from "./components/OCRSearchModal";
+import MultiDiskScanModal from "./components/MultiDiskScanModal";
 import { toast } from "./toast";
 import {
   CloudBackupsModal,
@@ -1269,6 +1270,13 @@ export default function App() {
           onClose={() => setOpenMobileModal(null)}
         />
       )}
+      {openMobileModal === "multi-disk-scan" && (
+        <MultiDiskScanModal
+          wailsApp={wailsApp}
+          drives={drives}
+          onClose={() => setOpenMobileModal(null)}
+        />
+      )}
 
       {/* ============== 左侧 "今日任务" 侧栏（多任务并行 + 历史 tab + 取消） ============== */}
       <TasksSidebar
@@ -1761,10 +1769,8 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
             );
           })}
           {item("⚡ 多盘并行扫描", () => {
-            toast.info({
-              title: "多盘并行功能已就绪",
-              description: "从命令行 data-recovery-cli 或 API 调 ParallelScanDrives。",
-            });
+            setOpen(false);
+            onOpenMobileModal?.("multi-disk-scan");
           })}
           {item("📸 APFS 时光快照", () => runAsync(
             () => wailsApp?.ListAPFSSnapshots?.(drivePath || ""),

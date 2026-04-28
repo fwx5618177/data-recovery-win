@@ -111,6 +111,10 @@ type App struct {
 	ocrMu     sync.Mutex
 	ocrCancel context.CancelFunc
 
+	// 多盘并行扫描的 cancel（v2.8.5）—— 同时只允许一个 multi-disk 任务
+	parallelMu     sync.Mutex
+	parallelCancel context.CancelFunc
+
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
 
@@ -2144,11 +2148,13 @@ func (a *App) QuerySEDStatus(drivePath string) (*sed.SEDStatus, error) {
 	return sed.QueryStatus(ctx, drivePath)
 }
 
-// ParallelScanDrives 多盘并行扫描。
+// ParallelScanDrives 多盘并行扫描（**同步阻塞**版，CLI / 测试用）。
+//
+// 前端不要直接用这个 —— 它在 wails IPC 上会卡住 UI 线程几分钟到几小时。
+// 前端走 StartParallelScanDrives 异步版。
 //
 // jobs 里每项是 {drivePath, mode}；最多 maxParallel 个同时跑。
-// 结果通过"parallel:diskStart / parallel:diskProgress / parallel:fileFound / parallel:diskDone"
-// 事件流推到前端。
+// 进度通过 parallel:diskStart / parallel:diskProgress / parallel:fileFound / parallel:diskDone 事件流推送。
 func (a *App) ParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) []parallel.JobResult {
 	cb := parallel.ScanCallback{
 		OnDiskStart: func(j parallel.DiskJob) {
@@ -2169,6 +2175,92 @@ func (a *App) ParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) []par
 		},
 	}
 	return parallel.ScanMultiple(a.ctx, jobs, maxParallel, cb)
+}
+
+// StartParallelScanDrives 给 GUI 用的"启动多盘并行扫描"异步入口（v2.8.5）。
+//
+// 立刻返回 nil；扫描在后台 goroutine 跑，进度通过事件流推前端：
+//   - "parallel:diskStart"    {drivePath, mode}
+//   - "parallel:diskProgress" {drive, progress: ScanProgress}
+//   - "parallel:fileFound"    {drive, file}
+//   - "parallel:diskDone"     {drivePath, result, err}
+//   - "parallel:allDone"      {results: []JobResult}   ← 新增，所有盘扫完
+//
+// 同时只允许一个 multi-disk 任务在跑：再调一次会先 cancel 旧的。
+func (a *App) StartParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) error {
+	if len(jobs) == 0 {
+		return fmt.Errorf("没有要扫描的盘")
+	}
+	if maxParallel <= 0 {
+		maxParallel = 1
+	}
+
+	a.parallelMu.Lock()
+	if a.parallelCancel != nil {
+		a.parallelCancel()
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.parallelCancel = cancel
+	a.parallelMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.parallelMu.Lock()
+			a.parallelCancel = nil
+			a.parallelMu.Unlock()
+		}()
+		cb := parallel.ScanCallback{
+			OnDiskStart: func(j parallel.DiskJob) {
+				wailsRuntime.EventsEmit(a.ctx, "parallel:diskStart", j)
+			},
+			OnDiskProgress: func(j parallel.DiskJob, p types.ScanProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "parallel:diskProgress", map[string]any{
+					"drive": j.DrivePath, "progress": p,
+				})
+			},
+			OnFileFound: func(j parallel.DiskJob, f *types.RecoveredFile) {
+				wailsRuntime.EventsEmit(a.ctx, "parallel:fileFound", map[string]any{
+					"drive": j.DrivePath, "file": f,
+				})
+			},
+			OnDiskDone: func(res parallel.JobResult) {
+				// 序列化 err 让前端能拿到字符串
+				payload := map[string]any{
+					"drivePath": res.DrivePath,
+					"result":    res.Result,
+				}
+				if res.Err != nil {
+					payload["error"] = res.Err.Error()
+				}
+				wailsRuntime.EventsEmit(a.ctx, "parallel:diskDone", payload)
+			},
+		}
+		results := parallel.ScanMultiple(ctx, jobs, maxParallel, cb)
+		// 序列化所有结果并发 allDone
+		serialized := make([]map[string]any, 0, len(results))
+		for _, r := range results {
+			item := map[string]any{
+				"drivePath": r.DrivePath,
+				"result":    r.Result,
+			}
+			if r.Err != nil {
+				item["error"] = r.Err.Error()
+			}
+			serialized = append(serialized, item)
+		}
+		wailsRuntime.EventsEmit(a.ctx, "parallel:allDone", serialized)
+	}()
+	return nil
+}
+
+// CancelParallelScan 让正在跑的 StartParallelScanDrives 立刻退出（用户关 modal / 点取消）
+func (a *App) CancelParallelScan() {
+	a.parallelMu.Lock()
+	defer a.parallelMu.Unlock()
+	if a.parallelCancel != nil {
+		a.parallelCancel()
+		a.parallelCancel = nil
+	}
 }
 
 // LoadNSRLDatabase 载入 NSRL 良性 hash 列表

@@ -4,6 +4,96 @@
 
 ---
 
+## v2.8.5 (2026-04-28)
+
+**多盘并行扫描真接通 —— 唯一一处剩余的"假菜单"清零**
+
+### 用户问题：检查下，是否还有别的实际没实现
+
+跑了一轮代码 audit，工具菜单 13 个条目里 12 个是真实现（SMART / SED / GPT /
+计划备份 / 时间线导出 / DFXML / 保管链 / 校验保管链 / NSRL / 网络挂载建议 /
+APFS 快照 / OCR 搜图）—— 唯一一个**仍然是 toast.info 假提示**的就是
+"⚡ 多盘并行扫描"。后端 `ParallelScanDrives` 早已完整实现（`internal/parallel/multidisk.go`），
+GUI 没接上，菜单点了只显示"功能就绪请用 CLI 调"。
+
+### Added — 后端异步入口（`app.go`）
+
+之前的 `ParallelScanDrives` 是**同步阻塞**的 IPC 方法 —— 多盘扫几小时它就卡几小时，
+GUI 用不了。新加：
+
+```go
+StartParallelScanDrives(jobs, maxParallel) error    // 立刻返回，goroutine 跑
+CancelParallelScan()                                 // 用户关 modal / 点停止
+```
+
+事件流（在原有 4 个基础上 + 1）：
+- `parallel:diskStart` `{drivePath, mode}`
+- `parallel:diskProgress` `{drive, progress: ScanProgress}`
+- `parallel:fileFound` `{drive, file}`
+- `parallel:diskDone` `{drivePath, result, error}`
+- **`parallel:allDone`** `[]{drivePath, result, error}` —— 新增，全部盘扫完一次发
+
+`error` 字段从 Go `error` 序列化成 string（前端不会看到 `error: {}`）。
+新加 `parallelMu` / `parallelCancel` 字段 ——同时只允许一个 multi-disk 任务在跑，
+重复调取消旧的。
+
+### Added — `frontend/src/components/MultiDiskScanModal.tsx`
+
+完整 Modal：
+- **盘选**：扫描列里所有盘渲染成卡片 grid（U盘 / 物理盘 icon + 路径 + 大小），多选 checkbox，
+  「全选 / 清空」快捷
+- **扫描参数**：mode 下拉（auto / quick / deep）+ "同时最多扫" 数字输入（1–8，
+  含提示"SSD 2-4 / HDD 1-2"避免 IO 互相打架）
+- **运行态**：每盘一张卡片，含 16px hard-disk icon + 名称 + 路径 + 进度条
+  + percent + "已发现 X · 速度 Y/s · 已用 Z" + 状态 badge（pending / running / done / error / cancelled）
+- **停止全部**按钮调 `CancelParallelScan`，立即把仍在跑的 drive 标 cancelled
+- 关闭 Modal 自动 cancel
+- "完成"按钮 (allDone 后) 关闭 modal
+
+### Changed — `frontend/src/App.tsx`
+
+- 菜单项 "⚡ 多盘并行扫描" 从 toast.info 改成 `setOpenMobileModal("multi-disk-scan")`
+- 注册新 modal `<MultiDiskScanModal>`
+
+### Audit 报告（其它菜单）
+
+audit 同时检查了所有其它工具菜单项，确认**全部为真实现**：
+
+| 菜单 | 后端 | 状态 |
+| --- | --- | --- |
+| 磁盘 SMART 健康 | 三平台原生（v2.8.2/3 已修） | ✓ |
+| SED OPAL 锁定 | sedutil-cli + JSON tag fix | ✓ |
+| GPT 备份恢复 | 物理盘解析 + ReadPartitions | ✓ |
+| 查找重复图片 | aHash perceptual hash | ✓ |
+| OCR 搜图 | tessdata_fast 内嵌 + tesseract（v2.8.4） | ✓ |
+| 计划定时备份 | OS 级 cron / launchd / Task Scheduler | ✓ |
+| 导出时间线 mactime | forensics.WriteMactime | ✓ |
+| 导出 DFXML | forensics.WriteDFXMLWithSource | ✓ |
+| 生成保管链 | forensics.BuildAndWrite | ✓ |
+| 校验保管链 | forensics.VerifyCustody | ✓ |
+| 载入 NSRL | forensics.LoadNSRLFromFile（解 SHA-256 → map） | ✓ |
+| 网络挂载建议 | netfs.SuggestMount（按平台返指令） | ✓ |
+| APFS 时光快照 | scanner 扫 APFS 容器 | ✓ |
+| 多盘并行扫描 | **本版接通** | ✓ |
+
+### Files
+
+- 修改：`app.go`（StartParallelScanDrives / CancelParallelScan / 序列化 err / parallel 字段）
+- 新增：`frontend/src/components/MultiDiskScanModal.tsx`（~280 行）
+- 修改：`frontend/src/App.tsx`（菜单 → modal + 注册）
+
+### Verify
+
+```bash
+go vet ./...
+GOOS=windows GOARCH=amd64 go build ./...
+GOOS=linux GOARCH=amd64 go build ./...
+cd frontend && pnpm build
+# 全部 ✓
+```
+
+---
+
 ## v2.8.4 (2026-04-28)
 
 **OCR 搜图：内嵌 traineddata + 系统 tesseract 智能定位 + 真 Modal 流式 UX**
