@@ -170,8 +170,8 @@ func ListInstalledLangs() ([]string, error) {
 // 找不到返回 ("", err)。
 func FindTesseractBin() (string, error) {
 	if env := os.Getenv("TESSERACT_BIN"); env != "" {
-		if _, err := os.Stat(env); err == nil {
-			return env, nil
+		if p, ok := validateTesseractPath(env); ok {
+			return p, nil
 		}
 	}
 	if p, err := exec.LookPath("tesseract"); err == nil {
@@ -179,11 +179,41 @@ func FindTesseractBin() (string, error) {
 	}
 	candidates := commonInstallPaths()
 	for _, c := range candidates {
+		// #nosec G304 G703 -- c 是包内常量列表（commonInstallPaths），不是用户可控输入
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
 	}
 	return "", fmt.Errorf("tesseract 不在 PATH 也不在常见安装位置")
+}
+
+// validateTesseractPath 检查 TESSERACT_BIN env var 给的路径是否合法可用。
+// 防御点（gosec G703 path traversal via taint）：
+//   - filepath.Clean 标准化
+//   - 必须绝对路径（拒绝相对路径，避免 cwd 注入）
+//   - 文件 basename 必须是 tesseract / tesseract.exe（拒绝指向任意可执行文件）
+//   - 必须是常规文件（拒绝目录 / device / pipe 等异常）
+//
+// 用户能控制自己的 env var —— 这本来就是设计目的。但严格校验把"误用"和"恶意构造
+// 路径欺骗"两种场景都挡住，让 taint 链清晰可证。
+func validateTesseractPath(raw string) (string, bool) {
+	clean := filepath.Clean(raw)
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	if base != "tesseract" && base != "tesseract.exe" {
+		return "", false
+	}
+	// #nosec G304 G703 -- raw 经 filepath.Clean + 绝对路径校验 + basename 白名单后才到这
+	st, err := os.Stat(clean)
+	if err != nil {
+		return "", false
+	}
+	if !st.Mode().IsRegular() {
+		return "", false
+	}
+	return clean, true
 }
 
 // commonInstallPaths 各平台用户装 tesseract 后常见的可执行路径。
