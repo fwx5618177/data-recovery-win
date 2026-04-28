@@ -1,0 +1,21 @@
+# 平台二进制（tesseract.exe + DLLs / tesseract / etc.）由 `make tesseract-bundle`
+# 从官方 GitHub release / Homebrew bottle / apk 拉取。这些文件**不入 git**。
+*.exe
+*.dll
+*.dylib
+*.so
+*.so.*
+tesseract
+
+# tessdata_fast 的 eng + chi_sim 体积小（共 ~6 MB），直接入 git 让 clone 即可用。
+# 其它语言用户在 OCR Modal 里按需下载。
+!eng.traineddata
+!chi_sim.traineddata
+
+# 仓库里其它已下载语言（用户运行后才出现）也不入 git
+*.traineddata
+!eng.traineddata
+!chi_sim.traineddata
+
+!.gitignore
+!README.md

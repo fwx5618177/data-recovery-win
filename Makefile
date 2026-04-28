@@ -1,6 +1,6 @@
 .PHONY: dev dev-elevated check-perms build build-windows build-windows-arm64 build-darwin build-darwin-universal \
         build-linux build-linux-arm64 build-all test lint clean deps install-wails check-wails \
-        verify-platforms drift-check drift-check-strict
+        verify-platforms drift-check drift-check-strict tesseract-bundle
 
 # Go 代理设置（解决国内/网络不稳定环境下载依赖超时问题）
 # 可通过环境变量覆盖，例如: GOPROXY=https://proxy.golang.org,direct make deps
@@ -101,6 +101,35 @@ verify-platforms:
 	GOOS=windows GOARCH=amd64 go build ./...
 	GOOS=windows GOARCH=arm64 go build ./...
 	@echo "✅ 所有平台交叉编译均通过"
+
+# OCR 资源拉取（v2.8.4 起）—— 把内嵌 traineddata + 各平台 tesseract 二进制
+# 拉到 internal/ocr/assets/，wails build 会通过 //go:embed 打进最终二进制。
+# 来源：tesseract-ocr/tessdata_fast 官方仓库 + UB Mannheim Tesseract release。
+#
+# 默认 traineddata（eng + chi_sim）已入 git，只在升级版本或仓库初始化时需要重跑。
+TESSDATA_URL := https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main
+TESSDATA_LANGS := eng chi_sim
+
+tesseract-bundle:
+	@echo "📦 v2.8.4 OCR 资源拉取"
+	@mkdir -p internal/ocr/assets/tessdata
+	@for lang in $(TESSDATA_LANGS); do \
+		f=internal/ocr/assets/tessdata/$$lang.traineddata; \
+		if [ -f $$f ] && [ $$(wc -c < $$f) -gt 51200 ]; then \
+			echo "  ✓ $$lang.traineddata 已存在 ($$(wc -c < $$f) 字节)"; \
+		else \
+			echo "  ↓ 拉 $$lang.traineddata..."; \
+			curl -fL --connect-timeout 10 --max-time 300 \
+				-o $$f.part "$(TESSDATA_URL)/$$lang.traineddata" \
+				|| { echo "    × 拉取失败：$(TESSDATA_URL)/$$lang.traineddata"; rm -f $$f.part; exit 1; }; \
+			mv $$f.part $$f; \
+		fi; \
+	done
+	@echo "✅ tessdata_fast 默认语言 OK ($(TESSDATA_LANGS))"
+	@echo ""
+	@echo "ℹ️  tesseract 二进制（windows-amd64 / darwin / linux）暂未自动化下载"
+	@echo "   v2.8.4 当前策略：内嵌 traineddata + 系统装 tesseract（PATH / 常见安装路径）"
+	@echo "   v2.9 计划：把 tesseract 二进制也一起内嵌实现 100% zero-install"
 
 # 安装依赖
 deps:

@@ -4,6 +4,110 @@
 
 ---
 
+## v2.8.4 (2026-04-28)
+
+**OCR 搜图：内嵌 traineddata + 系统 tesseract 智能定位 + 真 Modal 流式 UX**
+
+### 用户反馈
+
+> 直接内部集成，不要再让用户去下载了。如果用户还要下载，本身就提高了心智负担
+
+v2.8.3 直接把 OCR 菜单删掉避免假实现混淆用户。这版**反过来彻底集成**：app
+内嵌 tessdata_fast 的 eng + chi_sim（约 6.3 MB），用户不用去 `apt install
+tesseract-ocr-chi-sim` / `brew install tesseract-lang`。其它语言用户在
+OCR Modal 里点 + 按需从官方仓库下载到本地 cache。
+
+tesseract 二进制本体 v2.8.4 仍依赖系统装（找 PATH + 各平台常见安装目录），
+**v2.9 计划把 tesseract 也内嵌**做到 100% zero-install。
+
+### Added — `internal/ocr/runtime.go`
+
+- `//go:embed assets/tessdata/*.traineddata` 把 tessdata_fast 的 eng + chi_sim
+  打进 app 二进制（共 ~6.3 MB）
+- `EnsureBuiltinLangs()` 首次 OCR 调用前把内嵌 traineddata 解压到 user cache
+  （macOS `~/Library/Caches/data-recovery/ocr/tessdata/` / Linux `~/.cache/.../`
+   / Windows `%LOCALAPPDATA%\data-recovery\ocr\tessdata\`）
+- `FindTesseractBin()` 三段式查找 tesseract：
+  1. `TESSERACT_BIN` env 显式指定
+  2. system PATH（`exec.LookPath`）
+  3. 各平台常见安装路径（修复 v2.8.3 截图的 bug —— 用户用"下软件" / 360 软件管家
+     装到 `C:\Tesseract-OCR\` 等非标准位置，不在 PATH 但确实装了）
+- `Status` 结构含 binary 路径 / 版本 / 已装语言列表 / 内置语言 / 找不到 binary 时
+  按 OS 给详细安装指引
+
+### Added — `internal/ocr/installer.go`
+
+- `AvailableLanguages` 列了 ~45 种官方支持的语言（chi_tra / jpn / kor / rus /
+  ara / hin / 等等）+ 中文人名
+- `DownloadLanguage(ctx, code)` 从 `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/<code>.traineddata`
+  下载到 cache，原子 rename + 体积 sanity check（< 50 KB 视为 GitHub 404 HTML）
+- `DeleteLanguage(code)` 删除非内置语言；`HasEmbeddedLang()` 防误删 eng / chi_sim
+- `LanguageSHA256()` 取证场景验完整性
+
+### Added — `internal/ocr/ocr.go` 重写
+
+- `SearchInDirectory(ctx, dir, keyword, langs, onProgress, onHit)` —— 走目录递归
+  + 过滤图片扩展名（png/jpg/jpeg/bmp/tiff/webp）+ 流式回调进度 / 命中
+- `Recognize()` 改用 app 自管 tessdata 目录（`--tessdata-dir` + `TESSDATA_PREFIX`
+  双保险），跨发行版行为一致
+- 错误信息友好化：tesseract 报"语言包找不到"时转译成"请在 OCR 设置里下载 X 后再试"
+
+### Added — Wails IPC（`app.go`）
+
+| 方法 | 用途 |
+| --- | --- |
+| `OCRStatus()` | 引擎能不能用 + 装了哪些语言摘要 |
+| `OCRListLanguages()` | 全部可用语言（已装 + 可下载） |
+| `OCRDownloadLanguage(code)` | 拉某语言到 cache |
+| `OCRDeleteLanguage(code)` | 删非内置语言 |
+| `OCRSearchDirectory(dir, kw, langs)` | 启动后台搜索；事件流 `ocr:progress` / `ocr:hit` / `ocr:done` / `ocr:error` |
+| `OCRCancelSearch()` | 用户关闭 modal 时取消正在跑的 search |
+
+### Added — `frontend/src/components/OCRSearchModal.tsx`
+
+新 Modal：
+- 顶部显示 `tesseract --version`（找到了的话）；找不到时 banner 警告 + OS 指引
+- 表单：目录选择器（接 `SelectDirectory` IPC） + 关键词输入 + 语言多选 chip
+- 「+ 添加 / 管理语言」可折叠面板：
+  - 已下载列表（含内置标记 + 删除按钮）
+  - 可下载列表（按官方 lang code，hover 即下载，下载中转圈）
+- 搜索时：进度条 + "n / total 张 · 命中 m" + 当前文件名 mono ellipsis
+- 结果列表（命中文件路径，单行 ellipsis + tooltip）
+- 关闭 Modal 自动取消正在跑的 search
+
+### Added — `Makefile` `tesseract-bundle` target
+
+```bash
+make tesseract-bundle
+```
+从 tesseract-ocr/tessdata_fast 官方仓库拉 eng / chi_sim（默认入 git，~6.3 MB）。
+后续可扩展拉 tesseract 二进制做 v2.9 的全集成。
+
+### Files
+
+- 新增：`internal/ocr/runtime.go`（embed + 提取 + binary 定位 + status，~250 行）
+- 新增：`internal/ocr/installer.go`（语言下载 / 删除 / 校验，~140 行）
+- 新增：`internal/ocr/assets/tessdata/eng.traineddata`（4.0 MB，tessdata_fast）
+- 新增：`internal/ocr/assets/tessdata/chi_sim.traineddata`（2.4 MB，tessdata_fast）
+- 新增：`internal/ocr/assets/{README.md,.gitignore}`
+- 修改：`internal/ocr/ocr.go`（重写为目录 / 进度版）
+- 修改：`app.go`（+6 个 OCR IPC 方法 + `ocrMu` / `ocrCancel`）
+- 修改：`Makefile`（+ `tesseract-bundle` target）
+- 新增：`frontend/src/components/OCRSearchModal.tsx`（~340 行）
+- 修改：`frontend/src/App.tsx`（重新加 OCR 菜单 + 接 modal）
+
+### Verify
+
+```bash
+go test -race ./internal/ocr/...
+go vet ./...
+GOOS=linux/windows/darwin GOARCH=amd64 go build ./...
+cd frontend && pnpm build
+# 全部 ✓
+```
+
+---
+
 ## v2.8.3 (2026-04-28)
 
 **5 个用户反馈 bug 一次扫清**

@@ -11,6 +11,7 @@ import Workbench from "./components/Workbench";
 import RecoveryPage from "./components/RecoveryPage";
 import Select from "./components/Select";
 import ToastViewport from "./components/ToastViewport";
+import OCRSearchModal from "./components/OCRSearchModal";
 import { toast } from "./toast";
 import {
   CloudBackupsModal,
@@ -1261,6 +1262,13 @@ export default function App() {
           onClose={() => setOpenMobileModal(null)}
         />
       )}
+      {openMobileModal === "ocr-search" && (
+        <OCRSearchModal
+          wailsApp={wailsApp}
+          outputDir={outputDir}
+          onClose={() => setOpenMobileModal(null)}
+        />
+      )}
 
       {/* ============== 左侧 "今日任务" 侧栏（多任务并行 + 历史 tab + 取消） ============== */}
       <TasksSidebar
@@ -1706,10 +1714,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
               (g) => `找到 ${g?.length || 0} 组相似图片`
             );
           })}
-          {/* v2.8.3 移除 "OCR 搜图" 菜单项：
-              - 它原本只是 toast 提示用户去自己跑 tesseract，并没有实际后端调用
-              - 数据恢复流程里 "在恢复输出目录中按文字搜图" 是非常边缘的需求
-              - 保留 backend OCRImage / OCRSearch 入口（API 仍可用），不放在主菜单 */}
+          {item("🔎 OCR 搜图", () => {
+            setOpen(false);
+            onOpenMobileModal?.("ocr-search");
+          })}
           {item("📅 计划定时备份", () => {
             const src = globalThis.prompt?.("源目录：", outputDir || "");
             if (!src) return;

@@ -107,6 +107,10 @@ type App struct {
 	// iOS 备份扫描的 cancel（Batch 3）
 	iosScanCancel context.CancelFunc
 
+	// OCR 搜图的 cancel（v2.8.4）
+	ocrMu     sync.Mutex
+	ocrCancel context.CancelFunc
+
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
 
@@ -2042,14 +2046,92 @@ func (a *App) FindMountedRemoteImages() []string {
 	return netfs.FindMountedRemoteImages()
 }
 
-// OCRImage 对一张图做 OCR（需本机有 tesseract）
+// OCRImage 对一张图做 OCR
 func (a *App) OCRImage(imagePath string, langs []string) (string, error) {
 	return ocr.Recognize(imagePath, langs)
 }
 
-// OCRSearch 在一批图片里找含 keyword 文字的
+// OCRSearch 在一批指定图片里找含 keyword 文字的（保留兼容老调用）
 func (a *App) OCRSearch(imagePaths []string, keyword string, langs []string) []string {
 	return ocr.SearchInImages(imagePaths, keyword, langs)
+}
+
+// OCRStatus 给前端 OCR Modal 用 —— 拿"OCR 当前能不能用 + 装了哪些语言"摘要
+func (a *App) OCRStatus() *ocr.Status {
+	return ocr.QueryStatus()
+}
+
+// OCRListLanguages 列所有可用语言（已装 + 可下载），供 Modal 渲染
+func (a *App) OCRListLanguages() ([]ocr.LanguageInfo, error) {
+	return ocr.ListAvailableLanguages()
+}
+
+// OCRDownloadLanguage 从 tessdata_fast 官方仓库下载某语言到 cache
+func (a *App) OCRDownloadLanguage(code string) error {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
+	defer cancel()
+	return ocr.DownloadLanguage(ctx, code)
+}
+
+// OCRDeleteLanguage 删除已下载的语言（内置 eng/chi_sim 不允许删）
+func (a *App) OCRDeleteLanguage(code string) error {
+	return ocr.DeleteLanguage(code)
+}
+
+// OCRSearchDirectory 走一个目录里的所有图片，OCR + 关键词搜，事件流式推送进度。
+//
+// 前端事件流：
+//   - "ocr:progress" { current, total, currentFile, hitCount }
+//   - "ocr:hit"      { path }
+//   - "ocr:done"     { hits []string }   或   "ocr:error" { message }
+//
+// 函数本身立即返回（goroutine 跑实际工作），前端通过事件接结果。
+// 同时只允许一个搜索在跑：再调一次会让旧的 ctx cancel。
+func (a *App) OCRSearchDirectory(dir, keyword string, langs []string) error {
+	a.ocrMu.Lock()
+	if a.ocrCancel != nil {
+		a.ocrCancel()
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.ocrCancel = cancel
+	a.ocrMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.ocrMu.Lock()
+			if a.ocrCancel != nil {
+				cancel := a.ocrCancel
+				a.ocrCancel = nil
+				_ = cancel
+			}
+			a.ocrMu.Unlock()
+		}()
+		hits, err := ocr.SearchInDirectory(
+			ctx, dir, keyword, langs,
+			func(p ocr.SearchProgress) {
+				wailsRuntime.EventsEmit(a.ctx, "ocr:progress", p)
+			},
+			func(path string) {
+				wailsRuntime.EventsEmit(a.ctx, "ocr:hit", map[string]any{"path": path})
+			},
+		)
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "ocr:error", map[string]any{"message": err.Error()})
+			return
+		}
+		wailsRuntime.EventsEmit(a.ctx, "ocr:done", map[string]any{"hits": hits, "count": len(hits)})
+	}()
+	return nil
+}
+
+// OCRCancelSearch 让正在跑的 OCRSearchDirectory 立刻退出（用户点 Modal 关闭 / 取消）
+func (a *App) OCRCancelSearch() {
+	a.ocrMu.Lock()
+	defer a.ocrMu.Unlock()
+	if a.ocrCancel != nil {
+		a.ocrCancel()
+		a.ocrCancel = nil
+	}
 }
 
 // QueryDiskHealth 读 SMART（早已实现，上次漏挂 binding — 本轮同步补绑定）
