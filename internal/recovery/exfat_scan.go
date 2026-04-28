@@ -33,9 +33,34 @@ func (e *Engine) runEXFATScan(
 ) ([]*types.RecoveredFile, error) {
 	logger.Info("开始 exFAT 扫描")
 
+	// 立刻 emit 一个 0% 占位，让前端跳出 ready/init 状态进入 "正在查找 exFAT 分区..."
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "exfat",
+			Percent:     0.5,
+			CurrentFile: "正在查找 exFAT 分区...",
+		})
+	}
+
 	scanner := exfat.NewScanner(reader)
 
-	partitions, err := scanner.FindPartitions(ctx)
+	// 暴力扫分区时把字节级进度映射到 0-50% phase 进度（找到分区后再喂另一半）
+	partitions, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
+		if onProgress == nil || total <= 0 {
+			return
+		}
+		percent := float64(scanned) / float64(total) * 50.0
+		if percent < 0.5 {
+			percent = 0.5
+		}
+		onProgress(types.ScanProgress{
+			Phase:        "exfat",
+			Percent:      percent,
+			BytesScanned: scanned,
+			TotalBytes:   total,
+			CurrentFile:  fmt.Sprintf("正在查找 exFAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+		})
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +72,11 @@ func (e *Engine) runEXFATScan(
 		}
 		partitionLabel := fmt.Sprintf("exFAT 分区 %d/%d (@0x%X)", pi+1, len(partitions), p.Offset)
 		if onProgress != nil {
+			// 50-100% 留给目录遍历阶段（前 50% 已被 FindPartitions 用掉）
 			onProgress(types.ScanProgress{
 				Phase:       "exfat",
-				Percent:     float64(pi) / float64(len(partitions)) * 100,
+				Percent:     50.0 + float64(pi)/float64(len(partitions))*50.0,
+				FilesFound:  len(files),
 				CurrentFile: partitionLabel + ": 扫描目录",
 			})
 		}

@@ -4,9 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是分区发现阶段的进度回调；scanned 已扫描字节数，total 磁盘总字节数。
+// 调用方 (recovery dispatcher) 把它包装成 types.ScanProgress 喂给前端。
+type ProgressFn = func(scanned, total int64)
 
 // Scanner 扫描一块磁盘 / 一份镜像中的 exFAT 分区，递归枚举所有目录条目。
 // 使用方式：
@@ -50,7 +55,9 @@ type FoundFile struct {
 // 本实现先落最实用的那条：
 //  - 尝试 offset 0 解析（U 盘 / SD 卡场景的 99%）
 //  - 失败则按 4MB 步长做签名扫描兜底
-func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
+//
+// onProgress 用于全盘暴力扫描期间反馈进度；可传 nil。
+func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	var partitions []Partition
 
 	// 策略 a：假设整盘即一个 exFAT 分区
@@ -64,7 +71,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 	}
 
 	// 策略 b：全盘签名扫描（兜底）。与 NTFS 的 bruteForceFindNTFS 思路一致
-	brute, err := s.bruteForceFindEXFAT(ctx)
+	brute, err := s.bruteForceFindEXFAT(ctx, onProgress)
 	if err == nil {
 		partitions = append(partitions, brute...)
 	}
@@ -78,7 +85,9 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 
 // bruteForceFindEXFAT 全盘按 4MB 块读入 + 512KB 步进搜索 exFAT boot sector
 // "EXFAT   " OEM ID 在 boot sector 偏移 3-10 处
-func (s *Scanner) bruteForceFindEXFAT(ctx context.Context) ([]Partition, error) {
+//
+// onProgress 每 ~500ms 节流回调一次（避免事件风暴）；nil 时静默扫描。
+func (s *Scanner) bruteForceFindEXFAT(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	diskSize, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -90,6 +99,9 @@ func (s *Scanner) bruteForceFindEXFAT(ctx context.Context) ([]Partition, error) 
 	)
 	buf := make([]byte, readBlockSize)
 	var result []Partition
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
 
 	for blockOff := int64(0); blockOff < diskSize; blockOff += readBlockSize {
 		select {
@@ -127,6 +139,14 @@ func (s *Scanner) bruteForceFindEXFAT(ctx context.Context) ([]Partition, error) 
 				BootSector: bs,
 			})
 		}
+
+		if onProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			onProgress(blockOff+readSize, diskSize)
+			lastEmit = time.Now()
+		}
+	}
+	if onProgress != nil {
+		onProgress(diskSize, diskSize)
 	}
 
 	return result, nil

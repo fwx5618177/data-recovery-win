@@ -143,34 +143,73 @@ func NewApp() *App {
 func (a *App) emitScanHeartbeat(stopCh <-chan struct{}, startTime time.Time) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	state := &heartbeatState{
+		lastBytesScanned: 0,
+		lastSampleTime:   startTime,
+		lastSpeed:        0,
+	}
+	// 立刻发一次 —— 不等 500ms tick，让前端在用户点"开始扫描"后立刻跳出 ready 状态。
+	// 没有这一发，brute-force 分区发现期间 (可能跑几秒到几分钟) 前端会卡在"即将开始 0.0%"。
+	a.emitHeartbeatTick(startTime, state)
 	for {
 		select {
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			a.scanSnapshotMu.Lock()
-			p := a.scanProgress
-			active := a.scanActive
-			filesCount := len(a.scanFiles)
-			a.scanSnapshotMu.Unlock()
-			if !active {
+			if !a.emitHeartbeatTick(startTime, state) {
 				return
 			}
-			// 实时 elapsed
-			p.Elapsed = formatElapsedSeconds(time.Since(startTime).Seconds())
-			// 还没收到任何真实进度报告 → 发个"初始化"占位让 UI 跳出 indeterminate 模式
-			if p.Phase == "" {
-				p.Phase = "init"
-				p.CurrentFile = "正在初始化扫描…"
-				p.Percent = 0.5
-			}
-			// FilesFound 用 a.scanFiles 长度兜底（OnFileFound 累计的，更稳）
-			if filesCount > p.FilesFound {
-				p.FilesFound = filesCount
-			}
-			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 		}
 	}
+}
+
+// heartbeatState 心跳间复用的状态：用来从 BytesScanned 增量算 speed。
+// 底层扫描器（如 brute-force partition discovery）只报字节数 + 总数，不算速度；
+// 心跳每 500ms 看一次 BytesScanned 差，得到 bytes/sec。
+type heartbeatState struct {
+	lastBytesScanned int64
+	lastSampleTime   time.Time
+	lastSpeed        int64 // 缓存最近一次有效速度，避免 sample 间速度=0 闪烁
+}
+
+// emitHeartbeatTick 单次心跳：返回 false 表示 scan 已结束，调用方应退出循环。
+func (a *App) emitHeartbeatTick(startTime time.Time, state *heartbeatState) bool {
+	a.scanSnapshotMu.Lock()
+	p := a.scanProgress
+	active := a.scanActive
+	filesCount := len(a.scanFiles)
+	a.scanSnapshotMu.Unlock()
+	if !active {
+		return false
+	}
+	// 实时 elapsed
+	p.Elapsed = formatElapsedSeconds(time.Since(startTime).Seconds())
+	// 还没收到任何真实进度报告 → 发个"初始化"占位让 UI 跳出 indeterminate 模式
+	if p.Phase == "" {
+		p.Phase = "init"
+		p.CurrentFile = "正在初始化扫描…"
+		p.Percent = 0.5
+	}
+	// FilesFound 用 a.scanFiles 长度兜底（OnFileFound 累计的，更稳）
+	if filesCount > p.FilesFound {
+		p.FilesFound = filesCount
+	}
+	// 如果底层没填 Speed，但 BytesScanned 在涨，自己算一个（500ms 滚动窗口）
+	if p.Speed == 0 && p.BytesScanned > state.lastBytesScanned {
+		dt := time.Since(state.lastSampleTime).Seconds()
+		if dt > 0.1 { // 100ms 以下不可信
+			delta := p.BytesScanned - state.lastBytesScanned
+			state.lastSpeed = int64(float64(delta) / dt)
+			state.lastBytesScanned = p.BytesScanned
+			state.lastSampleTime = time.Now()
+		}
+		p.Speed = state.lastSpeed
+	} else if p.Speed == 0 && state.lastSpeed > 0 {
+		// 没新增字节但有缓存速度 —— 短暂的 IO 停顿，UI 显示最近一次而不是闪 0
+		p.Speed = state.lastSpeed
+	}
+	wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+	return true
 }
 
 // formatElapsedSeconds 把秒数格式化为 "12s" / "3m45s" / "1h02m"

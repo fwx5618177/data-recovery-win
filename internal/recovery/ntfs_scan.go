@@ -43,12 +43,20 @@ func (e *Engine) runNTFSScan(
 ) ([]*types.RecoveredFile, error) {
 	logger.Info("开始 NTFS MFT 扫描")
 
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "ntfs",
+			Percent:     0.5,
+			CurrentFile: "正在查找 NTFS 分区...",
+		})
+	}
+
 	scanner := ntfs.NewScanner(reader)
 	e.mu.Lock()
 	e.ntfsScn = scanner
 	e.mu.Unlock()
 
-	partitions, err := e.resolveNTFSPartitions(ctx, scanner, reader, partitionOffset)
+	partitions, err := e.resolveNTFSPartitions(ctx, scanner, reader, partitionOffset, onProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -233,11 +241,14 @@ func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) e
 //   - 调用方显式传了 partitionOffset > 0：只扫这一个分区（manual 模式）
 //   - 物理盘（\\.\PhysicalDriveN / /dev/diskN）：走 FindPartitions 自动枚举
 //   - 逻辑盘（\\.\C: / /dev/disk0s2）：只扫盘首的那一个 NTFS 卷
+//
+// onProgress 用于物理盘暴力扫分区期间反馈进度；可传 nil。
 func (e *Engine) resolveNTFSPartitions(
 	ctx context.Context,
 	scanner *ntfs.Scanner,
 	reader disk.DiskReader,
 	partitionOffset int64,
+	onProgress func(types.ScanProgress),
 ) ([]ntfs.Partition, error) {
 	if partitionOffset > 0 {
 		boot, err := scanner.ParseBootSector(partitionOffset)
@@ -254,7 +265,24 @@ func (e *Engine) resolveNTFSPartitions(
 	}
 
 	if isPhysicalDrivePath(reader.DevicePath()) {
-		partitions, err := scanner.FindPartitions(ctx)
+		// 物理盘走全盘暴力扫描，可能耗时几分钟，必须有进度反馈。
+		// 把字节级进度映射到 NTFS 阶段的 0-50%（剩余 50% 留给 MFT 扫描）。
+		partitions, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "ntfs",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找 NTFS 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		})
 		if err != nil {
 			return nil, fmt.Errorf("在物理磁盘上未找到可扫描的 NTFS 分区: %w", err)
 		}

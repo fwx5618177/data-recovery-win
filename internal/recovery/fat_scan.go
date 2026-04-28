@@ -30,8 +30,31 @@ func (e *Engine) runFATScan(
 ) ([]*types.RecoveredFile, error) {
 	logger.Info("开始 FAT 扫描")
 
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "fat",
+			Percent:     0.5,
+			CurrentFile: "正在查找 FAT 分区...",
+		})
+	}
+
 	scanner := fat.NewScanner(reader)
-	parts, err := scanner.FindPartitions(ctx)
+	parts, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
+		if onProgress == nil || total <= 0 {
+			return
+		}
+		percent := float64(scanned) / float64(total) * 50.0
+		if percent < 0.5 {
+			percent = 0.5
+		}
+		onProgress(types.ScanProgress{
+			Phase:        "fat",
+			Percent:      percent,
+			BytesScanned: scanned,
+			TotalBytes:   total,
+			CurrentFile:  fmt.Sprintf("正在查找 FAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+		})
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -83,10 +106,13 @@ func (e *Engine) runFATScan(
 				if onProgress != nil {
 					mu.Lock()
 					done := completed
+					filesNow := len(files)
 					mu.Unlock()
+					// 50-100% 留给目录遍历（前 50% 已被 FindPartitions 用掉）
 					onProgress(types.ScanProgress{
 						Phase:       "fat",
-						Percent:     float64(done) / float64(len(parts)) * 100,
+						Percent:     50.0 + float64(done)/float64(len(parts))*50.0,
+						FilesFound:  filesNow,
 						CurrentFile: label + ": 扫描目录",
 					})
 				}

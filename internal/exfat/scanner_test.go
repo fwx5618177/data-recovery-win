@@ -284,7 +284,7 @@ func TestFindPartitions_Volume(t *testing.T) {
 	reader := testutil.NewMemReader(img)
 	scanner := NewScanner(reader)
 
-	parts, err := scanner.FindPartitions(context.Background())
+	parts, err := scanner.FindPartitions(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("FindPartitions 失败: %v", err)
 	}
@@ -294,6 +294,39 @@ func TestFindPartitions_Volume(t *testing.T) {
 	// 第一个应该是 offset=0 的整盘分区
 	if parts[0].Offset != 0 {
 		t.Errorf("第一个分区偏移应为 0，实际 %d", parts[0].Offset)
+	}
+}
+
+// TestFindPartitions_ProgressCallback 锁住一个回归契约：
+// 全盘 brute-force 分区发现期间必须至少回调一次 onProgress，否则 UI 在一个 128GB
+// U 盘上会卡在 0% / "即将开始" 几分钟（QA 反复抓到的 bug，2026-04-28 修）。
+//
+// 实现细节：bruteForceFindEXFAT 每 ~500ms 节流回调；走完盘也会发一次 100% final tick。
+// 这个 case 只验证"至少一次 final tick"，所以即便测试用的小镜像 brute-force 跑得很快
+// 也能命中。
+func TestFindPartitions_ProgressCallback(t *testing.T) {
+	img := buildSyntheticExFATImage(t)
+	reader := testutil.NewMemReader(img)
+	scanner := NewScanner(reader)
+
+	var calls int
+	var lastScanned, lastTotal int64
+	_, err := scanner.FindPartitions(context.Background(), func(scanned, total int64) {
+		calls++
+		lastScanned = scanned
+		lastTotal = total
+	})
+	if err != nil {
+		t.Fatalf("FindPartitions 失败: %v", err)
+	}
+	if calls < 1 {
+		t.Fatal("onProgress 必须至少被调用一次（final tick），不然 UI 卡 0%")
+	}
+	if lastTotal <= 0 {
+		t.Errorf("最后一次回调 total 应为磁盘大小，实际 %d", lastTotal)
+	}
+	if lastScanned != lastTotal {
+		t.Errorf("final tick 应满进度（scanned=%d total=%d）", lastScanned, lastTotal)
 	}
 }
 

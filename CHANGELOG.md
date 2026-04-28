@@ -4,6 +4,122 @@
 
 ---
 
+## v2.8.7 (2026-04-28)
+
+**128G U 盘扫描卡 0% bug 修 —— brute-force 分区发现期间真进度反馈**
+
+### 用户问题：扫描源盘扫描时间过长，对应扫描速度和文件个数并未及时显示，一般在快扫描结束了，会展示对应数据。期望可以展示对应扫描进度百分比、已发现文件个数和大小、速度。
+
+QA 抓到的常见复现 bug：U 盘扫描点了开始之后界面一直停在 "即将开始 0.0% / 已发现 0 / 0 B / 0 B/s"，
+要等几分钟到快结束才突然蹦出全部数据。
+
+### 根因
+
+`exfat.bruteForceFindEXFAT` / `fat.bruteForceFindFAT` / `ntfs.bruteForceFindNTFS` 三个**全盘逐 4MB 扫签名**
+的兜底函数**没有 onProgress 回调**。128GB U 盘要跑几分钟，期间这三个函数完全静默 —— 心跳虽然每 500ms 发
+"init+0.5%" 占位，但首跳要等 500ms（前端已显示 "即将开始 0.0%"），且占位不带 BytesScanned/Speed 数据。
+
+### Fixed — 三个 brute-force 扫描器加 onProgress（500ms 节流）
+
+```go
+// internal/exfat/scanner.go, internal/fat/scanner.go, internal/ntfs/partition.go
+type ProgressFn = func(scanned, total int64)
+func (s *Scanner) FindPartitions(ctx, onProgress ProgressFn) ([]Partition, error)
+```
+
+每 ~500ms 节流回调一次（避免事件风暴）+ 走完盘发一次 final tick。
+
+### Fixed — 三个 recovery dispatcher 抓字节进度并映射到 phase 0-50%
+
+`internal/recovery/{exfat,fat,ntfs}_scan.go`：每个 dispatcher 入口立刻 emit "正在查找 X 分区..."
+（让前端跳出 ready 状态），分区发现期把字节进度映射到 phase 内 0-50%，剩 50-100% 留给目录遍历阶段。
+
+```go
+partitions, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
+    onProgress(types.ScanProgress{
+        Phase:        "exfat",
+        Percent:      float64(scanned) / float64(total) * 50.0,
+        BytesScanned: scanned,
+        TotalBytes:   total,
+        CurrentFile:  fmt.Sprintf("正在查找 exFAT 分区… %s / %s", ...),
+    })
+})
+```
+
+### Fixed — 心跳立刻首跳 + 自动算 Speed
+
+`app.go` `emitScanHeartbeat`：
+
+1. **立刻发首跳**（不等 500ms tick），让前端在用户点"开始扫描"那一刻跳出 ready 状态
+2. **从 BytesScanned 增量自动算 Speed**（500ms 滚动窗口），底层扫描器只报字节数不算速度也能显示
+3. `lastSpeed` 缓存防 IO 短暂停顿时 UI 闪 0
+
+```go
+type heartbeatState struct {
+    lastBytesScanned int64
+    lastSampleTime   time.Time
+    lastSpeed        int64 // IO 间歇缓存
+}
+```
+
+### Added — 回归测试守契约
+
+`internal/exfat/scanner_test.go::TestFindPartitions_ProgressCallback`：
+brute-force 必须至少回调一次 final tick + scanned == total。锁住"以后不能再忘 onProgress"。
+
+### 用户可见效果（点开始扫描那一刻起）
+
+- **percent**：从 0.5% 起，随分区发现字节增长滚到 50%；进入目录遍历继续到 100%
+- **BytesScanned / TotalBytes**：实时显示 "已扫 X / 总 Y"
+- **Speed**：500ms 滚动窗算 bytes/sec，IO 短暂停顿用上一帧兜底（不闪 0）
+- **CurrentFile**：`正在查找 exFAT 分区… 1.2 GB / 128 GB`
+- **FilesFound**：心跳每 500ms 用 `len(a.scanFiles)` 兜底
+
+### 验证
+
+```
+go vet ./...                                   ✅ clean
+go build ./...                                 ✅ clean
+go test -race -count=1 -timeout 240s ./...    ✅ 38 packages PASS
+```
+
+### Files Changed
+
+- `internal/exfat/scanner.go` + `scanner_test.go`
+- `internal/fat/scanner.go`
+- `internal/ntfs/partition.go`
+- `internal/recovery/exfat_scan.go`
+- `internal/recovery/fat_scan.go`
+- `internal/recovery/ntfs_scan.go`
+- `app.go`
+
+---
+
+## v2.8.6 (2026-04-28)
+
+**fix(ocr): gosec G703 path traversal 在 TESSERACT_BIN env 验证里**（CHANGELOG backfill）
+
+CI gosec medium-severity check 抓到 `internal/ocr/runtime.go:173` 的
+`os.Stat(os.Getenv("TESSERACT_BIN"))` 是 taint chain。我们这种"用户自己设 env var 指向
+自己机器的 tesseract"是合法用法，但 gosec 不知道用户语义、只看 taint 流，所以严格校验
++ 局部 `#nosec` 把链条断干净。
+
+新增 `validateTesseractPath()`：
+
+- `filepath.Clean` 标准化
+- 必须绝对路径（拒绝相对路径，避免 cwd 注入）
+- basename 白名单（`tesseract` / `tesseract.exe`）—— 拒绝指向任意可执行
+- `os.Stat` 验证存在 + 必须 `IsRegular`（拒绝目录 / device / pipe）
+
+通过校验后才到 `os.Stat`，给 `#nosec G304 G703` 加注释解释 taint 已断。
+`commonInstallPaths` 列表迭代也加 `#nosec` —— 那是包内常量，非用户输入。
+
+```
+verified: gosec ./... → Issues 0 (Files 214, Nosec 17)
+```
+
+---
+
 ## v2.8.5 (2026-04-28)
 
 **多盘并行扫描真接通 —— 唯一一处剩余的"假菜单"清零**

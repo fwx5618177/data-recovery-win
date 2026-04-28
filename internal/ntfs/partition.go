@@ -7,7 +7,12 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 )
+
+// ProgressFn 是分区发现阶段的进度回调；scanned 已扫描字节数，total 磁盘总字节数。
+// 调用方 (recovery dispatcher) 把它包装成 types.ScanProgress 喂给前端。
+type ProgressFn = func(scanned, total int64)
 
 // ========== 分区表解析 ==========
 //
@@ -46,7 +51,9 @@ type Partition struct {
 //
 // R-Studio / DMDE 的 "deleted partition scan" 就是这个思路；dedupePartitions 负责把
 // MBR/GPT 已登记的分区去掉重复，留下孤立的旧 NTFS 残骸。
-func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
+//
+// onProgress 用于全盘暴力扫描期间反馈进度（MBR/GPT 阶段读量很小，可忽略）；可传 nil。
+func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	var partitions []Partition
 
 	// ---- 策略 a: MBR ----
@@ -63,7 +70,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 
 	// ---- 策略 c: 暴力搜索 NTFS 引导扇区（用于定位已删除的旧分区）----
 	// 总是跑，哪怕 MBR/GPT 已经给了结果 —— 行业惯例是"分区表 + 签名扫"双保险
-	brutePartitions, bruteErr := s.bruteForceFindNTFS(ctx)
+	brutePartitions, bruteErr := s.bruteForceFindNTFS(ctx, onProgress)
 	if bruteErr == nil && len(brutePartitions) > 0 {
 		partitions = append(partitions, brutePartitions...)
 	}
@@ -270,7 +277,9 @@ func (s *Scanner) findGPTPartitions(ctx context.Context) ([]Partition, error) {
 //
 // NTFS 分区起始基本都在 1MB 边界对齐（Windows Vista+ 的默认），
 // 但我们用 512KB 步进保留一些历史老盘（XP 时代 63 扇区对齐）的容错空间。
-func (s *Scanner) bruteForceFindNTFS(ctx context.Context) ([]Partition, error) {
+//
+// onProgress 每 ~500ms 节流回调；nil 时静默扫描。
+func (s *Scanner) bruteForceFindNTFS(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	diskSize, err := s.reader.Size()
 	if err != nil {
 		return nil, fmt.Errorf("获取磁盘大小失败: %w", err)
@@ -283,6 +292,9 @@ func (s *Scanner) bruteForceFindNTFS(ctx context.Context) ([]Partition, error) {
 
 	var partitions []Partition
 	buf := make([]byte, readBlockSize)
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
 
 	for blockOffset := int64(0); blockOffset < diskSize; blockOffset += readBlockSize {
 		select {
@@ -329,6 +341,14 @@ func (s *Scanner) bruteForceFindNTFS(ctx context.Context) ([]Partition, error) {
 				BootSector: bootSector,
 			})
 		}
+
+		if onProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			onProgress(blockOffset+readSize, diskSize)
+			lastEmit = time.Now()
+		}
+	}
+	if onProgress != nil {
+		onProgress(diskSize, diskSize)
 	}
 
 	return partitions, nil

@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是分区发现阶段的进度回调；scanned 已扫描字节数，total 磁盘总字节数。
+type ProgressFn = func(scanned, total int64)
 
 // Scanner 扫描 FAT 分区 + 遍历目录。
 type Scanner struct {
@@ -36,7 +40,9 @@ type FoundFile struct {
 //
 // 和 exFAT 扫描策略一致：先试 offset 0（整盘）；没成功就全盘扫 boot signature。
 // FAT 没有独立的 "FAT   " OEM ID，所以只能靠 boot signature 0xAA55 + 字段合理性检查。
-func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
+//
+// onProgress 用于全盘暴力扫描期间反馈进度；可传 nil。
+func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	var parts []Partition
 
 	// 策略 a: offset 0
@@ -52,7 +58,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 	}
 
 	// 策略 b: 全盘 signature scan 兜底
-	brute, err := s.bruteForceFindFAT(ctx)
+	brute, err := s.bruteForceFindFAT(ctx, onProgress)
 	if err == nil {
 		parts = append(parts, brute...)
 	}
@@ -64,7 +70,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]Partition, error) {
 	return parts, nil
 }
 
-func (s *Scanner) bruteForceFindFAT(ctx context.Context) ([]Partition, error) {
+func (s *Scanner) bruteForceFindFAT(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -75,6 +81,9 @@ func (s *Scanner) bruteForceFindFAT(ctx context.Context) ([]Partition, error) {
 	)
 	buf := make([]byte, blockSize)
 	var result []Partition
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
 
 	for blockOff := int64(0); blockOff < size; blockOff += blockSize {
 		if ctx.Err() != nil {
@@ -115,6 +124,14 @@ func (s *Scanner) bruteForceFindFAT(ctx context.Context) ([]Partition, error) {
 				BootSector: bs,
 			})
 		}
+
+		if onProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			onProgress(blockOff+read, size)
+			lastEmit = time.Now()
+		}
+	}
+	if onProgress != nil {
+		onProgress(size, size)
 	}
 	return result, nil
 }
