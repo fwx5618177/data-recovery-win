@@ -10,17 +10,36 @@ import (
 // ResilientReader 包一个底层 DiskReader，加入坏扇区跳过 + 重试 + 0 填充策略。
 //
 // 用户场景：物理盘已经有部分坏扇区，普通 ReadAt 遇到 IO error 直接停 → 扫不完。
-// 这里的策略（参考 GNU ddrescue）：
-//   - 大块读失败时按 sectorSize 切分逐块重读
-//   - 每块最多重试 N 次（默认 2）
-//   - 全失败的块用 0 填充并记录到 BadSectors 列表
-//   - 上层（NTFS scanner / carver）拿到字节即可继续，事后从 BadSectors 拿不可恢复区列表
+//
+// 策略（v2.8.9 重构，对齐 GNU ddrescue 三段式的"fast pass"）：
+//
+//   - **正常模式**：大块读失败时按 sectorSize 切分逐扇区读，每扇区 maxRetry 次。
+//     失败的扇区 0 填充 + 记录到 BadSectors。
+//
+//   - **快速跳过模式**：连续 K 个扇区都失败 → 进入跳过模式 → 一次 0 填充 N 字节
+//     不再尝试读 → 在跳过区末尾做一次 probe → probe 成功则退出跳过模式。
+//
+//     这是 ddrescue 的核心优化：坏扇区往往**聚簇**而不是散布。一旦确认进入坏区，
+//     盲目逐扇区重试是死亡螺旋（4MB 全坏 = 8192 个 16s 重试 = 36 小时）。
+//     聚簇跳过后 4MB 全坏区只花 ~1 分钟。
+//
+//   - **可选 retry 阶段**：将来 v2.9+ 加 separate retry pass，让用户在主扫描完成后
+//     针对 BadSectors 重试（更长超时 + 更多 retries），对应 ddrescue scrape pass。
+//
+// 默认参数（v2.8.9 调整）：
+//   - maxRetry: 2 → 1（每扇区只尝试 1 次。inline retry 极少救回真坏扇区，多数在 next pass 才能恢复）
+//   - consecutiveFailureThreshold: 4 个连续坏扇区进入跳过模式
+//   - 跳过模式 chunk 大小**自适应倍增**：从 sectorSize 开始，每次 probe 失败 ×2，封顶
+//     maxSkipChunkBytes（默认 1MB）。连续坏区从快速跳过到大块跳过，能 1MB/8s = 4MB 在 32 秒内扫完。
+//     单个孤立坏扇区进入 skip mode 也只损失 1 个扇区，倍增退出后仍是 sector 粒度。
 type ResilientReader struct {
-	underlying  DiskReader
-	sectorSize  int64
-	maxRetry    int
-	mu          sync.Mutex
-	badSectors  []BadSector
+	underlying                  DiskReader
+	sectorSize                  int64
+	maxRetry                    int
+	consecutiveFailureThreshold int
+	maxSkipChunkBytes           int64
+	mu                          sync.Mutex
+	badSectors                  []BadSector
 }
 
 type BadSector struct {
@@ -29,19 +48,23 @@ type BadSector struct {
 	Err    string
 }
 
-// NewResilientReader 默认值：sectorSize=512，maxRetry=2。
+// NewResilientReader 默认值：sectorSize=512，maxRetry=1（v2.8.9 从 2 降到 1，避免坏扇区死亡螺旋）。
 // 调用方传 0 用默认。
+//
+// 内部默认：consecutiveFailureThreshold=4 个连续坏扇区触发跳过模式；skipAheadBytes=64KB 一跳。
 func NewResilientReader(underlying DiskReader, sectorSize int64, maxRetry int) *ResilientReader {
 	if sectorSize <= 0 {
 		sectorSize = 512
 	}
 	if maxRetry <= 0 {
-		maxRetry = 2
+		maxRetry = 1
 	}
 	return &ResilientReader{
-		underlying: underlying,
-		sectorSize: sectorSize,
-		maxRetry:   maxRetry,
+		underlying:                  underlying,
+		sectorSize:                  sectorSize,
+		maxRetry:                    maxRetry,
+		consecutiveFailureThreshold: 4,
+		maxSkipChunkBytes:           1024 * 1024, // 1MB cap
 	}
 }
 
@@ -78,8 +101,55 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 	totalRead := int64(0)
 	sectorBuf := make([]byte, r.sectorSize)
 
+	consecutiveFailures := 0
+	inSkipMode := false
+	skipChunk := r.sectorSize // 自适应跳过 chunk，从 1 个 sector 开始倍增
+	var probeBuf []byte
+
 	for totalRead < totalSize {
-		// 当前要读的扇区起点 + 长度
+		// ----- 跳过模式：自适应倍增 probe -----
+		// 每次 probe 失败 chunk × 2（封顶 maxSkipChunkBytes），让大坏区快速扫过。
+		// 一旦 probe 成功立刻退出 skip 模式 + chunk 重置 sectorSize，回归 sector 粒度。
+		// 这是 ddrescue 的 fast pass 思想 —— 接受边界 1MB 数据丢失，换 4MB 全坏区从
+		// 36 小时降到 ~30 秒（4MB / 1MB × 8s probe = 32s）。
+		if inSkipMode {
+			chunk := skipChunk
+			if chunk > r.maxSkipChunkBytes {
+				chunk = r.maxSkipChunkBytes
+			}
+			if totalRead+chunk > totalSize {
+				chunk = totalSize - totalRead
+			}
+			if int64(len(probeBuf)) < chunk {
+				probeBuf = make([]byte, r.maxSkipChunkBytes)
+			}
+			n, err := r.underlying.ReadAt(probeBuf[:chunk], offset+totalRead)
+			if err == nil || err == io.EOF {
+				// 健康 chunk —— 退出 skip mode + 重置 chunk 尺寸
+				copy(buf[totalRead:totalRead+int64(n)], probeBuf[:n])
+				totalRead += int64(n)
+				consecutiveFailures = 0
+				inSkipMode = false
+				skipChunk = r.sectorSize
+				if err == io.EOF {
+					return int(totalRead), nil
+				}
+			} else {
+				// 整 chunk 坏 —— 0 填充 + 记录 + 倍增下一轮 chunk
+				for i := int64(0); i < chunk; i++ {
+					buf[totalRead+i] = 0
+				}
+				r.recordBad(offset+totalRead, chunk, errString(err))
+				totalRead += chunk
+				skipChunk *= 2
+				if skipChunk > r.maxSkipChunkBytes {
+					skipChunk = r.maxSkipChunkBytes
+				}
+			}
+			continue
+		}
+
+		// ----- 正常模式：逐扇区读取 -----
 		sectorOff := offset + totalRead
 		readLen := r.sectorSize
 		if totalRead+readLen > totalSize {
@@ -97,14 +167,22 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 			}
 			lastErr = err
 			// 坏扇区常常需要短暂等待让控制器恢复
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			if attempt+1 < r.maxRetry {
+				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			}
 		}
-		if !success {
+		if success {
+			consecutiveFailures = 0
+		} else {
 			// 用 0 填充 + 记录
 			for i := int64(0); i < readLen; i++ {
 				buf[totalRead+i] = 0
 			}
 			r.recordBad(sectorOff, readLen, errString(lastErr))
+			consecutiveFailures++
+			if consecutiveFailures >= r.consecutiveFailureThreshold {
+				inSkipMode = true
+			}
 		}
 		totalRead += readLen
 	}

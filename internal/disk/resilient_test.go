@@ -96,3 +96,97 @@ func TestResilientReader_PassThroughOnHealthyDisk(t *testing.T) {
 		t.Error("健康盘不应有 bad sectors")
 	}
 }
+
+// TestResilientReader_FastSkipOnLargeBadRegion 锁住 v2.8.9 ddrescue-style fast-skip 性能契约：
+//
+// 大块全坏区域（多个 MB）不应逐扇区试 N 次 —— 那是死亡螺旋。adaptive doubling 后
+// underlying.ReadAt 调用次数应是 O(log N) 级别（chunk 倍增），不是 O(N) 级别。
+//
+// 不验证"健康数据无丢失"—— ddrescue fast pass 接受边界粒度损失换速度。
+// 真正强一致的边界恢复要走 trim/scrape pass（v2.9+ 单独实现）。
+func TestResilientReader_FastSkipOnLargeBadRegion(t *testing.T) {
+	const (
+		diskSize   = 4 * 1024 * 1024 // 4MB
+		badStart   = 64 * 1024       // 64KB 健康头
+		badEnd     = 4 * 1024 * 1024 // 余下全坏
+		badSectorN = (badEnd - badStart) / 512
+	)
+	disk := make([]byte, diskSize)
+	for i := range disk {
+		disk[i] = byte(i)
+	}
+	mock := &unstableMock{
+		data:      disk,
+		badRanges: [][2]int64{{badStart, badEnd}},
+	}
+	r := NewResilientReader(mock, 512, 1)
+
+	got := make([]byte, diskSize)
+	n, err := r.ReadAt(got, 0)
+	if err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if n != diskSize {
+		t.Errorf("应读全 %d 字节，实际 %d", diskSize, n)
+	}
+
+	// 健康头区必须完整（坏区之前的数据，0 边界丢失）
+	if !bytes.Equal(got[0:badStart], disk[0:badStart]) {
+		t.Error("坏区前健康头区损坏")
+	}
+
+	// 关键性能契约：调用次数应是 O(log N)，不是 O(N)
+	// 无 fast-skip：>= badSectorN（每扇区 1 次）= 7936 次
+	// 有 fast-skip（自适应倍增到 1MB 上限）：4 sector 试探 + ~12 chunk probe ≈ 16-30 次
+	// + 8KB 健康头 = 16 次 healthy chunk reads（4MB block 一次性读 + 切扇区）
+	// 容忍上限设 200 —— 给 mock + 健康区留余量
+	if calls := mock.readCount.Load(); calls > 200 {
+		t.Errorf("fast-skip 失效：underlying.ReadAt 调用 %d 次，应 ≤ 200（坏区 %d 扇区）", calls, badSectorN)
+	}
+}
+
+// TestResilientReader_SkipModeRecoversWhenHealthyResumes 锁住跳过模式的 probe 退出契约：
+//
+// 跳过模式必须能在坏区结束后**通过 probe 成功**自动恢复到正常模式。否则后续大块健康区
+// 会被全部 0 填充。这条比"无边界损失"弱 —— 接受跳过模式 chunk 内的边界损失，但
+// chunk 之间能正确分辨健康区。
+func TestResilientReader_SkipModeRecoversWhenHealthyResumes(t *testing.T) {
+	const (
+		diskSize   = 4 * 1024 * 1024 // 4MB
+		badStart   = 1 * 1024 * 1024 // 1MB 健康头
+		badEnd     = 2 * 1024 * 1024 // 1MB 坏区
+		// 后 2MB 全健康
+	)
+	disk := make([]byte, diskSize)
+	for i := range disk {
+		disk[i] = byte(i ^ 0xAA)
+	}
+	mock := &unstableMock{
+		data:      disk,
+		badRanges: [][2]int64{{badStart, badEnd}},
+	}
+	r := NewResilientReader(mock, 512, 1)
+
+	got := make([]byte, diskSize)
+	_, err := r.ReadAt(got, 0)
+	if err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+
+	// 健康头区（1MB）必须完整
+	if !bytes.Equal(got[0:badStart], disk[0:badStart]) {
+		t.Error("坏区前健康头区损坏")
+	}
+
+	// 健康尾区（2MB）大部分必须正确恢复 —— 不要求 100%（边界粒度损失），但 ≥ 95% 字节匹配
+	tailLen := diskSize - badEnd
+	matching := 0
+	for i := badEnd; i < diskSize; i++ {
+		if got[i] == disk[i] {
+			matching++
+		}
+	}
+	if matching*100/tailLen < 95 {
+		t.Errorf("尾区健康恢复不足：%d/%d 字节匹配（< 95%%），skip mode 没退出", matching, tailLen)
+	}
+}
