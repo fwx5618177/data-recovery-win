@@ -4,6 +4,68 @@
 
 ---
 
+## v2.8.10 (2026-04-29)
+
+**v2.8.7-2.8.9 修复全套端到端集成测试加固 —— 11 个新回归测试守住合同**
+
+### 用户反馈
+
+> "下面的问题很严重，要多写测试来保证不会有问题"
+
+之前 v2.8.7 → v2.8.8 → v2.8.9 三次修复每次都加了单元测试，但单元测试只验证组件契约，
+**没有端到端证明 14h → 1h 这个数字**。本版补齐集成测试，让架构契约变得可验证。
+
+### Added — `internal/disk/resilient_test.go`
+
+3 个新计时性测试（用 `slowBadMock` 模拟 50ms-per-failure 的真实 USB 超时行为）：
+
+```
+TestResilientReader_FastSkipBoundedTime       → 4MB 全坏区 ≤ 5s（实测 1.04s）
+TestResilientReader_FastSkipMixedRegions       → 4MB 健康 + 4MB 坏 ≤ 3s（实测 1.00s）
+TestResilientReader_DefaultMaxRetryIsOne       → 锁住 maxRetry default = 1
+```
+
+**没有 fast-skip 的话 4MB 全坏区域**：8192 sector × 50ms = 410s = 7 分钟。
+**有 fast-skip 实测**：1.04s。**~400× 加速被测试断言守住**。
+
+### Added — `internal/recovery/scan_progress_test.go` 全新
+
+7 个 engine 端到端集成测试 + 1 个跨组件 bad-sector 测试 = 8 个集成测试：
+
+```
+TestScan_DefaultMode_ReachesCarver         → 默认模式 FS 阶段 ≤ 10% 预算（防 14.3% 卡死）
+TestScan_ProgressMonotonic                 → 进度单调递增（前端 guard 的后端兜底）
+TestScan_PhaseBudgetsRespected             → 各阶段不超 fast budget 表上限
+TestScan_ForensicMode_TriggersBruteForce  → 取证模式真触发 brute-force（IncludeDeletedPartitions 透传）
+TestScan_ProgressEmitted                   → scan 至少 emit 一次 onProgress（防"即将开始"卡死）
+TestScan_CompletesQuickly_OnEmptyImage    → 4MB 空镜像 ≤ 5s（架构无意外阻塞）
+TestScan_ScanOptionsBackwardCompat         → 老 API ScanWithReader 走 fast budget
+TestScan_BadSectorEndOfDisk_TimeBudget    → 8MB 盘 4MB 末端坏 ≤ 10s（真用户场景最小再现，实测 4.8s）
+```
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 240s ./... ✅ 38 packages PASS, 11 new regression tests
+```
+
+### 这些测试守住的合同
+
+| 用户问题 | 守住合同的测试 | 失败时的报警语义 |
+|---|---|---|
+| **14.3% 卡死** | `TestScan_DefaultMode_ReachesCarver`、`TestScan_PhaseBudgetsRespected` | brute-force 漏到默认路径 / budget 表配错 |
+| **180 B/s 死亡螺旋** | `TestResilientReader_FastSkipBoundedTime`、`TestResilientReader_FastSkipMixedRegions`、`TestResilientReader_DefaultMaxRetryIsOne` | maxRetry 被改回 2 / fast-skip 算法退化 |
+| **14h 总耗时** | `TestScan_BadSectorEndOfDisk_TimeBudget`、`TestScan_CompletesQuickly_OnEmptyImage` | engine 流程引入意外串行 IO / fast-skip 没透到 engine |
+
+### Files Changed
+
+- `internal/disk/resilient_test.go` — 3 个新计时性测试（+ slowBadMock 模拟器）
+- `internal/recovery/scan_progress_test.go` — 全新文件，8 个端到端 + 跨组件集成测试 + slowDiskMock
+
+---
+
 ## v2.8.9 (2026-04-29)
 
 **末端 180 B/s 死亡螺旋根除 —— ResilientReader 改为 ddrescue fast-pass 自适应跳过**
