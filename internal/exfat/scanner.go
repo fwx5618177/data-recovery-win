@@ -13,6 +13,19 @@ import (
 // 调用方 (recovery dispatcher) 把它包装成 types.ScanProgress 喂给前端。
 type ProgressFn = func(scanned, total int64)
 
+// FindOptions 控制 FindPartitions 的执行策略。
+//
+// 默认（BruteForce=false）：只跑 strategy-a（offset-0 ParseBootSector），健康盘上
+// 微秒返回。fast path 失败时直接返回 (nil, "未发现 exFAT 分区")，**不做隐式 brute-force fallback**。
+// 这跟 R-Studio Quick scan / PhotoRec 默认 / DMDE Quick / TestDisk 默认行为一致。
+//
+// BruteForce=true（取证模式）：在 fast path 之外**总是**额外跑全盘签名扫描，找已删除/
+// 丢失的 exFAT 分区。代价：125GB 盘 ≈ 1 小时 IO（取决于盘速 + 坏扇区重试）。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
+
 // Scanner 扫描一块磁盘 / 一份镜像中的 exFAT 分区，递归枚举所有目录条目。
 // 使用方式：
 //
@@ -47,20 +60,19 @@ type FoundFile struct {
 
 // FindPartitions 扫描磁盘定位 exFAT 分区。
 //
-// 和 NTFS 一样：
-//  1. 如果磁盘整体就是一个 exFAT 分区（常见于 U 盘 / SD 卡），offset 0 就能解析成功
-//  2. 否则按 MBR/GPT 指向的分区头解析（复用 NTFS 侧的分区表代码思路）
-//  3. 都失败时，全盘暴力扫 "EXFAT   " OEM ID 做兜底（找被删除的旧分区残骸）
+// 策略：
+//  1. **策略 a（fast path）**：尝试 offset 0 解析整盘即 exFAT volume（U 盘 / SD 卡 99% 的场景）。
+//  2. **策略 b（brute-force）**：opts.BruteForce=true 时**额外**全盘扫 "EXFAT   " OEM ID
+//     找被删除/丢失的旧分区。**默认关闭**（v2.8.8+ 行为，对齐 R-Studio Quick scan / PhotoRec 默认）。
 //
-// 本实现先落最实用的那条：
-//  - 尝试 offset 0 解析（U 盘 / SD 卡场景的 99%）
-//  - 失败则按 4MB 步长做签名扫描兜底
-//
-// onProgress 用于全盘暴力扫描期间反馈进度；可传 nil。
-func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
+// 关键决策：fast path 失败时**不**隐式 fallback 到 brute-force，因为：
+//   - 隐式 fallback = 用户感知的"为什么我的扫描跑了 14 小时"
+//   - 显式 fallback = 让上层决定（"fast path 没找到东西，要不要切到取证模式重扫？"）
+//   - 行业标准是后者
+func (s *Scanner) FindPartitions(ctx context.Context, opts FindOptions) ([]Partition, error) {
 	var partitions []Partition
 
-	// 策略 a：假设整盘即一个 exFAT 分区
+	// 策略 a：假设整盘即一个 exFAT 分区（fast path，微秒级）
 	if bs, err := ParseBootSector(s.reader, 0); err == nil {
 		partitions = append(partitions, Partition{
 			Offset:     0,
@@ -70,10 +82,13 @@ func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]
 		})
 	}
 
-	// 策略 b：全盘签名扫描（兜底）。与 NTFS 的 bruteForceFindNTFS 思路一致
-	brute, err := s.bruteForceFindEXFAT(ctx, onProgress)
-	if err == nil {
-		partitions = append(partitions, brute...)
+	// 策略 b：全盘暴力签名扫描（仅取证模式启用）。
+	// 找已删除/丢失分区用，代价 = 1 次全盘 IO。
+	if opts.BruteForce {
+		brute, err := s.bruteForceFindEXFAT(ctx, opts.OnProgress)
+		if err == nil {
+			partitions = append(partitions, brute...)
+		}
 	}
 
 	partitions = dedupePartitions(partitions)

@@ -12,6 +12,15 @@ import (
 // ProgressFn 是分区发现阶段的进度回调；scanned 已扫描字节数，total 磁盘总字节数。
 type ProgressFn = func(scanned, total int64)
 
+// FindOptions 见 exfat.FindOptions —— 同义。
+//
+// 默认 BruteForce=false：只解析 offset 0 boot sector，failed 直接返回空，**不**隐式
+// brute-force fallback。BruteForce=true：找已删除 FAT 分区，代价是 1 次全盘 IO。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
+
 // Scanner 扫描 FAT 分区 + 遍历目录。
 type Scanner struct {
 	reader disk.DiskReader
@@ -38,14 +47,17 @@ type FoundFile struct {
 
 // FindPartitions 定位 FAT12/16/32 分区。
 //
-// 和 exFAT 扫描策略一致：先试 offset 0（整盘）；没成功就全盘扫 boot signature。
-// FAT 没有独立的 "FAT   " OEM ID，所以只能靠 boot signature 0xAA55 + 字段合理性检查。
+// 策略：
+//  1. **策略 a（fast path）**：解析 offset 0 boot sector，签名/字段合理性通过即返回 1 个分区。
+//  2. **策略 b（brute-force）**：opts.BruteForce=true 时额外全盘扫 0xAA55 boot signature
+//     + bytes-per-sector 合理性过滤，找已删除 FAT 分区。**默认关闭**（v2.8.8+）。
 //
-// onProgress 用于全盘暴力扫描期间反馈进度；可传 nil。
-func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
+// FAT 没有独立的 "FAT   " OEM ID，brute-force 只能靠 0xAA55 + 字段过滤，假阳性比 exFAT 多。
+// 默认关掉它的另一个理由 —— 现代盘上 FAT 分区罕见，大量 IO 换零结果。
+func (s *Scanner) FindPartitions(ctx context.Context, opts FindOptions) ([]Partition, error) {
 	var parts []Partition
 
-	// 策略 a: offset 0
+	// 策略 a: offset 0（fast path）
 	if bs, err := ParseBootSector(s.reader, 0); err == nil {
 		if bs.FSType != TypeUnknown {
 			parts = append(parts, Partition{
@@ -57,10 +69,12 @@ func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]
 		}
 	}
 
-	// 策略 b: 全盘 signature scan 兜底
-	brute, err := s.bruteForceFindFAT(ctx, onProgress)
-	if err == nil {
-		parts = append(parts, brute...)
+	// 策略 b: 全盘 signature scan（仅取证模式）
+	if opts.BruteForce {
+		brute, err := s.bruteForceFindFAT(ctx, opts.OnProgress)
+		if err == nil {
+			parts = append(parts, brute...)
+		}
 	}
 
 	parts = dedupePartitions(parts)

@@ -14,6 +14,19 @@ import (
 // 调用方 (recovery dispatcher) 把它包装成 types.ScanProgress 喂给前端。
 type ProgressFn = func(scanned, total int64)
 
+// FindOptions 控制 FindPartitions 的执行策略。
+//
+// 默认 BruteForce=false：跑 MBR + GPT fast path（毫秒级），找到分区即返回。
+//
+// BruteForce=true：在 fast path 之外**额外**全盘扫 "NTFS    " OEM ID 找已删除/孤立的
+// 旧 NTFS 分区残骸。**这是被盗笔记本数据恢复的核心场景**：原盘被重装系统 → 新分区表只
+// 有当前系统分区，但旧 NTFS boot sector 还在磁盘上 → brute-force 能定位到然后救数据。
+// 这也正是司法取证的一环。代价 = 1 次全盘 IO。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
+
 // ========== 分区表解析 ==========
 //
 // NTFS 工具在面对整盘（\\.\PhysicalDrive0 或 /dev/diskN）时需要先定位其上的
@@ -52,27 +65,39 @@ type Partition struct {
 // R-Studio / DMDE 的 "deleted partition scan" 就是这个思路；dedupePartitions 负责把
 // MBR/GPT 已登记的分区去掉重复，留下孤立的旧 NTFS 残骸。
 //
-// onProgress 用于全盘暴力扫描期间反馈进度（MBR/GPT 阶段读量很小，可忽略）；可传 nil。
-func (s *Scanner) FindPartitions(ctx context.Context, onProgress ProgressFn) ([]Partition, error) {
+// 策略（v2.8.8+ 修订）：
+//   - **MBR + GPT** 永远跑（毫秒级，零成本）
+//   - **brute-force** 仅在 opts.BruteForce=true 时跑（取证模式专用，125GB 盘 ≈ 1h IO）
+//
+// 关键决策：之前注释写的"行业惯例分区表+签名扫双保险" —— 错的。R-Studio / DMDE 的双保险
+// 是 **opt-in** 的 "Full scan" / "Deleted partition recovery"，不是默认。默认 (Quick scan)
+// 只跑 MBR/GPT。把 brute-force 默认关上是 v2.8.8 的核心架构修复 —— 之前 v2.8.7 之前的
+// 实现导致用户扫 125GB U 盘要 14 小时（3 次全盘读叠加坏扇区重试地狱）。
+func (s *Scanner) FindPartitions(ctx context.Context, opts FindOptions) ([]Partition, error) {
 	var partitions []Partition
 
-	// ---- 策略 a: MBR ----
+	// ---- 策略 a: MBR（fast path）----
 	mbrPartitions, mbrErr := s.findMBRPartitions()
 	if mbrErr == nil && len(mbrPartitions) > 0 {
 		partitions = append(partitions, mbrPartitions...)
 	}
 
-	// ---- 策略 b: GPT ----
+	// ---- 策略 b: GPT（fast path）----
 	gptPartitions, gptErr := s.findGPTPartitions(ctx)
 	if gptErr == nil && len(gptPartitions) > 0 {
 		partitions = append(partitions, gptPartitions...)
 	}
 
-	// ---- 策略 c: 暴力搜索 NTFS 引导扇区（用于定位已删除的旧分区）----
-	// 总是跑，哪怕 MBR/GPT 已经给了结果 —— 行业惯例是"分区表 + 签名扫"双保险
-	brutePartitions, bruteErr := s.bruteForceFindNTFS(ctx, onProgress)
-	if bruteErr == nil && len(brutePartitions) > 0 {
-		partitions = append(partitions, brutePartitions...)
+	// ---- 策略 c: 暴力搜索 NTFS 引导扇区（仅取证模式）----
+	// 找 MBR/GPT 没登记但磁盘上还存在的旧 NTFS 分区残骸。
+	// 这是被盗笔记本被重装系统后救回原数据的关键路径 —— 但默认不跑，让用户显式选 forensic 模式。
+	var bruteErr error
+	if opts.BruteForce {
+		brutePartitions, err := s.bruteForceFindNTFS(ctx, opts.OnProgress)
+		bruteErr = err
+		if err == nil && len(brutePartitions) > 0 {
+			partitions = append(partitions, brutePartitions...)
+		}
 	}
 
 	if len(partitions) == 0 {

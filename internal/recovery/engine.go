@@ -212,6 +212,51 @@ func (e *Engine) IsScanning() bool {
 	return e.scanning
 }
 
+// phaseBudget 各阶段在总进度条上的起止百分比。
+//
+// 为什么需要双套预算：默认模式（fast path only）下 FS scan 是毫秒级，carver 是真实 IO 大头；
+// 取证模式（brute-force on）下 ntfs/exfat/fat 各跑一遍全盘 IO，预算需要让 brute-force 阶段
+// 占大部分。v2.8.7 之前用单套预算（FAT 只占 0.5%）→ 用户看到 14% 卡死十几小时。
+type phaseBudget struct {
+	ntfsStart, ntfsEnd         float64
+	exfatStart, exfatEnd       float64
+	fatStart, fatEnd           float64
+	extStart, extEnd           float64
+	apfsStart, apfsEnd         float64
+	hfsplusStart, hfsplusEnd   float64
+	btrfsStart, btrfsEnd       float64
+	carverStart, carverEnd     float64
+	validateStart, validateEnd float64
+}
+
+// fastBudget：默认模式（不做 brute-force）。FS scan 都是毫秒级，carver 占 86% 的进度条
+// 因为它确实占 ~95% 的实际耗时。
+var fastBudget = phaseBudget{
+	ntfsStart: 0, ntfsEnd: 2,
+	exfatStart: 2, exfatEnd: 4,
+	fatStart: 4, fatEnd: 5,
+	extStart: 5, extEnd: 6,
+	apfsStart: 6, apfsEnd: 7,
+	hfsplusStart: 7, hfsplusEnd: 8,
+	btrfsStart: 8, btrfsEnd: 9,
+	carverStart: 9, carverEnd: 95,
+	validateStart: 95, validateEnd: 100,
+}
+
+// forensicBudget：取证模式（IncludeDeletedPartitions=true）。
+// ntfs/exfat/fat 各做一遍全盘 brute-force IO + carver 第四遍全盘 IO，所以四块平均分预算。
+var forensicBudget = phaseBudget{
+	ntfsStart: 0, ntfsEnd: 25,
+	exfatStart: 25, exfatEnd: 50,
+	fatStart: 50, fatEnd: 70,
+	extStart: 70, extEnd: 72,
+	apfsStart: 72, apfsEnd: 74,
+	hfsplusStart: 74, hfsplusEnd: 76,
+	btrfsStart: 76, btrfsEnd: 78,
+	carverStart: 78, carverEnd: 95,
+	validateStart: 95, validateEnd: 100,
+}
+
 // Scan 主扫描方法，根据扫描模式协调各子模块完成磁盘扫描
 //
 // 参数:
@@ -219,10 +264,22 @@ func (e *Engine) IsScanning() bool {
 //   - mode:       扫描模式 (quick/deep/full)
 //   - callbacks:  扫描回调函数集合
 //
+// 默认 IncludeDeletedPartitions=false（行业标准 Quick scan 行为）。
+// 想要 forensic 模式找已删除分区的 caller 用 ScanWithOptions / ScanWithReaderOptions。
+//
 // 返回扫描结果汇总和可能的错误
 func (e *Engine) Scan(
 	drivePath string,
 	mode types.ScanMode,
+	callbacks ScanCallbacks,
+) (*types.ScanResult, error) {
+	return e.ScanWithOptions(drivePath, types.ScanOptions{Mode: mode}, callbacks)
+}
+
+// ScanWithOptions 是 Scan 的完整版，支持 ScanOptions 细粒度控制（比如 forensic 模式）。
+func (e *Engine) ScanWithOptions(
+	drivePath string,
+	opts types.ScanOptions,
 	callbacks ScanCallbacks,
 ) (*types.ScanResult, error) {
 	base := disk.NewReader(drivePath)
@@ -242,7 +299,7 @@ func (e *Engine) Scan(
 	e.mu.Lock()
 	e.resilientReader = reader
 	e.mu.Unlock()
-	return e.ScanWithReader(reader, mode, callbacks)
+	return e.ScanWithReaderOptions(reader, opts, callbacks)
 }
 
 // ScanWithReader 与 Scan 相同，但 DiskReader 由调用方提供（已打开）。
@@ -252,11 +309,23 @@ func (e *Engine) Scan(
 //	物理盘 → bitlocker.DecryptingReader（透明解密）→ ScanWithReader
 //
 // 调用方负责 reader 的生命周期（Open/Close 都由调用方掌控）。
+//
+// 默认 IncludeDeletedPartitions=false（同 Scan）。Forensic 模式用 ScanWithReaderOptions。
 func (e *Engine) ScanWithReader(
 	reader disk.DiskReader,
 	mode types.ScanMode,
 	callbacks ScanCallbacks,
 ) (*types.ScanResult, error) {
+	return e.ScanWithReaderOptions(reader, types.ScanOptions{Mode: mode}, callbacks)
+}
+
+// ScanWithReaderOptions 是 ScanWithReader 的完整版，支持 ScanOptions。
+func (e *Engine) ScanWithReaderOptions(
+	reader disk.DiskReader,
+	opts types.ScanOptions,
+	callbacks ScanCallbacks,
+) (*types.ScanResult, error) {
+	mode := opts.Mode
 	if reader == nil {
 		return nil, fmt.Errorf("reader 不能为 nil")
 	}
@@ -324,18 +393,31 @@ func (e *Engine) ScanWithReader(
 		}
 	}
 
+	// 选预算表：默认 fast（FS 阶段毫秒级，carver 占 86%）；取证模式 forensic（每个 brute-force
+	// FS 占 ~25% 反映真实耗时）。
+	budget := fastBudget
+	if opts.IncludeDeletedPartitions {
+		budget = forensicBudget
+	}
+
+	// phaseRange 把 phase-internal 0-100% 映射到全局进度条上 [start, end] 区间。
+	// 替代之前散落各处的 `p.Percent = base + p.Percent * span` 硬编码，统一来源。
+	phaseRange := func(start, end float64) func(types.ScanProgress) {
+		span := end - start
+		return func(p types.ScanProgress) {
+			p.Percent = start + p.Percent*span/100.0
+			safeProgress(p)
+		}
+	}
+
 	var allFiles []*types.RecoveredFile
 
 	// 根据模式执行不同的扫描策略
 	switch mode {
 	case types.ScanQuick:
 		// 快速模式：仅 NTFS MFT 扫描
-		logger.Info("扫描模式", "mode", "quick")
-		files, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
-			// quick 模式下 NTFS 占 0-95%
-			p.Percent = p.Percent * 0.95
-			safeProgress(p)
-		}, safeFound)
+		logger.Info("扫描模式", "mode", "quick", "forensic", opts.IncludeDeletedPartitions)
+		files, err := e.runNTFSScan(ctx, reader, 0, opts.IncludeDeletedPartitions, phaseRange(0, 95), safeFound)
 		if err != nil {
 			return nil, fmt.Errorf("NTFS 扫描失败: %w", err)
 		}
@@ -344,30 +426,21 @@ func (e *Engine) ScanWithReader(
 	case types.ScanDeep:
 		// 深度模式：仅深度扫描
 		logger.Info("扫描模式", "mode", "deep")
-		files, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), func(p types.ScanProgress) {
-			// deep 模式下 carver 占 0-95%
-			p.Percent = p.Percent * 0.95
-			safeProgress(p)
-		}, safeFound)
+		files, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), phaseRange(0, 95), safeFound)
 		if err != nil {
 			return nil, fmt.Errorf("深度扫描失败: %w", err)
 		}
 		allFiles = append(allFiles, files...)
 
 	case types.ScanFull:
-		// 完整模式：NTFS + 深度扫描 + 验证
-		logger.Info("扫描模式", "mode", "full")
+		// 完整模式：所有 FS scan + 深度扫描 + 验证
+		logger.Info("扫描模式", "mode", "full", "forensic", opts.IncludeDeletedPartitions)
 
-		// 阶段1: NTFS 扫描 (0-12%)
-		// 注意权重：NTFS 只读 MFT（磁盘很小一部分），对 U 盘通常几秒到十几秒就完成；
-		// 深度扫描要读全盘，耗时占大头。把 NTFS 权重压到 12%，留 3% 给 exFAT
-		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, func(p types.ScanProgress) {
-			p.Percent = p.Percent * 0.12
-			safeProgress(p)
-		}, safeFound)
+		// 阶段1: NTFS 扫描
+		ntfsFiles, err := e.runNTFSScan(ctx, reader, 0, opts.IncludeDeletedPartitions, phaseRange(budget.ntfsStart, budget.ntfsEnd), safeFound)
 		if err != nil {
 			// NTFS 扫描失败不中断（磁盘本身可能是 exFAT / 只有 exFAT 分区）
-			logger.Warn("NTFS 扫描失败 (继续 exFAT + 深度扫描)", "err", err)
+			logger.Warn("NTFS 扫描失败 (继续后续 FS + 深度扫描)", "err", err)
 		} else {
 			allFiles = append(allFiles, ntfsFiles...)
 		}
@@ -375,11 +448,8 @@ func (e *Engine) ScanWithReader(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段1.5: exFAT 扫描 (12-14%)——对 U 盘 / SD 卡 / 移动硬盘关键
-		exfatFiles, exfatErr := e.runEXFATScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 12.0 + p.Percent*0.02
-			safeProgress(p)
-		}, safeFound)
+		// 阶段1.5: exFAT 扫描 —— 对 U 盘 / SD 卡 / 移动硬盘关键
+		exfatFiles, exfatErr := e.runEXFATScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.exfatStart, budget.exfatEnd), safeFound)
 		if exfatErr != nil {
 			logger.Warn("exFAT 扫描失败或未发现 exFAT 分区", "err", exfatErr)
 		} else {
@@ -389,11 +459,8 @@ func (e *Engine) ScanWithReader(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段1.6: FAT12/16/32 扫描 (14-15%)——老 U 盘 / 老 SD 卡 / 老相机
-		fatFiles, fatErr := e.runFATScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.0 + p.Percent*0.005
-			safeProgress(p)
-		}, safeFound)
+		// 阶段1.6: FAT12/16/32 扫描 —— 老 U 盘 / 老 SD 卡 / 老相机
+		fatFiles, fatErr := e.runFATScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.fatStart, budget.fatEnd), safeFound)
 		if fatErr != nil {
 			logger.Warn("FAT 扫描失败或未发现 FAT 分区", "err", fatErr)
 		} else {
@@ -403,11 +470,8 @@ func (e *Engine) ScanWithReader(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段1.7: ext2/3/4 扫描 (14.5-14.7%)——Linux/Android 设备
-		extFiles, extErr := e.runEXTScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.5 + p.Percent*0.002
-			safeProgress(p)
-		}, safeFound)
+		// 阶段1.7: ext2/3/4 扫描 —— Linux/Android 设备
+		extFiles, extErr := e.runEXTScan(ctx, reader, phaseRange(budget.extStart, budget.extEnd), safeFound)
 		if extErr != nil {
 			logger.Warn("ext 扫描失败或未发现 ext 分区", "err", extErr)
 		} else {
@@ -418,10 +482,7 @@ func (e *Engine) ScanWithReader(
 		}
 
 		// 阶段1.8: APFS 卷文件枚举（macOS / iOS 系统盘）
-		apfsFiles, apfsErr := e.runAPFSScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.7 + p.Percent*0.002
-			safeProgress(p)
-		}, safeFound)
+		apfsFiles, apfsErr := e.runAPFSScan(ctx, reader, phaseRange(budget.apfsStart, budget.apfsEnd), safeFound)
 		if apfsErr != nil {
 			logger.Warn("APFS 扫描失败或未发现 APFS", "err", apfsErr)
 		} else {
@@ -432,10 +493,7 @@ func (e *Engine) ScanWithReader(
 		}
 
 		// 阶段1.9: HFS+ 卷文件枚举（老 macOS / Time Machine）
-		hfsFiles, hfsErr := e.runHFSPlusScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.9 + p.Percent*0.001
-			safeProgress(p)
-		}, safeFound)
+		hfsFiles, hfsErr := e.runHFSPlusScan(ctx, reader, phaseRange(budget.hfsplusStart, budget.hfsplusEnd), safeFound)
 		if hfsErr != nil {
 			logger.Warn("HFS+ 扫描失败或未发现 HFS+", "err", hfsErr)
 		} else {
@@ -446,10 +504,7 @@ func (e *Engine) ScanWithReader(
 		}
 
 		// 阶段1.95: Btrfs 卷文件枚举（Linux 较新发行版 / Synology / Facebook）
-		btrFiles, btrErr := e.runBtrfsScan(ctx, reader, func(p types.ScanProgress) {
-			p.Percent = 14.95 + p.Percent*0.001
-			safeProgress(p)
-		}, safeFound)
+		btrFiles, btrErr := e.runBtrfsScan(ctx, reader, phaseRange(budget.btrfsStart, budget.btrfsEnd), safeFound)
 		if btrErr != nil {
 			logger.Warn("Btrfs 扫描失败或未发现 Btrfs", "err", btrErr)
 		} else {
@@ -459,11 +514,8 @@ func (e *Engine) ScanWithReader(
 			return nil, fmt.Errorf("扫描已取消")
 		}
 
-		// 阶段2: 深度扫描 (15-95%) — 占 80% 的总进度，与实际耗时比例更接近
-		carverFiles, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), func(p types.ScanProgress) {
-			p.Percent = 15.0 + p.Percent*0.80
-			safeProgress(p)
-		}, safeFound)
+		// 阶段2: 深度扫描 (默认 9-95% / forensic 78-95%)
+		carverFiles, err := e.runCarverScan(ctx, reader, e.popResumeCarverOffset(), phaseRange(budget.carverStart, budget.carverEnd), safeFound)
 		if err != nil {
 			logger.Warn("深度扫描失败", "err", err)
 		} else {
@@ -476,10 +528,7 @@ func (e *Engine) ScanWithReader(
 		}
 
 		// 阶段3: 验证所有文件 (95-100%)
-		e.validateAll(allFiles, reader, func(p types.ScanProgress) {
-			p.Percent = 95.0 + p.Percent*0.05
-			safeProgress(p)
-		})
+		e.validateAll(allFiles, reader, phaseRange(budget.validateStart, budget.validateEnd))
 
 	default:
 		return nil, fmt.Errorf("未知扫描模式: %s", mode)
@@ -487,10 +536,7 @@ func (e *Engine) ScanWithReader(
 
 	// 对 quick/deep 模式也进行验证 (95-100%)
 	if mode != types.ScanFull {
-		e.validateAll(allFiles, reader, func(p types.ScanProgress) {
-			p.Percent = 95.0 + p.Percent*0.05
-			safeProgress(p)
-		})
+		e.validateAll(allFiles, reader, phaseRange(budget.validateStart, budget.validateEnd))
 	}
 
 	// 构建扫描结果

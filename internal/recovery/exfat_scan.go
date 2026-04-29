@@ -25,13 +25,17 @@ import (
 //   - 连续存储（NoFatChain=1）的文件可完整恢复
 //   - 碎片文件走 FAT 链拼 cluster 列表（本批次已内置），已删除碎片文件的 FAT
 //     链可能已被回收，那种情况 FollowFATChain 会报错，上层归入 partial
+//
+// includeDeletedPartitions = true 启用 brute-force 找已删除/丢失的 exFAT 分区残骸（取证模式）；
+// false 只跑 fast path（默认；健康盘上微秒级返回）。
 func (e *Engine) runEXFATScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 exFAT 扫描")
+	logger.Info("开始 exFAT 扫描", "brute_force", includeDeletedPartitions)
 
 	// 立刻 emit 一个 0% 占位，让前端跳出 ready/init 状态进入 "正在查找 exFAT 分区..."
 	if onProgress != nil {
@@ -44,22 +48,26 @@ func (e *Engine) runEXFATScan(
 
 	scanner := exfat.NewScanner(reader)
 
-	// 暴力扫分区时把字节级进度映射到 0-50% phase 进度（找到分区后再喂另一半）
-	partitions, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
-		if onProgress == nil || total <= 0 {
-			return
-		}
-		percent := float64(scanned) / float64(total) * 50.0
-		if percent < 0.5 {
-			percent = 0.5
-		}
-		onProgress(types.ScanProgress{
-			Phase:        "exfat",
-			Percent:      percent,
-			BytesScanned: scanned,
-			TotalBytes:   total,
-			CurrentFile:  fmt.Sprintf("正在查找 exFAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
-		})
+	// 暴力扫分区时把字节级进度映射到 0-50% phase 进度（找到分区后再喂另一半）。
+	// 默认模式下 BruteForce=false → onProgress 这个 callback 不会触发（fast path 微秒返回）。
+	partitions, err := scanner.FindPartitions(ctx, exfat.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "exfat",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 exFAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
 	})
 	if err != nil {
 		return nil, err

@@ -38,10 +38,11 @@ func (e *Engine) runNTFSScan(
 	ctx context.Context,
 	reader disk.DiskReader,
 	partitionOffset int64,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 NTFS MFT 扫描")
+	logger.Info("开始 NTFS MFT 扫描", "brute_force", includeDeletedPartitions)
 
 	if onProgress != nil {
 		onProgress(types.ScanProgress{
@@ -56,7 +57,7 @@ func (e *Engine) runNTFSScan(
 	e.ntfsScn = scanner
 	e.mu.Unlock()
 
-	partitions, err := e.resolveNTFSPartitions(ctx, scanner, reader, partitionOffset, onProgress)
+	partitions, err := e.resolveNTFSPartitions(ctx, scanner, reader, partitionOffset, includeDeletedPartitions, onProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +243,14 @@ func (e *Engine) recoverNTFSFile(file *types.RecoveredFile, outputPath string) e
 //   - 物理盘（\\.\PhysicalDriveN / /dev/diskN）：走 FindPartitions 自动枚举
 //   - 逻辑盘（\\.\C: / /dev/disk0s2）：只扫盘首的那一个 NTFS 卷
 //
+// includeDeletedPartitions：取证模式开关。物理盘上 true 才启用全盘暴力扫描找已删除的旧 NTFS。
 // onProgress 用于物理盘暴力扫分区期间反馈进度；可传 nil。
 func (e *Engine) resolveNTFSPartitions(
 	ctx context.Context,
 	scanner *ntfs.Scanner,
 	reader disk.DiskReader,
 	partitionOffset int64,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 ) ([]ntfs.Partition, error) {
 	if partitionOffset > 0 {
@@ -265,23 +268,27 @@ func (e *Engine) resolveNTFSPartitions(
 	}
 
 	if isPhysicalDrivePath(reader.DevicePath()) {
-		// 物理盘走全盘暴力扫描，可能耗时几分钟，必须有进度反馈。
-		// 把字节级进度映射到 NTFS 阶段的 0-50%（剩余 50% 留给 MFT 扫描）。
-		partitions, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
-			if onProgress == nil || total <= 0 {
-				return
-			}
-			percent := float64(scanned) / float64(total) * 50.0
-			if percent < 0.5 {
-				percent = 0.5
-			}
-			onProgress(types.ScanProgress{
-				Phase:        "ntfs",
-				Percent:      percent,
-				BytesScanned: scanned,
-				TotalBytes:   total,
-				CurrentFile:  fmt.Sprintf("正在查找 NTFS 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
-			})
+		// 物理盘走 MBR/GPT fast path（必跑，毫秒级）+ brute-force（仅取证模式）。
+		// 默认模式下 brute-force 不跑，下面这个 progress callback 不会触发；
+		// 取证模式下字节级进度映射到 NTFS 阶段的 0-50%。
+		partitions, err := scanner.FindPartitions(ctx, ntfs.FindOptions{
+			BruteForce: includeDeletedPartitions,
+			OnProgress: func(scanned, total int64) {
+				if onProgress == nil || total <= 0 {
+					return
+				}
+				percent := float64(scanned) / float64(total) * 50.0
+				if percent < 0.5 {
+					percent = 0.5
+				}
+				onProgress(types.ScanProgress{
+					Phase:        "ntfs",
+					Percent:      percent,
+					BytesScanned: scanned,
+					TotalBytes:   total,
+					CurrentFile:  fmt.Sprintf("正在查找已删除 NTFS 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+				})
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("在物理磁盘上未找到可扫描的 NTFS 分区: %w", err)

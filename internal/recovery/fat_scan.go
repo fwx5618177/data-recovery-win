@@ -22,13 +22,17 @@ import (
 // ================================================================
 
 // runFATScan 执行 FAT12/16/32 扫描。
+//
+// includeDeletedPartitions：取证模式开关（同 runEXFATScan）。FAT brute-force 假阳性多
+// （0xAA55 boot signature 不独有），默认关。
 func (e *Engine) runFATScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 FAT 扫描")
+	logger.Info("开始 FAT 扫描", "brute_force", includeDeletedPartitions)
 
 	if onProgress != nil {
 		onProgress(types.ScanProgress{
@@ -39,21 +43,24 @@ func (e *Engine) runFATScan(
 	}
 
 	scanner := fat.NewScanner(reader)
-	parts, err := scanner.FindPartitions(ctx, func(scanned, total int64) {
-		if onProgress == nil || total <= 0 {
-			return
-		}
-		percent := float64(scanned) / float64(total) * 50.0
-		if percent < 0.5 {
-			percent = 0.5
-		}
-		onProgress(types.ScanProgress{
-			Phase:        "fat",
-			Percent:      percent,
-			BytesScanned: scanned,
-			TotalBytes:   total,
-			CurrentFile:  fmt.Sprintf("正在查找 FAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
-		})
+	parts, err := scanner.FindPartitions(ctx, fat.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "fat",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 FAT 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
 	})
 	if err != nil {
 		return nil, err

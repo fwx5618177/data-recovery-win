@@ -67,6 +67,29 @@ const (
 	ScanFull  ScanMode = "full"  // 完整：NTFS + 深度扫描
 )
 
+// ScanOptions 扫描参数包。把 Mode + 取证开关 + 未来要加的可选项打包传入 Engine。
+//
+// IncludeDeletedPartitions 控制 brute-force 全盘签名扫描是否启用：
+//
+//   - false（默认）：只走 MBR / GPT / offset-0 的 fast path。健康磁盘上 fast path
+//     在微秒内拿到答案 —— 跳过 brute-force 是行业标准（R-Studio "Quick scan" /
+//     PhotoRec 默认 / DMDE "Quick" / TestDisk 默认）。fast path 失败时也直接返回
+//     空，让上层决定要不要换 forensic 模式重扫。**不做 fallback 类的隐式重试。**
+//
+//   - true（取证模式 / 找已删除分区）：在 fast path 之外**总是**额外跑 brute-force。
+//     用于 R-Studio 的 "deleted partition recovery" / DMDE 的 "Full scan" / 重置过
+//     的笔记本找回旧 NTFS 残骸 / 司法取证场景。代价：每个支持 brute-force 的 FS
+//     都额外读一遍全盘。125GB 盘 ≈ 1-2 小时（USB 3.0），对应每 FS 一遍。
+//
+// 决策依据：默认场景下，brute-force 在 healthy disk 上**找不到任何 fast path 没找到的东西**
+// （strategy-a 命中后 brute-force 找到的同一个分区会被 dedup 干掉）—— 就是纯浪费 IO。
+// v2.8.7 之前的行为是"永远 brute-force"，本质上把所有用户的扫描时间放大 N×
+// （N = brute-force 跑的 FS 数），换不到任何额外文件。
+type ScanOptions struct {
+	Mode                     ScanMode
+	IncludeDeletedPartitions bool
+}
+
 // DriveInfo 驱动器信息
 type DriveInfo struct {
 	Path        string `json:"path"`

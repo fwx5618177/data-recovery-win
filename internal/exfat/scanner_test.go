@@ -284,7 +284,7 @@ func TestFindPartitions_Volume(t *testing.T) {
 	reader := testutil.NewMemReader(img)
 	scanner := NewScanner(reader)
 
-	parts, err := scanner.FindPartitions(context.Background(), nil)
+	parts, err := scanner.FindPartitions(context.Background(), FindOptions{})
 	if err != nil {
 		t.Fatalf("FindPartitions 失败: %v", err)
 	}
@@ -297,30 +297,53 @@ func TestFindPartitions_Volume(t *testing.T) {
 	}
 }
 
-// TestFindPartitions_ProgressCallback 锁住一个回归契约：
-// 全盘 brute-force 分区发现期间必须至少回调一次 onProgress，否则 UI 在一个 128GB
-// U 盘上会卡在 0% / "即将开始" 几分钟（QA 反复抓到的 bug，2026-04-28 修）。
+// TestFindPartitions_DefaultSkipsBruteForce 锁住 v2.8.8 核心架构契约：
+// 默认模式下（FindOptions 零值），fast path 命中后**绝不**触发 brute-force。
+// 这是 v2.8.7 → v2.8.8 修复的核心：之前永远 brute-force 导致 128GB U 盘扫 14 小时。
 //
-// 实现细节：bruteForceFindEXFAT 每 ~500ms 节流回调；走完盘也会发一次 100% final tick。
-// 这个 case 只验证"至少一次 final tick"，所以即便测试用的小镜像 brute-force 跑得很快
-// 也能命中。
-func TestFindPartitions_ProgressCallback(t *testing.T) {
+// 验证手段：传入一个会 panic 的 onProgress —— 如果 brute-force 触发了它就会被调用 → 测试挂掉。
+func TestFindPartitions_DefaultSkipsBruteForce(t *testing.T) {
+	img := buildSyntheticExFATImage(t)
+	reader := testutil.NewMemReader(img)
+	scanner := NewScanner(reader)
+
+	parts, err := scanner.FindPartitions(context.Background(), FindOptions{
+		// BruteForce 默认 false
+		OnProgress: func(scanned, total int64) {
+			t.Fatalf("默认模式下 brute-force 不应运行（被调用了 onProgress: scanned=%d total=%d）", scanned, total)
+		},
+	})
+	if err != nil {
+		t.Fatalf("FindPartitions 失败: %v", err)
+	}
+	if len(parts) == 0 {
+		t.Fatal("fast path 应找到 offset=0 的分区")
+	}
+}
+
+// TestFindPartitions_ForensicRunsBruteForce 锁住反向契约：
+// 取证模式（BruteForce=true）必须真跑 brute-force，否则就找不到已删除分区 = 取证失败。
+// 验证：onProgress 至少被调用一次 final tick + scanned == total。
+func TestFindPartitions_ForensicRunsBruteForce(t *testing.T) {
 	img := buildSyntheticExFATImage(t)
 	reader := testutil.NewMemReader(img)
 	scanner := NewScanner(reader)
 
 	var calls int
 	var lastScanned, lastTotal int64
-	_, err := scanner.FindPartitions(context.Background(), func(scanned, total int64) {
-		calls++
-		lastScanned = scanned
-		lastTotal = total
+	_, err := scanner.FindPartitions(context.Background(), FindOptions{
+		BruteForce: true,
+		OnProgress: func(scanned, total int64) {
+			calls++
+			lastScanned = scanned
+			lastTotal = total
+		},
 	})
 	if err != nil {
 		t.Fatalf("FindPartitions 失败: %v", err)
 	}
 	if calls < 1 {
-		t.Fatal("onProgress 必须至少被调用一次（final tick），不然 UI 卡 0%")
+		t.Fatal("forensic 模式必须至少触发一次 onProgress（final tick），否则 UI 卡 0%")
 	}
 	if lastTotal <= 0 {
 		t.Errorf("最后一次回调 total 应为磁盘大小，实际 %d", lastTotal)

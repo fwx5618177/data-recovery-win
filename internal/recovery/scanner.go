@@ -61,9 +61,13 @@ type extScannerAdapter struct{ e *Engine }
 type apfsScannerAdapter struct{ e *Engine }
 type hfsplusScannerAdapter struct{ e *Engine }
 
+// 注：adapter 对外接口里没有 IncludeDeletedPartitions 参数；adapter 用的是默认（fast path only）
+// 行为，跟 v2.8.8+ 默认模式一致。引擎主路径不走 adapter，走 ScanWithReader 直接调
+// runXxxScan，那条路径才传 includeDeletedPartitions。
+
 func (a *ntfsScannerAdapter) Name() string { return "ntfs" }
 func (a *ntfsScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runNTFSScan(ctx, r, 0, op, of)
+	return a.e.runNTFSScan(ctx, r, 0, false, op, of)
 }
 func (a *ntfsScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverNTFSFile(file, out)
@@ -71,7 +75,7 @@ func (a *ntfsScannerAdapter) Recover(file *types.RecoveredFile, out string) erro
 
 func (a *exfatScannerAdapter) Name() string { return "exfat" }
 func (a *exfatScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runEXFATScan(ctx, r, op, of)
+	return a.e.runEXFATScan(ctx, r, false, op, of)
 }
 func (a *exfatScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverEXFATFile(file, out)
@@ -79,7 +83,7 @@ func (a *exfatScannerAdapter) Recover(file *types.RecoveredFile, out string) err
 
 func (a *fatScannerAdapter) Name() string { return "fat" }
 func (a *fatScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runFATScan(ctx, r, op, of)
+	return a.e.runFATScan(ctx, r, false, op, of)
 }
 func (a *fatScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverFATFile(file, out)

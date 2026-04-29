@@ -4,6 +4,129 @@
 
 ---
 
+## v2.8.8 (2026-04-29)
+
+**核心架构修：扫描时间从 14h 砍到 ~1h（128GB U 盘）—— brute-force 改为 opt-in，对齐业界标准**
+
+### 用户问题：扫描 128GB U 盘卡 14.3% / 速度 180 B/s / 跑了 14 小时
+
+QA 跑完整 v2.8.7 实测：扫描进度卡 14.3% 几小时 + 速度跌到 180 B/s + 总耗时 14 小时。
+v2.8.7 修了**可视化**（你能看见进度），但没修**算法层的真浪费**。
+
+### 第一性原理诊断
+
+- **14.3% 卡死**：FAT 阶段在代码里只占 0.5% 进度预算（14.0-14.5%），但实际 FAT brute-force
+  扫整个 125GB 盘要花数小时。预算和真实耗时严重不匹配。
+- **180 B/s**：ResilientReader 在末端坏扇区做**单扇区重试**。每次重试 ~3 秒读 512 字节 = 170 B/s。
+  这不是 IO 慢，是**重试地狱**，因为我们本不该读到磁盘末端那块。
+- **14 小时**：对同一块盘做了 **3 次全盘读**（exFAT brute-force + FAT brute-force + Carver
+  = 3 × 125GB = 375GB IO）。USB 2.0 30MB/s 理论 3.5 小时；末端坏扇区重试堆叠 = 14 小时。
+
+**根因**：`brute-force` 类的全盘签名扫描在所有 FS 上**总是运行**，哪怕 fast path（offset-0
+ParseBootSector / MBR / GPT）已经在微秒内拿到完整答案。这违反业界标准。
+
+### 业界标准对照（之前我们和谁不一样）
+
+| 工具 | 默认行为 | Brute-force 触发 |
+|---|---|---|
+| **R-Studio** | Quick scan（仅分区表） | "Deleted partition recovery" 选项 |
+| **PhotoRec** | 不做 brute-force（只 carver） | N/A |
+| **DMDE** | "Quick scan" | "Full scan" 显式选 |
+| **TestDisk** | 默认仅 MBR/GPT | "Advanced > Search" 显式选 |
+| **DataRecoveryMaster v2.8.7 之前** | **永远 brute-force** ❌ | 没选项 |
+| **DataRecoveryMaster v2.8.8** | 默认仅 fast path ✅ | `IncludeDeletedPartitions=true` opt-in |
+
+### Changed — `internal/types/types.go`
+
+新增 `types.ScanOptions{Mode, IncludeDeletedPartitions}` —— Engine 主入口的统一参数包。
+
+### Changed — `internal/{exfat,fat,ntfs}/scanner.go,partition.go`
+
+每个 scanner 加 `FindOptions{OnProgress, BruteForce}`。`FindPartitions` 签名从
+`(ctx, onProgress)` 改为 `(ctx, opts)`。规则：
+
+```go
+// Always run fast path
+if bs, err := ParseBootSector(s.reader, 0); err == nil {
+    partitions = append(partitions, ...)
+}
+// Brute-force ONLY when explicitly requested
+if opts.BruteForce {
+    brute, _ := s.bruteForceFindXXX(ctx, opts.OnProgress)
+    partitions = append(partitions, brute...)
+}
+```
+
+**关键决策：fast path 失败时不**做隐式 brute-force fallback。隐式 fallback = 用户感知的"为什么我的扫描跑了 14 小时"；显式 fallback = "fast path 没找到，要不要切到取证模式重扫" → 让上层决定。
+
+### Added — `Engine.ScanWithOptions` / `ScanWithReaderOptions`
+
+新增两个完整版 API 接受 `ScanOptions`。原 `Engine.Scan` / `ScanWithReader` 保留为
+shim，默认 `IncludeDeletedPartitions=false`，对所有现存 caller 0 改动。
+
+### Added — 双套阶段预算表（`engine.go`）
+
+```go
+fastBudget = phaseBudget{   // 默认模式：FS 毫秒级，Carver 占 86%
+    ntfs: 0-2, exfat: 2-4, fat: 4-5, ext: 5-6, apfs: 6-7,
+    hfsplus: 7-8, btrfs: 8-9, carver: 9-95, validate: 95-100,
+}
+forensicBudget = phaseBudget{   // 取证模式：3 个 brute-force × 25% + carver
+    ntfs: 0-25, exfat: 25-50, fat: 50-70, ext: 70-72, apfs: 72-74,
+    hfsplus: 74-76, btrfs: 76-78, carver: 78-95, validate: 95-100,
+}
+```
+
+之前 FAT 只占 0.5% 预算 → 14h brute-force 进度条只能动 0.5%。新预算让进度跟实际耗时对应。
+
+### Added — `App.StartScanWithOptions(drivePath, mode, includeDeletedPartitions)`
+
+新 Wails IPC 方法支持取证模式开关。原 `StartScan` 保留默认行为 = false。
+**Frontend 取证模式开关 UI 推到 v2.8.9**（用户当前问题用默认行为修复就够了）。
+
+### Tests — 锁住核心契约
+
+`internal/exfat/scanner_test.go`：
+- `TestFindPartitions_DefaultSkipsBruteForce` —— 默认模式下 onProgress 0 调用（被 panic 断言守护）
+- `TestFindPartitions_ForensicRunsBruteForce` —— 取证模式下 onProgress ≥1 调用 + final tick 满进度
+- `TestFindPartitions_Volume` —— fast path 找到 offset=0 整盘分区
+
+### 性能对比（128GB U 盘 USB 2.0）
+
+| 模式 | v2.8.7 | v2.8.8 |
+|---|---|---|
+| 默认（健康盘） | **14h**（3 × 全盘读 + 重试） | **~1h**（仅 carver 一遍） |
+| 取证模式 | （无此选项） | **~3.5h**（4 × 全盘读，但有真预算反映耗时） |
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 240s ./... ✅ 38 packages PASS
+```
+
+### Files Changed
+
+- `internal/types/types.go` — `ScanOptions` struct
+- `internal/exfat/scanner.go` + `scanner_test.go` — `FindOptions` + brute-force gating + 2 new tests
+- `internal/fat/scanner.go` — `FindOptions` + brute-force gating
+- `internal/ntfs/partition.go` — `FindOptions` + brute-force gating
+- `internal/recovery/exfat_scan.go` — pass `BruteForce` to scanner
+- `internal/recovery/fat_scan.go` — pass `BruteForce` to scanner
+- `internal/recovery/ntfs_scan.go` — pass `BruteForce` to scanner
+- `internal/recovery/scanner.go` — adapter signatures (compile-time interface check)
+- `internal/recovery/engine.go` — `ScanOptions` + `phaseBudget` dual table + `phaseRange` helper
+- `app.go` — `StartScanWithOptions` + `startScanInternal` refactor
+
+### Future work (tracked, not in this PR)
+
+- **PhotoRec 式单遍扫描**：所有 FS 探测 + carver 签名同时跑在 1 次 IO 通道里。当前架构是 N 次串行扫描，PhotoRec 是 1 次。预期收益：取证模式 3.5h → ~50min。复杂度：scanner 流水线重写，2-3 天。
+- **Carver 仅扫 unallocated 空间**：让每个 FS scanner 输出 free-space bitmap，carver 跳过已分配簇。健康盘上 carver 几乎不读。复杂度：1-2 天。
+- **Frontend 取证模式 UI**：WelcomePage 加一个 checkbox "扫描已删除分区（慢 3-4 倍）"，绑到 `StartScanWithOptions`。预计 v2.8.9。
+
+---
+
 ## v2.8.7 (2026-04-28)
 
 **128G U 盘扫描卡 0% bug 修 —— brute-force 分区发现期间真进度反馈**

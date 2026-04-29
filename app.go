@@ -1314,6 +1314,21 @@ func (a *App) Platform() string {
 // drivePath: 驱动器路径（如 \\.\PhysicalDrive0）
 // mode: 扫描模式（quick / deep / full），为空时默认使用 full
 func (a *App) StartScan(drivePath string, mode string) error {
+	return a.startScanInternal(drivePath, mode, false)
+}
+
+// StartScanWithOptions 启动扫描，支持取证模式开关。
+//
+// includeDeletedPartitions=true 会在 NTFS / exFAT / FAT 上启用全盘 brute-force 扫描
+// 找已删除/丢失的分区。代价：每个支持的 FS 多读一遍全盘 IO（125GB U 盘 ≈ 多 1-2 小时）。
+// 使用场景：被盗笔记本被重装系统后救回原数据 / 司法取证 / R-Studio "Deleted partition recovery" 同款流程。
+//
+// 健康盘走默认 StartScan 即可，速度快得多。
+func (a *App) StartScanWithOptions(drivePath string, mode string, includeDeletedPartitions bool) error {
+	return a.startScanInternal(drivePath, mode, includeDeletedPartitions)
+}
+
+func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions bool) error {
 	a.mu.Lock()
 	if a.engine.IsScanning() {
 		a.mu.Unlock()
@@ -1337,7 +1352,7 @@ func (a *App) StartScan(drivePath string, mode string) error {
 	a.scanActive = true
 	a.scanSnapshotMu.Unlock()
 
-	appLogger.Info("开始扫描", "drive", drivePath, "mode", mode)
+	appLogger.Info("开始扫描", "drive", drivePath, "mode", mode, "forensic", includeDeletedPartitions)
 
 	// 定义进度回调：同步更新本地快照以便持久化
 	callbacks := recovery.ScanCallbacks{
@@ -1363,7 +1378,10 @@ func (a *App) StartScan(drivePath string, mode string) error {
 	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
 
 	go func() {
-		result, err := a.engine.Scan(drivePath, types.ScanMode(mode), callbacks)
+		result, err := a.engine.ScanWithOptions(drivePath, types.ScanOptions{
+			Mode:                     types.ScanMode(mode),
+			IncludeDeletedPartitions: includeDeletedPartitions,
+		}, callbacks)
 		close(stopPersist)
 		close(stopHeartbeat)
 
