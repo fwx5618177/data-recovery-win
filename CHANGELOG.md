@@ -4,6 +4,36 @@
 
 ---
 
+## v2.8.13 (2026-05-01)
+
+**hotfix(test): timing test 在慢 CI runner 上 flake —— 调宽预算余量**
+
+CI 报 `internal/recovery` 测试 fail（93.7s 之后），本地 race 模式 28s 全绿。
+根因：5 个 timing test 的 wall-clock 预算太紧（5s/10s/30s/3s），慢 CI runner +
+race detector 下 carver 实际耗时超过预算，触发 `t.Errorf`。
+
+调整后所有 timing test 预算 ≥ 30s，给慢 CI 充分余量。**这些测试守护的是 100×+
+退化场景**（用户 14h 卡死），不是绝对性能 —— 30s 预算已经能可靠抓出真退化。
+
+| 测试 | 旧预算 | 新预算 | 本地实测（race） |
+|---|---|---|---|
+| TestScan_CompletesQuickly_OnEmptyImage | 5s | 30s | ~0.2s |
+| TestScan_BadSectorEndOfDisk_TimeBudget | 10s | 60s | ~5s |
+| TestScan_DefaultMode_TimeBudget_NoBruteForce | 5s | 30s | ~0.2s |
+| TestScan_NonRegressing_UserScenario_128GBLogicalDrive | 30s | 90s | ~15s |
+| TestResilientReader_FastSkipBoundedTime | 5s | 30s | ~1s |
+| TestResilientReader_FastSkipMixedRegions | 3s | 30s | ~1s |
+
+### Files Changed
+
+- `internal/disk/resilient_test.go` — 2 个 timing test 预算上调
+- `internal/recovery/scan_progress_test.go` — 2 个 timing test 预算上调
+- `internal/recovery/fs_brute_force_gating_test.go` — 2 个 timing test 预算上调
+
+无产品代码改动 —— 纯测试 flakiness 修复。
+
+---
+
 ## v2.8.12 (2026-05-01)
 
 **进度合并 + 目录遍历期间节流 emit —— "0 B / 0 B / 速度 0" 卡死 12 小时根除**

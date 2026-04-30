@@ -122,12 +122,13 @@ func TestScan_ForensicMode_TriggersAllFSBruteForce(t *testing.T) {
 // 没 brute-force：~30 reads × 5ms = 150ms + carver scan 时间 ≈ 总 1-3s
 // 任何 FS 偷跑 32MB brute-force：每 FS = 32MB / 1MB step × 5ms = 160ms × 5 个 FS = 800ms+
 //
-// 设 5 秒上限，失败 = 整体架构有 FS 在背后偷跑全盘 IO。
+// 设 30 秒上限（给慢 CI runner + race detector 充分余量），失败 = 整体架构有 FS
+// 在背后偷跑全盘 IO。本地实测 0.2s。
 func TestScan_DefaultMode_TimeBudget_NoBruteForce(t *testing.T) {
 	const (
 		imgSize    = 32 * 1024 * 1024
 		readDelay  = 5 * time.Millisecond
-		timeBudget = 5 * time.Second
+		timeBudget = 30 * time.Second
 	)
 	mock := &delayedMock{data: make([]byte, imgSize), delay: readDelay}
 	reader := disk.NewResilientReader(mock, 512, 0)
@@ -152,12 +153,12 @@ func TestScan_DefaultMode_TimeBudget_NoBruteForce(t *testing.T) {
 // 这是用户报 bug 那个场景的 1000× 缩比版。如果用户真的 12 小时卡死，缩比版会显
 // 示出该问题。
 //
-// 期望：≤ 30 秒完成（默认模式不做全盘 brute-force；race 模式下 carver 慢 ~30×）
-// 用户实测如果 12 小时卡死 → 这个测试会卡几秒到几分钟，明显异常。
+// 期望：≤ 90 秒完成（慢 CI runner + race detector + carver 全盘扫的 worst case）
+// 本地实测 race 模式 11-15s，普通模式 0.32s。fail = 用户 12h 卡死复现。
 func TestScan_NonRegressing_UserScenario_128GBLogicalDrive(t *testing.T) {
 	const (
 		imgSize    = 128 * 1024 * 1024 // 128MB（128GB 的 1000× 缩比）
-		timeBudget = 30 * time.Second
+		timeBudget = 90 * time.Second
 	)
 	mock := &countingMock{data: make([]byte, imgSize)}
 	reader := disk.NewResilientReader(mock, 512, 0)

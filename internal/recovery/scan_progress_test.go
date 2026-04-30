@@ -247,15 +247,18 @@ func TestScan_ProgressEmitted(t *testing.T) {
 	}
 }
 
-// TestScan_CompletesQuickly_OnEmptyImage 锁住时间预算：4MB 空镜像应 ≤ 5s 跑完。
+// TestScan_CompletesQuickly_OnEmptyImage 锁住时间预算：4MB 空镜像应 ≤ 30s 跑完。
 //
 // 这是端到端"14h → ~1h"主张的最低保障 —— 单元 IO 不慢的话整个流程不应慢。
 // 真实用户会在 USB 上跑 125GB，但 wall-clock IO 是 disk 决定，不是引擎决定；引擎
 // 自己只要快就行。这条测试确保我们的引擎流程没有意外的串行阻塞。
+//
+// 30s 预算给慢 CI runner（race + 共享 CPU + 慢虚拟磁盘）足够余量。本地通常 0.2s 完成；
+// 这条 fail 意味着架构有 100×+ 退化。
 func TestScan_CompletesQuickly_OnEmptyImage(t *testing.T) {
 	const (
 		imgSize    = 4 * 1024 * 1024 // 4MB
-		timeBudget = 5 * time.Second
+		timeBudget = 30 * time.Second
 	)
 	img := make([]byte, imgSize)
 	reader := testutil.NewMemReader(img)
@@ -320,15 +323,14 @@ var _ disk.DiskReader = (*slowDiskMock)(nil)
 // 没有 fast-skip：4MB 健康（瞬间）+ 4MB 坏区 8192 sector × 50ms = 410 秒
 // 有 fast-skip：4MB 健康（~毫秒）+ ~20 calls × 50ms = ~1 秒
 //
-// 测试断言：scan 完成时间 ≤ 10 秒（给 carver / FS 阶段留余量）。
-//
-// 这条 fail = ResilientReader fast-skip 没透到 engine 流程里 = 用户的 14h 复现。
+// 测试断言：scan 完成时间 ≤ 60 秒（给慢 CI runner + race detector 留充分余量）。
+// 本地实测 1-5s。fail 意味着 fast-skip 没透到 engine 流程 = 用户的 14h 复现。
 func TestScan_BadSectorEndOfDisk_TimeBudget(t *testing.T) {
 	const (
 		diskSize     = 8 * 1024 * 1024 // 8MB
 		badStart     = 4 * 1024 * 1024 // 4MB 后开始坏
 		failureDelay = 50 * time.Millisecond
-		timeBudget   = 10 * time.Second
+		timeBudget   = 60 * time.Second
 	)
 	mock := &slowDiskMock{
 		data:         make([]byte, diskSize),
