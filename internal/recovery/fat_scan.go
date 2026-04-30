@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"data-recovery/internal/disk"
 	"data-recovery/internal/fat"
@@ -124,6 +125,10 @@ func (e *Engine) runFATScan(
 					})
 				}
 				perPart := 0
+				// 节流 progress emit —— 让前端在大目录树场景下也能看到 FilesFound 实时增长
+				const dirWalkProgressInterval = 500 * time.Millisecond
+				lastDirEmit := time.Now()
+
 				err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff fat.FoundFile) {
 					file := fatEntryToRecoveredFile(ff, p.BootSector)
 					if file == nil {
@@ -135,6 +140,20 @@ func (e *Engine) runFATScan(
 						PartitionOffset: p.Offset,
 					})
 					perPart++
+
+					if onProgress != nil && time.Since(lastDirEmit) >= dirWalkProgressInterval {
+						lastDirEmit = time.Now()
+						mu.Lock()
+						done := completed
+						filesNow := len(files)
+						mu.Unlock()
+						onProgress(types.ScanProgress{
+							Phase:       "fat",
+							Percent:     50.0 + float64(done)/float64(len(parts))*50.0,
+							FilesFound:  filesNow,
+							CurrentFile: fmt.Sprintf("FAT 目录: %s", ff.FullPath),
+						})
+					}
 				})
 				if err != nil {
 					logger.Warn("FAT 目录遍历失败", "partition", label, "err", err)

@@ -380,6 +380,17 @@ func (e *Engine) ScanWithReaderOptions(
 		}
 	}
 
+	// 立刻 emit 一个带 TotalBytes 的 init 进度，让前端 UI 显示磁盘大小（"0 B / 128 GB"
+	// 而不是 v2.8.11 之前的"0 B / 0 B"）。后续 dispatcher 即使 emit 不带 TotalBytes，
+	// app.go 的 mergeScanProgress 会保留这个值。
+	totalDiskBytes, _ := reader.Size()
+	safeProgress(types.ScanProgress{
+		Phase:       "init",
+		Percent:     0.5,
+		TotalBytes:  totalDiskBytes,
+		CurrentFile: "正在初始化扫描...",
+	})
+
 	// 安全的发现回调包装，同时收集结果
 	safeFound := func(f *types.RecoveredFile) {
 		if f == nil {

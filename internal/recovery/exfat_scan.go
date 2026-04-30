@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"data-recovery/internal/disk"
 	"data-recovery/internal/exfat"
@@ -90,6 +91,11 @@ func (e *Engine) runEXFATScan(
 		}
 
 		perPartCount := 0
+		// 节流 progress emit —— 让前端在大目录树场景下也能看到 FilesFound 实时增长
+		// 和 CurrentFile 路径变化（v2.8.12 加，之前 12h 大盘扫描期间 UI 看似卡死）
+		const dirWalkProgressInterval = 500 * time.Millisecond
+		lastDirEmit := time.Now()
+
 		err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff exfat.FoundFile) {
 			file := exfatEntryToRecoveredFile(ff, p.BootSector)
 			if file == nil {
@@ -105,6 +111,16 @@ func (e *Engine) runEXFATScan(
 				onFound(file)
 			}
 			perPartCount++
+
+			if onProgress != nil && time.Since(lastDirEmit) >= dirWalkProgressInterval {
+				lastDirEmit = time.Now()
+				onProgress(types.ScanProgress{
+					Phase:       "exfat",
+					Percent:     50.0 + float64(pi)/float64(len(partitions))*50.0,
+					FilesFound:  len(files),
+					CurrentFile: fmt.Sprintf("exFAT 目录: %s", ff.FullPath),
+				})
+			}
 		})
 		if err != nil {
 			logger.Warn("exFAT 目录遍历失败", "partition", partitionLabel, "err", err)

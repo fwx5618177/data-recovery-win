@@ -4,6 +4,153 @@
 
 ---
 
+## v2.8.12 (2026-05-01)
+
+**进度合并 + 目录遍历期间节流 emit —— "0 B / 0 B / 速度 0" 卡死 12 小时根除**
+
+### 用户问题（v2.8.11 后剩余的）
+
+> "我换成128g的优盘，这个已发现数据内存和速度是0，扫描了快12个小时了，也没有进展"
+
+UI 显示 `已发现 114 / 0 B / 0 B / 速度 0 B/s` 卡 12 小时。
+
+### 第一性原理诊断
+
+**Bug 1：`a.scanProgress = p` 是覆盖式赋值**
+
+每个 dispatcher 创建新 ScanProgress 时只设置自己关心的字段（Phase / Percent / CurrentFile），
+其他字段（TotalBytes / FilesFound / Speed / BytesScanned）保持 zero value。
+
+```go
+// app.go (BUG)
+OnProgress: func(p types.ScanProgress) {
+    a.scanProgress = p  // ← 全覆盖。底层好不容易拿到的 TotalBytes 被重置 0
+}
+```
+
+后果：UI 永远显示 "0 B / 0 B"。底层一旦有任意 dispatcher emit 不带 TotalBytes 的进度
+（每个 FS scanner 入口都是这样），TotalBytes 立刻被洗成 0。
+
+**Bug 2：engine 启动时无主动 emit**
+
+scan 启动后第一个 emit 来自 NTFS dispatcher 的 "正在查找 NTFS 分区..."（不带 TotalBytes）。
+所以即使后面有 dispatcher 偶尔传 TotalBytes，第一帧已经把它清零了。
+
+**Bug 3：exFAT/FAT 目录遍历期间无 progress emit**
+
+```go
+err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff exfat.FoundFile) {
+    files = append(files, file)
+    if onFound != nil { onFound(file) }  // ← 触发 OnFileFound (走文件列表)
+    perPartCount++
+    // ❌ 无 onProgress 节流 emit
+})
+```
+
+如果一个 exFAT 分区有大目录树或文件分布在坏扇区上，walk 可能跑几小时。期间 UI 看到
+FilesFound 慢慢爬（来自心跳兜底），但 phase / percent / CurrentFile 全是上一帧的快照
+（"正在查找 exFAT 分区..." stuck）。**用户感觉就是卡死了。**
+
+### Fixed 1 — `app.go` 加 mergeScanProgress
+
+```go
+func mergeScanProgress(prev, incoming types.ScanProgress) types.ScanProgress {
+    out := incoming
+    if out.TotalBytes == 0 && prev.TotalBytes > 0   { out.TotalBytes = prev.TotalBytes }
+    if out.BytesScanned == 0 && prev.BytesScanned > 0 { out.BytesScanned = prev.BytesScanned }
+    if out.FilesFound == 0 && prev.FilesFound > 0   { out.FilesFound = prev.FilesFound }
+    if out.Speed == 0 && prev.Speed > 0             { out.Speed = prev.Speed }
+    return out
+}
+```
+
+应用到所有 4 处 OnProgress 回调（StartScan + 3 个 BitLocker 路径）。
+incoming 非零 → 用 incoming（最新）；incoming 0 → 保留 prev（累计字段不丢）。
+
+### Fixed 2 — `engine.go` 扫描开始预填 TotalBytes
+
+```go
+totalDiskBytes, _ := reader.Size()
+safeProgress(types.ScanProgress{
+    Phase: "init", Percent: 0.5,
+    TotalBytes: totalDiskBytes,
+    CurrentFile: "正在初始化扫描...",
+})
+```
+
+第一帧带 TotalBytes，后续被 mergeScanProgress 保留。UI 立刻显示 "0 B / 128 GB"。
+
+### Fixed 3 — exFAT/FAT 目录遍历期间 onFound 节流 emit
+
+每个 found file 时检查 `time.Since(lastDirEmit) >= 500ms` —— 满足就 emit 当前路径 +
+FilesFound。
+
+```go
+err := scanner.ScanDirectory(ctx, p.BootSector, p.Offset, func(ff exfat.FoundFile) {
+    files = append(files, file)
+    e.cacheEXFATSource(...)
+    if onFound != nil { onFound(file) }
+    perPartCount++
+
+    if onProgress != nil && time.Since(lastDirEmit) >= 500*time.Millisecond {
+        lastDirEmit = time.Now()
+        onProgress(types.ScanProgress{
+            Phase:       "exfat",
+            Percent:     50.0 + float64(pi)/float64(len(partitions))*50.0,
+            FilesFound:  len(files),
+            CurrentFile: fmt.Sprintf("exFAT 目录: %s", ff.FullPath),
+        })
+    }
+})
+```
+
+UI 在大目录树场景下也能看到路径变化 + FilesFound 实时增长。
+
+### Added — 7 个新回归测试
+
+- `app_merge_progress_test.go` (3)：TestMergeScanProgress_PreservesTotalBytes /
+  PreservesAccumulated / IncomingNonZeroWins
+- `internal/recovery/scan_progress_carryover_test.go` (2)：TestScan_TotalBytes_PrefilledAtStart /
+  TotalBytes_PreservedAcrossPhases
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 240s ./... ✅ 39 packages PASS
+```
+
+### 用户场景预期效果（v2.8.11 vs v2.8.12）
+
+| | v2.8.11 | v2.8.12 |
+|---|---|---|
+| 进度第一帧 | "0 B / 0 B" | **"0 B / 128 GB"**（立刻显示磁盘大小）|
+| FS 阶段切换 | TotalBytes 被重置 0 | 保留 ✓ |
+| exFAT 大目录树 | UI 看似卡死 | 每 500ms 显示当前路径 + FilesFound |
+| Speed 跨 phase | 重置 0 闪烁 | 保留上一帧（直到下次有更新值） |
+
+### Files Changed
+
+- `app.go` — `mergeScanProgress` helper + 4 处 OnProgress 改为 merge
+- `internal/recovery/engine.go` — 扫描启动立刻 emit 带 TotalBytes 的 init 进度
+- `internal/recovery/exfat_scan.go` — onFound 节流 emit (500ms)
+- `internal/recovery/fat_scan.go` — 同上
+- `app_merge_progress_test.go` — 新文件，3 个 merge 契约测试
+- `internal/recovery/scan_progress_carryover_test.go` — 新文件，2 个端到端测试
+
+### 教训
+
+v2.8.11 修对了 architecture（gating brute-force），但漏了 UX 层面：dispatcher emit
+覆盖累计字段 + 大目录树期间无 emit。这两个一起让用户感觉"还是没修"。
+
+回归测试现在 enforce 三条契约：
+- 启动后第一帧必须带 TotalBytes
+- 任何 emit 不能清掉前一帧的累计字段
+- 目录遍历期间必须节流 emit progress
+
+---
+
 ## v2.8.11 (2026-05-01)
 
 **v2.8.8 漏修：ext / apfs / hfsplus / btrfs 的 brute-force 也是默认跑全盘 IO**

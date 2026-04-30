@@ -163,6 +163,33 @@ func (a *App) emitScanHeartbeat(stopCh <-chan struct{}, startTime time.Time) {
 	}
 }
 
+// mergeScanProgress 把新的 ScanProgress 合并进既有快照。
+//
+// 关键：dispatcher 创建新的 ScanProgress 时只设置自己关心的字段（Phase / Percent /
+// CurrentFile），其余字段是 zero value。如果直接覆盖 a.scanProgress，已经从底层拿到
+// 的 TotalBytes / FilesFound / Speed 会被重置为 0。
+//
+// 合并策略：incoming 设了非零 → 用 incoming（最新值）；incoming 为零 → 保留 prev。
+//
+// 例外：Percent 必须用 incoming（即使是 0，可能是有意从某 phase 重置进度的开头）。
+// 但前端 App.tsx 已有单调 guard 兜底，所以这里直接用 incoming 安全。
+func mergeScanProgress(prev, incoming types.ScanProgress) types.ScanProgress {
+	out := incoming
+	if out.TotalBytes == 0 && prev.TotalBytes > 0 {
+		out.TotalBytes = prev.TotalBytes
+	}
+	if out.BytesScanned == 0 && prev.BytesScanned > 0 {
+		out.BytesScanned = prev.BytesScanned
+	}
+	if out.FilesFound == 0 && prev.FilesFound > 0 {
+		out.FilesFound = prev.FilesFound
+	}
+	if out.Speed == 0 && prev.Speed > 0 {
+		out.Speed = prev.Speed
+	}
+	return out
+}
+
 // heartbeatState 心跳间复用的状态：用来从 BytesScanned 增量算 speed。
 // 底层扫描器（如 brute-force partition discovery）只报字节数 + 总数，不算速度；
 // 心跳每 500ms 看一次 BytesScanned 差，得到 bytes/sec。
@@ -467,9 +494,10 @@ func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mo
 	callbacks := recovery.ScanCallbacks{
 		OnProgress: func(p types.ScanProgress) {
 			a.scanSnapshotMu.Lock()
-			a.scanProgress = p
+			merged := mergeScanProgress(a.scanProgress, p)
+			a.scanProgress = merged
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", merged)
 		},
 		OnFileFound: func(f *types.RecoveredFile) {
 			a.scanSnapshotMu.Lock()
@@ -697,9 +725,10 @@ func (a *App) startScanWithUnlockedReader(reader *bitlocker.DecryptingReader, dr
 	callbacks := recovery.ScanCallbacks{
 		OnProgress: func(p types.ScanProgress) {
 			a.scanSnapshotMu.Lock()
-			a.scanProgress = p
+			merged := mergeScanProgress(a.scanProgress, p)
+			a.scanProgress = merged
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", merged)
 		},
 		OnFileFound: func(f *types.RecoveredFile) {
 			a.scanSnapshotMu.Lock()
@@ -867,9 +896,10 @@ func (a *App) StartRAIDScan(req RAIDScanRequest) error {
 	callbacks := recovery.ScanCallbacks{
 		OnProgress: func(p types.ScanProgress) {
 			a.scanSnapshotMu.Lock()
-			a.scanProgress = p
+			merged := mergeScanProgress(a.scanProgress, p)
+			a.scanProgress = merged
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", merged)
 		},
 		OnFileFound: func(f *types.RecoveredFile) {
 			a.scanSnapshotMu.Lock()
@@ -1355,12 +1385,16 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 	appLogger.Info("开始扫描", "drive", drivePath, "mode", mode, "forensic", includeDeletedPartitions)
 
 	// 定义进度回调：同步更新本地快照以便持久化
+	// 关键：合并而不是覆盖。TotalBytes 一旦从底层（disk reader / carver）拿到，后续
+	// dispatcher 只关心 phase/percent/CurrentFile，不会重设 TotalBytes —— 用 merge
+	// 保留它，避免前端"0 B / 0 B"显示。
 	callbacks := recovery.ScanCallbacks{
 		OnProgress: func(p types.ScanProgress) {
 			a.scanSnapshotMu.Lock()
-			a.scanProgress = p
+			merged := mergeScanProgress(a.scanProgress, p)
+			a.scanProgress = merged
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
+			wailsRuntime.EventsEmit(a.ctx, "scan:progress", merged)
 		},
 		OnFileFound: func(f *types.RecoveredFile) {
 			a.scanSnapshotMu.Lock()
