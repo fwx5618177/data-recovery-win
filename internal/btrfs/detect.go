@@ -13,12 +13,26 @@
 package btrfs
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是 Btrfs 全盘 brute-force 期间的进度回调（取证模式专用）
+type ProgressFn = func(scanned, total int64)
+
+// FindOptions 控制 Btrfs 卷检测策略。
+//
+// 默认 BruteForce=false：只跑 offset 0 的 superblock 检测。
+// BruteForce=true：全盘步进搜 _BHRfS_M magic 找已删除/孤立的 Btrfs 卷。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
 
 const (
 	// Btrfs 主 superblock 在物理偏移 64KB；备份 superblock 在 64MB / 256GB / 1PB
@@ -89,19 +103,49 @@ type Scanner struct{ reader disk.DiskReader }
 
 func NewScanner(r disk.DiskReader) *Scanner { return &Scanner{reader: r} }
 
-// FindVolumes 在每个 1MB 步进位置尝试 +0x10000 处的 magic
-func (s *Scanner) FindVolumes() ([]*Superblock, error) {
+// FindVolumes 定位 Btrfs 卷。
+//
+// 策略（v2.8.11 修订）：
+//   1. offset 0 检测（fast path）
+//   2. 16MB 步进全盘扫 _BHRfS_M magic —— **仅 opts.BruteForce=true 启用**
+func (s *Scanner) FindVolumes(ctx context.Context, opts FindOptions) ([]*Superblock, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
 	}
 	var out []*Superblock
+
+	// fast path
+	if sb, _ := Detect(s.reader, 0); sb != nil {
+		sb.Offset = SuperblockOffset
+		out = append(out, sb)
+	}
+
+	if !opts.BruteForce {
+		return out, nil
+	}
+
 	const step int64 = 16 * 1024 * 1024
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
+
 	for off := int64(0); off+SuperblockOffset+4096 < size; off += step {
-		if sb, _ := Detect(s.reader, off); sb != nil {
-			sb.Offset = off + SuperblockOffset
-			out = append(out, sb)
+		if ctx.Err() != nil {
+			return out, ctx.Err()
 		}
+		if off > 0 {
+			if sb, _ := Detect(s.reader, off); sb != nil {
+				sb.Offset = off + SuperblockOffset
+				out = append(out, sb)
+			}
+		}
+		if opts.OnProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			opts.OnProgress(off, size)
+			lastEmit = time.Now()
+		}
+	}
+	if opts.OnProgress != nil {
+		opts.OnProgress(size, size)
 	}
 	return out, nil
 }

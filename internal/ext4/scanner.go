@@ -4,9 +4,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是分区发现阶段的进度回调；scanned 已扫描字节数，total 磁盘总字节数。
+type ProgressFn = func(scanned, total int64)
+
+// FindOptions 见 exfat.FindOptions —— 同义。BruteForce=false（默认）只解析 offset 0 超块；
+// BruteForce=true 全盘扫 0xEF53 magic 找已删除/丢失的 ext 分区残骸（取证模式）。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
 
 // Scanner 提供 ext 文件系统的"找分区 → 走目录树 → 列文件"完整流程
 type Scanner struct {
@@ -36,10 +47,13 @@ type FoundFile struct {
 
 // FindPartitions 定位 ext 分区。
 //
-// 策略：
-//   1. 偏移 0 试解超块（整盘即一个 ext 分区）
-//   2. 全盘 magic（0xEF 53 在偏移 0x438）扫描兜底
-func (s *Scanner) FindPartitions(ctx context.Context) ([]*Partition, error) {
+// 策略（v2.8.11 修订，对齐 v2.8.8 的 exfat/fat/ntfs 行为）：
+//   1. 偏移 0 试解超块（整盘即一个 ext 分区，fast path 微秒级）
+//   2. 全盘 magic（0xEF 53 在偏移 0x438）扫描 —— **仅 opts.BruteForce=true 时启用**
+//
+// **关键修复**：之前 bruteForce 永远跑，导致 128GB U 盘上 ext 阶段卡 12 小时
+// （即使盘是 exFAT 没 ext 分区也要扫全盘）。现在跟其他 FS scanner 一致 opt-in。
+func (s *Scanner) FindPartitions(ctx context.Context, opts FindOptions) ([]*Partition, error) {
 	var out []*Partition
 
 	if sb, err := ParseSuperblock(s.reader, 0); err == nil {
@@ -49,18 +63,20 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]*Partition, error) {
 		}
 	}
 
-	// brute-force 兜底：扫 0xEF 53 在每段开头偏移 0x438 处
-	parts2, _ := s.bruteForce(ctx)
-	for _, p := range parts2 {
-		dup := false
-		for _, existing := range out {
-			if existing.Offset == p.Offset {
-				dup = true
-				break
+	// brute-force 仅在取证模式启用
+	if opts.BruteForce {
+		parts2, _ := s.bruteForce(ctx, opts.OnProgress)
+		for _, p := range parts2 {
+			dup := false
+			for _, existing := range out {
+				if existing.Offset == p.Offset {
+					dup = true
+					break
+				}
 			}
-		}
-		if !dup {
-			out = append(out, p)
+			if !dup {
+				out = append(out, p)
+			}
 		}
 	}
 
@@ -70,7 +86,7 @@ func (s *Scanner) FindPartitions(ctx context.Context) ([]*Partition, error) {
 	return out, nil
 }
 
-func (s *Scanner) bruteForce(ctx context.Context) ([]*Partition, error) {
+func (s *Scanner) bruteForce(ctx context.Context, onProgress ProgressFn) ([]*Partition, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -81,6 +97,9 @@ func (s *Scanner) bruteForce(ctx context.Context) ([]*Partition, error) {
 	)
 	buf := make([]byte, blockSize)
 	var out []*Partition
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
 
 	for blockOff := int64(0); blockOff < size; blockOff += blockSize {
 		if ctx.Err() != nil {
@@ -111,6 +130,14 @@ func (s *Scanner) bruteForce(ctx context.Context) ([]*Partition, error) {
 			}
 			out = append(out, &Partition{Offset: abs, SuperBlock: sb, GroupDescs: gd})
 		}
+
+		if onProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			onProgress(blockOff+read, size)
+			lastEmit = time.Now()
+		}
+	}
+	if onProgress != nil {
+		onProgress(size, size)
 	}
 	return out, nil
 }

@@ -939,8 +939,8 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 		}
 	}
 
-	// 2a. HFS+ / HFSX 卷（老 macOS / Time Machine 备份盘）
-	if vols, err := hfsplus.NewScanner(reader).FindVolumes(); err == nil {
+	// 2a. HFS+ / HFSX 卷（老 macOS / Time Machine 备份盘）—— 诊断用，fast path 即可
+	if vols, err := hfsplus.NewScanner(reader).FindVolumes(a.ctx, hfsplus.FindOptions{}); err == nil {
 		for _, v := range vols {
 			label := "HFS+"
 			if v.IsHFSX {
@@ -970,9 +970,9 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 		}
 	}
 
-	// 3. APFS 容器扫描（含 FileVault 检测）
+	// 3. APFS 容器扫描（含 FileVault 检测）—— 诊断用，fast path 即可
 	apfsScanner := apfs.NewScanner(reader)
-	if containers, err := apfsScanner.FindContainers(); err == nil {
+	if containers, err := apfsScanner.FindContainers(a.ctx, apfs.FindOptions{}); err == nil {
 		for _, c := range containers {
 			for _, v := range c.Volumes {
 				kind := "apfs-volume"
@@ -2356,7 +2356,7 @@ func (a *App) UnlockFileVaultVolume(drivePath, volumeUUID, password string, salt
 	}
 	defer r.Close()
 
-	containers, err := apfs.NewScanner(r).FindContainers()
+	containers, err := apfs.NewScanner(r).FindContainers(a.ctx, apfs.FindOptions{})
 	if err != nil || len(containers) == 0 {
 		return fmt.Errorf("未在 %s 找到 APFS 容器", drivePath)
 	}
@@ -2436,7 +2436,7 @@ func (a *App) ListAPFSSnapshots(drivePath string) ([]APFSSnapshotInfo, error) {
 		return nil, err
 	}
 	defer r.Close()
-	containers, err := apfs.NewScanner(r).FindContainers()
+	containers, err := apfs.NewScanner(r).FindContainers(a.ctx, apfs.FindOptions{})
 	if err != nil {
 		return nil, err
 	}

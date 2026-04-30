@@ -16,12 +16,26 @@
 package hfsplus
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是 HFS+ 全盘 brute-force 期间的进度回调（取证模式专用）
+type ProgressFn = func(scanned, total int64)
+
+// FindOptions 控制 HFS+ 卷检测策略。
+//
+// 默认 BruteForce=false：只跑 offset 0 检测（fast path）。
+// BruteForce=true：全盘扫 H+ / HX 签名找已删除/孤立的 HFS+ 卷。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
 
 // HFS+ Volume Header 在卷起点 + 1024 字节处（前 1024 字节是 boot blocks，向 HFS / Mac OS 9 致敬）
 const VolumeHeaderOffset int64 = 1024
@@ -111,9 +125,14 @@ func NewScanner(reader disk.DiskReader) *Scanner {
 	return &Scanner{reader: reader}
 }
 
-// FindVolumes 全盘步进扫 HFS+ 签名。
-// 复杂度：O(diskSize / step)；4MB 块 + 1MB 步进，对 1TB 盘约 10s。
-func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
+// FindVolumes 定位 HFS+ 卷。
+//
+// 策略（v2.8.11 修订）：
+//   1. offset 0 检测（fast path）
+//   2. 全盘步进扫 H+ / HX 签名 —— **仅 opts.BruteForce=true 启用**
+//
+// 之前永远跑全盘扫，128GB U 盘上即便没 HFS+ 也要扫几十秒到几小时。
+func (s *Scanner) FindVolumes(ctx context.Context, opts FindOptions) ([]*VolumeHeader, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -121,6 +140,10 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 	var out []*VolumeHeader
 	if v, _ := Detect(s.reader, 0); v != nil {
 		out = append(out, v)
+	}
+
+	if !opts.BruteForce {
+		return out, nil
 	}
 
 	const (
@@ -132,7 +155,14 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 	for _, v := range out {
 		seen[v.Offset] = true
 	}
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
+
 	for blockOff := int64(0); blockOff < size; blockOff += blockSize {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		read := blockSize
 		if blockOff+read > size {
 			read = size - blockOff
@@ -156,6 +186,14 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 				seen[abs] = true
 			}
 		}
+
+		if opts.OnProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			opts.OnProgress(blockOff+read, size)
+			lastEmit = time.Now()
+		}
+	}
+	if opts.OnProgress != nil {
+		opts.OnProgress(size, size)
 	}
 	return out, nil
 }

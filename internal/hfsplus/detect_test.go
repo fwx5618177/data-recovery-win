@@ -1,6 +1,7 @@
 package hfsplus
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -97,7 +98,8 @@ func TestFindVolumes_FindsTwo(t *testing.T) {
 	makeHFS(disk[volSize+junkBetween:])
 
 	r := testutil.NewMemReader(disk)
-	vols, err := NewScanner(r).FindVolumes()
+	// 找两个卷需要 brute-force（一个在 offset 0，另一个在 +10MB 处）
+	vols, err := NewScanner(r).FindVolumes(context.Background(), FindOptions{BruteForce: true})
 	if err != nil {
 		t.Fatalf("FindVolumes: %v", err)
 	}

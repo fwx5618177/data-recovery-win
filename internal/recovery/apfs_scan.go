@@ -29,15 +29,44 @@ type apfsRecoverySource struct {
 //	4. EnumerateFiles 拍平成 (path, inode, extents) 列表 → RecoveredFile
 //
 // 加密卷（FileVault）跳过：需要 keybag 解出 VEK 才能读 fs tree（fs tree 节点本身也加密）。
+//
+// includeDeletedPartitions=true 启用 brute-force 找已删除/孤立的 APFS 容器残骸。
 func (e *Engine) runAPFSScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 APFS 扫描")
+	logger.Info("开始 APFS 扫描", "brute_force", includeDeletedPartitions)
 
-	containers, err := apfs.NewScanner(reader).FindContainers()
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "apfs",
+			Percent:     0.5,
+			CurrentFile: "正在查找 APFS 容器...",
+		})
+	}
+
+	containers, err := apfs.NewScanner(reader).FindContainers(ctx, apfs.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "apfs",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 APFS 容器… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

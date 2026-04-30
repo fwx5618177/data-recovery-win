@@ -25,13 +25,40 @@ import (
 func (e *Engine) runEXTScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 ext2/3/4 扫描")
+	logger.Info("开始 ext2/3/4 扫描", "brute_force", includeDeletedPartitions)
+
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "ext",
+			Percent:     0.5,
+			CurrentFile: "正在查找 ext 分区...",
+		})
+	}
 
 	scanner := ext4.NewScanner(reader)
-	parts, err := scanner.FindPartitions(ctx)
+	parts, err := scanner.FindPartitions(ctx, ext4.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "ext",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 ext 分区… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

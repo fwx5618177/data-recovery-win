@@ -1,6 +1,7 @@
 package apfs
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -145,11 +146,36 @@ func TestScanner_FindContainers(t *testing.T) {
 
 	reader := testutil.NewMemReader(img)
 	scanner := NewScanner(reader)
-	containers, err := scanner.FindContainers()
+	// 找两个容器需要 brute-force（一个在 offset 0 fast path 命中，另一个 4MB 处需要全盘扫）
+	containers, err := scanner.FindContainers(context.Background(), FindOptions{BruteForce: true})
 	if err != nil {
 		t.Fatalf("FindContainers: %v", err)
 	}
 	if len(containers) != 2 {
 		t.Fatalf("应找到 2 个容器，实际 %d", len(containers))
+	}
+}
+
+// TestScanner_FindContainers_DefaultSkipsBruteForce 锁住 v2.8.11 默认行为：
+// BruteForce=false 时不应触发全盘 brute-force（只 fast path）。
+func TestScanner_FindContainers_DefaultSkipsBruteForce(t *testing.T) {
+	const blockSize uint32 = 4096
+	const oneMB = 1024 * 1024
+
+	img := make([]byte, 8*oneMB)
+	c1 := buildAPFSContainerSuperblock(blockSize, []uint64{5})
+	c2 := buildAPFSContainerSuperblock(blockSize, nil)
+	copy(img[0:blockSize], c1)
+	copy(img[4*oneMB:4*oneMB+int64(blockSize)], c2)
+
+	reader := testutil.NewMemReader(img)
+	scanner := NewScanner(reader)
+	// 默认（BruteForce=false）只看 offset 0 → 应只找到 c1
+	containers, err := scanner.FindContainers(context.Background(), FindOptions{})
+	if err != nil {
+		t.Fatalf("FindContainers: %v", err)
+	}
+	if len(containers) != 1 {
+		t.Errorf("默认 fast path 模式应只找到 1 个容器（offset 0），实际 %d", len(containers))
 	}
 }

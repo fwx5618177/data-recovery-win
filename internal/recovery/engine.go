@@ -471,7 +471,7 @@ func (e *Engine) ScanWithReaderOptions(
 		}
 
 		// 阶段1.7: ext2/3/4 扫描 —— Linux/Android 设备
-		extFiles, extErr := e.runEXTScan(ctx, reader, phaseRange(budget.extStart, budget.extEnd), safeFound)
+		extFiles, extErr := e.runEXTScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.extStart, budget.extEnd), safeFound)
 		if extErr != nil {
 			logger.Warn("ext 扫描失败或未发现 ext 分区", "err", extErr)
 		} else {
@@ -482,7 +482,7 @@ func (e *Engine) ScanWithReaderOptions(
 		}
 
 		// 阶段1.8: APFS 卷文件枚举（macOS / iOS 系统盘）
-		apfsFiles, apfsErr := e.runAPFSScan(ctx, reader, phaseRange(budget.apfsStart, budget.apfsEnd), safeFound)
+		apfsFiles, apfsErr := e.runAPFSScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.apfsStart, budget.apfsEnd), safeFound)
 		if apfsErr != nil {
 			logger.Warn("APFS 扫描失败或未发现 APFS", "err", apfsErr)
 		} else {
@@ -493,7 +493,7 @@ func (e *Engine) ScanWithReaderOptions(
 		}
 
 		// 阶段1.9: HFS+ 卷文件枚举（老 macOS / Time Machine）
-		hfsFiles, hfsErr := e.runHFSPlusScan(ctx, reader, phaseRange(budget.hfsplusStart, budget.hfsplusEnd), safeFound)
+		hfsFiles, hfsErr := e.runHFSPlusScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.hfsplusStart, budget.hfsplusEnd), safeFound)
 		if hfsErr != nil {
 			logger.Warn("HFS+ 扫描失败或未发现 HFS+", "err", hfsErr)
 		} else {
@@ -504,7 +504,7 @@ func (e *Engine) ScanWithReaderOptions(
 		}
 
 		// 阶段1.95: Btrfs 卷文件枚举（Linux 较新发行版 / Synology / Facebook）
-		btrFiles, btrErr := e.runBtrfsScan(ctx, reader, phaseRange(budget.btrfsStart, budget.btrfsEnd), safeFound)
+		btrFiles, btrErr := e.runBtrfsScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(budget.btrfsStart, budget.btrfsEnd), safeFound)
 		if btrErr != nil {
 			logger.Warn("Btrfs 扫描失败或未发现 Btrfs", "err", btrErr)
 		} else {

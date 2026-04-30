@@ -4,6 +4,135 @@
 
 ---
 
+## v2.8.11 (2026-05-01)
+
+**v2.8.8 漏修：ext / apfs / hfsplus / btrfs 的 brute-force 也是默认跑全盘 IO**
+
+### 用户问题
+
+> "现在问题还是没有解决：扫描中 4.0% 卡 11.5h，已发现 114 文件，0 B/s，正在查找 FAT 分区..."
+
+UI 显示卡在 4.0% "正在查找 FAT 分区"。但 v2.8.8 已经把 FAT brute-force 关了，理论上 FAT
+阶段应该毫秒级走完。**为什么还卡 11.5 小时？**
+
+### 第一性原理诊断
+
+排查 engine.go 调用链发现：v2.8.8 只修了 **exfat / fat / ntfs** 三个 FS scanner 的
+brute-force gating，**漏了 ext / apfs / hfsplus / btrfs 这 4 个 FS scanner**。
+
+```
+ext4.FindPartitions:        bruteForce(ctx) 永远跑                  ← 漏修
+apfs.FindContainers:        全盘扫 NXSB 永远跑                     ← 漏修
+hfsplus.FindVolumes:        全盘扫 H+/HX 签名永远跑                ← 漏修
+btrfs.FindVolumes:          16MB 步进全盘扫 _BHRfS_M 永远跑       ← 漏修
+```
+
+UI 显示"正在查找 FAT 分区..." 是 stale message —— **真正在跑的是 ext4 brute-force 全盘扫**。
+后续 dispatcher（runEXTScan、runAPFSScan 等）没有 emit 自己的"正在查找 X 分区..."文案，
+所以前端继续显示前一个 phase 的最后一条 emit。
+
+### Changed — 4 个 FS scanner 加 FindOptions{BruteForce} 门控
+
+跟 v2.8.8 的 exfat/fat/ntfs 一致模式：
+
+```go
+// internal/ext4/scanner.go
+type FindOptions struct { OnProgress ProgressFn; BruteForce bool }
+func (s *Scanner) FindPartitions(ctx, opts FindOptions) ([]*Partition, error)
+//   策略 a: ParseSuperblock(0) 永远跑（fast path）
+//   策略 b: bruteForce —— 仅 opts.BruteForce=true 启用
+
+// internal/apfs/detect.go
+func (s *Scanner) FindContainers(ctx, opts FindOptions) ([]*Container, error)
+
+// internal/hfsplus/detect.go
+func (s *Scanner) FindVolumes(ctx, opts FindOptions) ([]*VolumeHeader, error)
+
+// internal/btrfs/detect.go
+func (s *Scanner) FindVolumes(ctx, opts FindOptions) ([]*Superblock, error)
+```
+
+### Changed — 4 个 dispatcher 透传 IncludeDeletedPartitions + 立即 emit phase 文案
+
+`internal/recovery/{ext,apfs,hfsplus,btrfs}_scan.go`：每个 dispatcher 入口
+立刻 emit "正在查找 X 分区/卷/容器..." —— 这条最关键。没有它，前端会显示上一个 phase
+的 stale 文案（v2.8.10 用户看到的"正在查找 FAT 分区"在 ext 阶段还显示就是这个原因）。
+
+### Changed — engine.go 透传 opts.IncludeDeletedPartitions 到所有 4 个 dispatcher
+
+```go
+// 之前：
+e.runEXTScan(ctx, reader, phaseRange(...), safeFound)
+// 现在：
+e.runEXTScan(ctx, reader, opts.IncludeDeletedPartitions, phaseRange(...), safeFound)
+```
+
+### Added — 4 个新 regression test，专门防"以后又有人加新 FS scanner 忘了 gating"
+
+`internal/recovery/fs_brute_force_gating_test.go`（全新）：
+
+```
+TestScan_DefaultMode_NoFullDiskBruteForce
+  → 32MB 全 0 镜像，underlying.ReadAt 调用 ≤ 80 次
+  → 失败 = 某 FS scanner 在偷跑全盘 brute-force
+  → 实测：15 calls
+
+TestScan_ForensicMode_TriggersAllFSBruteForce
+  → 取证模式下每个 FS（exfat/fat/ext/apfs/hfsplus/btrfs）必须 emit "正在查找已删除..."
+  → 失败 = IncludeDeletedPartitions 没透传到该 FS
+
+TestScan_DefaultMode_TimeBudget_NoBruteForce
+  → 32MB + 5ms-per-read 延迟，5s 内必须完成
+  → 实测：0.19s
+
+TestScan_NonRegressing_UserScenario_128GBLogicalDrive
+  → 128MB 镜像（128GB U 盘的 1000× 缩比），30s 内完成（race 模式）
+  → 实测：11.6s race / 0.32s 普通
+  → 这是用户实际场景的最小再现 —— 这个测试爆 = 用户的 11.5h 卡死复现
+```
+
+`internal/apfs/detect_test.go::TestScanner_FindContainers_DefaultSkipsBruteForce`
+锁住 apfs 默认 fast-path-only 行为。
+
+### Files Changed
+
+- `internal/ext4/scanner.go` — `FindOptions` + brute-force gating
+- `internal/apfs/detect.go` — `FindOptions` + brute-force gating + ctx 取消支持
+- `internal/hfsplus/detect.go` — `FindOptions` + brute-force gating + ctx
+- `internal/btrfs/detect.go` — `FindOptions` + brute-force gating + ctx + offset 0 fast path
+- `internal/recovery/{ext,apfs,hfsplus,btrfs}_scan.go` — 透传 includeDeletedPartitions + 立即 emit
+- `internal/recovery/engine.go` — 4 个 dispatcher call 透传 opts.IncludeDeletedPartitions
+- `internal/recovery/scanner.go` — adapter 签名（默认 false）
+- `app.go` — 4 处 FindContainers/FindVolumes 调用更新（诊断用，BruteForce=false）
+- 测试文件：`internal/{ext4,apfs,hfsplus}/*_test.go` 更新现有 + 新增 1 个；
+  `internal/recovery/fs_brute_force_gating_test.go` 全新 4 个测试
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 300s ./... ✅ 38 packages PASS
+```
+
+### 端到端时间预算（128GB U 盘 USB 2.0 + 末端坏扇区）
+
+| 版本 | 时间 |
+|---|---|
+| v2.8.7 | 14h |
+| v2.8.8 | ~5h（漏修 ext/apfs/hfsplus/btrfs 仍跑全盘） |
+| v2.8.9 | ~5h（修了 ResilientReader 但 v2.8.8 漏修没暴露） |
+| v2.8.10 | ~5h（加了测试守住 v2.8.8 但漏修仍在） |
+| **v2.8.11** | **~1h** ✨（完整修复全部 7 个 FS scanner） |
+
+### 教训
+
+v2.8.8 的修复"对齐 R-Studio Quick scan 行业标准"是对的，但**只对齐了一半**。我应该在
+v2.8.8 时就排查所有 FS scanner，而不是只看 grep 命中的那几个。回归测试现在 enforce
+"任何 FS scanner 都不能默认全盘 brute-force"这条契约，从此以后这个 bug 形态没法回来。
+
+---
+
 ## v2.8.10 (2026-04-29)
 
 **v2.8.7-2.8.9 修复全套端到端集成测试加固 —— 11 个新回归测试守住合同**

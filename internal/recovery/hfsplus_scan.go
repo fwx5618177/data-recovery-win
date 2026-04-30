@@ -29,15 +29,44 @@ type hfsplusRecoverySource struct {
 //
 // 由于 HFS+ catalog file 可能跨多个 extent + extents overflow tree（极少见），
 // 本实现处理 vol header 给出的 catalog extents（前 8 个）即可覆盖几乎所有真实卷。
+//
+// includeDeletedPartitions=true 启用 brute-force 找已删除/孤立的 HFS+ 卷。
 func (e *Engine) runHFSPlusScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 HFS+ 扫描")
+	logger.Info("开始 HFS+ 扫描", "brute_force", includeDeletedPartitions)
 
-	vols, err := hfsplus.NewScanner(reader).FindVolumes()
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "hfsplus",
+			Percent:     0.5,
+			CurrentFile: "正在查找 HFS+ 卷...",
+		})
+	}
+
+	vols, err := hfsplus.NewScanner(reader).FindVolumes(ctx, hfsplus.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "hfsplus",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 HFS+ 卷… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

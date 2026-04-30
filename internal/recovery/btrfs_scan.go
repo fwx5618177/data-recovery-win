@@ -38,16 +38,46 @@ type btrfsRecoverySource struct {
 	VolStart int64
 }
 
+// runBtrfsScan 执行 Btrfs 扫描。
+//
+// includeDeletedPartitions=true 启用全盘 brute-force 找已删除/孤立的 Btrfs 卷。
 func (e *Engine) runBtrfsScan(
 	ctx context.Context,
 	reader disk.DiskReader,
+	includeDeletedPartitions bool,
 	onProgress func(types.ScanProgress),
 	onFound func(*types.RecoveredFile),
 ) ([]*types.RecoveredFile, error) {
-	logger.Info("开始 Btrfs 扫描")
+	logger.Info("开始 Btrfs 扫描", "brute_force", includeDeletedPartitions)
+
+	if onProgress != nil {
+		onProgress(types.ScanProgress{
+			Phase:       "btrfs",
+			Percent:     0.5,
+			CurrentFile: "正在查找 Btrfs 卷...",
+		})
+	}
 
 	scanner := btrfs.NewScanner(reader)
-	vols, err := scanner.FindVolumes()
+	vols, err := scanner.FindVolumes(ctx, btrfs.FindOptions{
+		BruteForce: includeDeletedPartitions,
+		OnProgress: func(scanned, total int64) {
+			if onProgress == nil || total <= 0 {
+				return
+			}
+			percent := float64(scanned) / float64(total) * 50.0
+			if percent < 0.5 {
+				percent = 0.5
+			}
+			onProgress(types.ScanProgress{
+				Phase:        "btrfs",
+				Percent:      percent,
+				BytesScanned: scanned,
+				TotalBytes:   total,
+				CurrentFile:  fmt.Sprintf("正在查找已删除 Btrfs 卷… %s / %s", types.FormatSize(scanned), types.FormatSize(total)),
+			})
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -91,7 +91,7 @@ func (a *fatScannerAdapter) Recover(file *types.RecoveredFile, out string) error
 
 func (a *extScannerAdapter) Name() string { return "ext" }
 func (a *extScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runEXTScan(ctx, r, op, of)
+	return a.e.runEXTScan(ctx, r, false, op, of)
 }
 func (a *extScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverEXTFile(file, out)
@@ -99,7 +99,7 @@ func (a *extScannerAdapter) Recover(file *types.RecoveredFile, out string) error
 
 func (a *apfsScannerAdapter) Name() string { return "apfs" }
 func (a *apfsScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runAPFSScan(ctx, r, op, of)
+	return a.e.runAPFSScan(ctx, r, false, op, of)
 }
 func (a *apfsScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverAPFSFile(file, out)
@@ -107,7 +107,7 @@ func (a *apfsScannerAdapter) Recover(file *types.RecoveredFile, out string) erro
 
 func (a *hfsplusScannerAdapter) Name() string { return "hfsplus" }
 func (a *hfsplusScannerAdapter) Scan(ctx context.Context, r disk.DiskReader, op func(types.ScanProgress), of func(*types.RecoveredFile)) ([]*types.RecoveredFile, error) {
-	return a.e.runHFSPlusScan(ctx, r, op, of)
+	return a.e.runHFSPlusScan(ctx, r, false, op, of)
 }
 func (a *hfsplusScannerAdapter) Recover(file *types.RecoveredFile, out string) error {
 	return a.e.recoverHFSPlusFile(file, out)

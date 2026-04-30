@@ -14,12 +14,28 @@ package apfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
+
+// ProgressFn 是 APFS 全盘 brute-force 期间的进度回调（取证模式专用）
+type ProgressFn = func(scanned, total int64)
+
+// FindOptions 控制 APFS 容器检测策略。
+//
+// 默认 BruteForce=false：只跑 offset 0 的 NXSB 解析（fast path）。
+//
+// BruteForce=true：在 fast path 之外**额外**全盘按 4MB 块扫 NXSB 签名，找
+// 已删除/孤立的 APFS 容器残骸。代价：125GB 盘 ≈ 1 小时 IO。
+type FindOptions struct {
+	OnProgress ProgressFn
+	BruteForce bool
+}
 
 // 容器超块的对象类型 (o_type) 常量 —— 规范文档引用
 //
@@ -278,8 +294,15 @@ func NewScanner(reader disk.DiskReader) *Scanner {
 	return &Scanner{reader: reader}
 }
 
-// FindContainers 全盘按 4MB 块扫 NXSB 签名
-func (s *Scanner) FindContainers() ([]*Container, error) {
+// FindContainers 定位 APFS 容器。
+//
+// 策略（v2.8.11 修订，对齐 v2.8.8 的 exfat/fat/ntfs 行为）：
+//   1. 偏移 0 试 Detect（fast path）
+//   2. 全盘按 4MB 块扫 NXSB 签名 —— **仅 opts.BruteForce=true 启用**
+//
+// **关键修复**：之前全盘扫永远跑，导致 128GB U 盘 APFS 阶段卡几小时（即便盘上根本
+// 没有 APFS）。现在跟其他 FS scanner 一致 opt-in。
+func (s *Scanner) FindContainers(ctx context.Context, opts FindOptions) ([]*Container, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -288,6 +311,10 @@ func (s *Scanner) FindContainers() ([]*Container, error) {
 	var out []*Container
 	if c, _ := Detect(s.reader, 0); c != nil {
 		out = append(out, c)
+	}
+
+	if !opts.BruteForce {
+		return out, nil
 	}
 
 	const (
@@ -300,7 +327,13 @@ func (s *Scanner) FindContainers() ([]*Container, error) {
 		seen[c.Offset] = true
 	}
 
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
+
 	for blockOff := int64(0); blockOff < size; blockOff += blockSize {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		read := blockSize
 		if blockOff+read > size {
 			read = size - blockOff
@@ -323,6 +356,14 @@ func (s *Scanner) FindContainers() ([]*Container, error) {
 				seen[abs] = true
 			}
 		}
+
+		if opts.OnProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			opts.OnProgress(blockOff+read, size)
+			lastEmit = time.Now()
+		}
+	}
+	if opts.OnProgress != nil {
+		opts.OnProgress(size, size)
 	}
 	return out, nil
 }

@@ -219,7 +219,7 @@ func TestScanFiles_FindsHelloTxt(t *testing.T) {
 	reader := testutil.NewMemReader(img)
 	scanner := NewScanner(reader)
 
-	parts, err := scanner.FindPartitions(context.Background())
+	parts, err := scanner.FindPartitions(context.Background(), FindOptions{})
 	if err != nil {
 		t.Fatalf("FindPartitions: %v", err)
 	}
