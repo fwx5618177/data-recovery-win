@@ -2,7 +2,6 @@ package carver
 
 import (
 	"encoding/binary"
-	"fmt"
 
 	"data-recovery/internal/disk"
 )
@@ -483,6 +482,3 @@ func readSTCOEntries(reader disk.DiskReader, b box, entrySize int) ([]int64, boo
 	}
 	return offsets, true
 }
-
-// 编译期防止未用 fmt 导入（部分变体用得到）
-var _ = fmt.Sprintf

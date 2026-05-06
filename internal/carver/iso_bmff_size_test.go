@@ -28,44 +28,6 @@ import (
 // 关键：chunk_offset 必须是 mdat 数据的起始（即 mdat header 之后），
 // chunk 的 sample 总和 = mdat data 大小。
 
-// mp4Builder 顺序拼装 ISO BMFF box；维护当前偏移让我们能正确填 stco。
-type mp4Builder struct {
-	buf bytes.Buffer
-}
-
-// writeBox 写一个 box header (size + type) 加 payload。
-func (b *mp4Builder) writeBox(boxType string, payload []byte) {
-	if len(boxType) != 4 {
-		panic("box type must be 4 bytes")
-	}
-	totalSize := uint32(8 + len(payload))
-	var sz [4]byte
-	binary.BigEndian.PutUint32(sz[:], totalSize)
-	b.buf.Write(sz[:])
-	b.buf.WriteString(boxType)
-	b.buf.Write(payload)
-}
-
-// writeBoxSize0 写一个 size=0 的 box（"延伸到文件末尾"语义；mdat 常用）
-func (b *mp4Builder) writeBoxSize0(boxType string, payload []byte) {
-	if len(boxType) != 4 {
-		panic("box type must be 4 bytes")
-	}
-	var sz [4]byte
-	binary.BigEndian.PutUint32(sz[:], 0)
-	b.buf.Write(sz[:])
-	b.buf.WriteString(boxType)
-	b.buf.Write(payload)
-}
-
-func (b *mp4Builder) bytes() []byte {
-	return b.buf.Bytes()
-}
-
-func (b *mp4Builder) length() int {
-	return b.buf.Len()
-}
-
 // buildSTSZ 构造 stsz box payload —— defaultSize 模式 OR per-sample 模式。
 // version=0 flags=0
 func buildSTSZ(defaultSize uint32, sampleSizes []uint32) []byte {
