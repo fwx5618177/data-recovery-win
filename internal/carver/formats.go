@@ -452,6 +452,13 @@ func detectZIPSize(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 
 // detectMP4Size 解析顶级 atom 链来确定 MP4/MOV 文件大小
 func detectMP4Size(reader disk.DiskReader, offset int64, maxSize int64) int64 {
+	// v2.8.14: 业界标准做法 —— 先试 moov sample-table 精确计算
+	// （参考 iso_bmff_size.go）。这条路径处理"size=0 mdat"等 atom-walk 搞不定的情况。
+	// 失败才回退到下面的 atom-walk 启发式。
+	if size := detectISOBMFFSizeFromSampleTable(reader, offset, maxSize); size > 0 {
+		return size
+	}
+
 	endLimit := offset + maxSize
 	pos := offset
 
