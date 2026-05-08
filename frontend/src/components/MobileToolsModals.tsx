@@ -1322,6 +1322,11 @@ export function TasksSidebar({
 
   const inflight = Array.from(tasks.values()).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   const histList = history || [];
+  // v2.8.17 Issue 3 修复：之前 collapsed=true 且空列表时面板完全消失，用户无法重新打开。
+  // 现在用户可以从顶栏 🗂 任务 按钮切换 collapsed 状态。这里逻辑保持原样：
+  //   - collapsed=false（展开）→ 永远显示（即使空，给用户"无进行中任务"的反馈）
+  //   - collapsed=true（折叠）+ 空列表 → 隐藏（节省屏幕空间，反正没东西展示）
+  // 用户从顶栏按钮 setTasksSidebarCollapsed(false) 即可重新唤起面板。
   const shouldHide = inflight.length === 0 && histList.length === 0 && collapsed;
 
   // 本地时钟刷新（让 elapsed 显示走起来；每秒 tick 一次）

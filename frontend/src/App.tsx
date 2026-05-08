@@ -13,6 +13,7 @@ import Select from "./components/Select";
 import ToastViewport from "./components/ToastViewport";
 import OCRSearchModal from "./components/OCRSearchModal";
 import MultiDiskScanModal from "./components/MultiDiskScanModal";
+import { DuplicateImagesModal } from "./components/DuplicateImagesModal";
 import { toast } from "./toast";
 import {
   CloudBackupsModal,
@@ -131,6 +132,11 @@ export default function App() {
   // 用户点窗口 X 时 Wails OnBeforeClose hook 拦截 → 后端发 app:closeRequested
   // 事件 → 这里弹模态框（退出 / 最小化 / 取消）。
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // ------------------------- 重复图片结果 (v2.8.17 Issue 8) -------------------------
+  // FindDuplicateImages 返回 string[][]，每组一组相似图片的绝对路径。
+  // 之前只 toast "找到 N 组"，现在弹模态框让用户看具体内容 + 删除/打开。
+  const [duplicateGroups, setDuplicateGroups] = useState<string[][] | null>(null);
 
   // ------------------------- 扫描态 -------------------------
   const [scanActive, setScanActive] = useState(false);
@@ -1051,9 +1057,31 @@ export default function App() {
             outputDir={outputDir}
             selectedDrive={selectedDrive}
             onOpenMobileModal={setOpenMobileModal}
+            onDuplicateGroups={setDuplicateGroups}
           />
           <ThemeSwitcher />
           <LocaleSwitcher />
+          {/* v2.8.17: 任务面板入口 —— 之前面板收起后无法再打开（Issue 3）。
+              这个按钮永远可见，点击切换 tasksSidebarCollapsed，并强制展开（如果当前是折叠状态） */}
+          <button
+            className="btn btn--sm btn--ghost"
+            title="任务面板"
+            onClick={() => setTasksSidebarCollapsed((v) => !v)}
+            style={{ position: "relative" }}
+          >
+            🗂 任务
+            {mobileTasks.size > 0 && (
+              <span style={{
+                position: "absolute", top: -2, right: -2,
+                background: "var(--accent)", color: "white",
+                fontSize: 9, fontWeight: 700,
+                borderRadius: 8, padding: "1px 5px",
+                minWidth: 14, lineHeight: 1.2,
+              }}>
+                {mobileTasks.size}
+              </span>
+            )}
+          </button>
           <button
             className="btn btn--sm btn--ghost"
             title={t("diag.export")}
@@ -1300,6 +1328,13 @@ export default function App() {
         onCancel={cancelTask}
       />
       <ToastViewport />
+      {duplicateGroups && (
+        <DuplicateImagesModal
+          groups={duplicateGroups}
+          wailsApp={wailsApp}
+          onClose={() => setDuplicateGroups(null)}
+        />
+      )}
       {showCloseConfirm && (
         <CloseConfirmModal
           scanActive={scanActive}
@@ -1549,7 +1584,7 @@ function pickAssetForPlatform(assets, platform) {
  *   🌐 网络镜像：挂载建议
  *   ⚡ 多盘并行扫描
  */
-function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
+function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDuplicateGroups }) {
   const [open, setOpen] = React.useState(false);
   const [filter, setFilter] = React.useState("");
   const ref = React.useRef(null);
@@ -1692,7 +1727,18 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
                 return;
               }
               if (!r.available) {
-                toast.warning({ title: "SMART 不可用", description: r.notes || "无法读取 SMART" });
+                // v2.8.17 Issue 6: SMART 不可用是 USB 桥接 / 虚拟盘等场景的物理限制
+                // （USB-SATA 桥接芯片大多不透传 SMART 命令；这是硬件层限制不是 bug）。
+                // 改善文案：明确说明原因 + 给出替代方案，而不只是冷冰冰一句"不可用"。
+                const reason = r.notes || "未知原因";
+                const desc = `${reason}\n\n常见原因：\n` +
+                  `· U 盘 / SD 卡 / USB 移动硬盘（USB-SATA 桥不透传 SMART 命令，业界普遍限制）\n` +
+                  `· 虚拟磁盘 / 镜像文件 / 网络盘（无物理 SMART 数据）\n` +
+                  `· 部分 NVMe 走 nvme-cli 而非 SATA SMART\n\n` +
+                  `不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。\n` +
+                  `如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；` +
+                  `或用 CrystalDiskInfo / smartctl --scan 等专业工具。`;
+                toast.warning({ title: "SMART 不可用（硬件限制，非软件 bug）", description: desc, duration: 0 });
                 return;
               }
               // 拼装多行 description：型号 / 通电时长 / 温度 / 坏扇区
@@ -1782,13 +1828,23 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal }) {
               });
             }
           })}
-          {item("🖼 查找重复图片", () => {
-            const dir = globalThis.prompt?.("输入要查重的目录路径：", outputDir || "");
-            if (!dir) return;
-            runAsync(
-              () => wailsApp?.FindDuplicateImages?.(dir, 5),
-              (g) => `找到 ${g?.length || 0} 组相似图片`
-            );
+          {item("🖼 查找重复图片", async () => {
+            // v2.8.17 Issue 7 + 9 + 8: 用 Wails native 目录选择 + 弹出结果展示页
+            // （之前 native prompt 标题 "wails.localhost 显示" + 只 toast 提示数量，无结果界面）
+            try {
+              const dir = await wailsApp?.SelectDirectory?.("选择要查重的目录");
+              if (!dir) return; // 用户取消
+              const groups = await wailsApp?.FindDuplicateImages?.(dir, 5);
+              if (!groups || groups.length === 0) {
+                toast.info({ title: "未找到重复图片", description: "目录里没有相似度超过阈值的组" });
+                return;
+              }
+              // 弹出 DuplicateImagesModal 让用户看具体路径 + 删除/打开
+              onDuplicateGroups?.(groups);
+              toast.success({ title: `找到 ${groups.length} 组相似图片`, description: "点击查看并处理" });
+            } catch (err) {
+              toast.error("查重失败：" + (err?.message || err));
+            }
           })}
           {item("🔎 OCR 搜图", () => {
             setOpen(false);

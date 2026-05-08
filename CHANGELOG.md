@@ -4,6 +4,147 @@
 
 ---
 
+## v2.8.17 (2026-05-01)
+
+**UX 批 #2：剩下 7 条问题全清 + 重复图片结果展示页**
+
+v2.8.16 修了用户报的 12 条 UX 问题中的 5 条；本版清掉剩下的 7 条。**12/12 全部 ✅**。
+
+### Fixed — Issue 2: 扫描停止后立刻换盘 = "已有任务正在执行"错误
+
+之前 `Stop()` 只是 cancel ctx，goroutine 异步退出。用户体验：点停止 → 立刻点开始新扫描 → 报错。
+
+**修复**：startScanInternal 检测到还在 scanning → 自动 Stop() + 轮询 5 秒等 goroutine 退出。
+用户既然已显式点开始，就当成"放弃旧的开新的"处理。
+
+```go
+if a.engine.IsScanning() {
+    a.engine.Stop()
+    deadline := time.Now().Add(5 * time.Second)
+    for time.Now().Before(deadline) {
+        if !a.engine.IsScanning() { break }
+        time.Sleep(100 * time.Millisecond)
+    }
+    if a.engine.IsScanning() {
+        return fmt.Errorf("上一个扫描任务还在停止中（IO 卡死？），请等 10 秒后重试")
+    }
+}
+```
+
+### Fixed — Issue 3: 任务面板收起后无法重新打开
+
+之前 `tasksSidebarCollapsed=true` && 任务列表空 → 整个面板消失，没入口重新唤起。
+
+**修复**：顶栏加 `🗂 任务` 按钮（永远可见），点击切换 `tasksSidebarCollapsed`。带未读 badge 显示进行中任务数。
+
+### Fixed — Issue 7: 图片查重弹窗"wails.localhost 显示" / 只能手输路径
+
+之前 `globalThis.prompt(...)` 用浏览器原生对话框 —— 标题难看、不能用文件选择器。
+
+**修复**：用 Wails native 目录选择对话框 `App.SelectDirectory(title)`：
+
+```js
+// 之前 (bug)：
+const dir = globalThis.prompt?.("输入要查重的目录路径：", outputDir || "");
+
+// v2.8.17 修复：
+const dir = await wailsApp?.SelectDirectory?.("选择要查重的目录");
+```
+
+### Fixed — Issue 8: 图片查重只 toast，没结果展示
+
+之前 `FindDuplicateImages` 返回 `string[][]` 但前端只 toast 数量，没界面让用户看具体内容。
+
+**修复**：新组件 `DuplicateImagesModal` 展示每个组的文件路径，提供：
+- 🗂 在文件管理器中显示（`App.ShowInFolder`）
+- 🗑 删除文件（`App.DeleteFile`，带二次确认）
+- 标记已删除的 visual feedback（划线 + 灰显）
+
+新增后端：
+- `App.DeleteFile(path)` — 安全删除（绝对路径 + IsRegular 检查）
+- `App.ShowInFolder(path)` — 跨平台：`explorer /select` (Win) / `open -R` (Mac) / `xdg-open` (Linux)
+
+### Fixed — Issue 9: OCR "选目录"按钮无反应
+
+OCR modal 里的"选目录"按钮调 `wailsApp.SelectDirectory(...)` —— 但**后端没这个方法**。
+
+**修复**：新增 `App.SelectDirectory(title) (string, error)`，包装 `wailsRuntime.OpenDirectoryDialog`。
+
+### Fixed — Issue 10: OCR 引擎未找到 + GitHub releases 链接对国内不友好
+
+之前 OCR 引擎缺失只给 GitHub 链接，国内访问 GitHub 极不稳。
+
+**修复**：新增 `App.InstallTesseractViaWinget()` —— 拉起 Windows 内置 winget 一键装：
+
+```go
+cmd := exec.Command("cmd.exe", "/C", "start",
+    "winget", "install",
+    "--id", "UB-Mannheim.TesseractOCR",
+    "--accept-package-agreements",
+    "--accept-source-agreements",
+)
+```
+
+OCR modal 里"OCR 引擎未找到"banner 加 `🚀 一键安装 (winget)` 按钮（仅 Windows 显示）。
+点击 → 后台跑 winget → UAC 提示 → 下载安装 → 用户回 modal 点"重新检测"。
+
+### Fixed — Issue 6: SMART 不可用文案改善
+
+USB 桥接 / 虚拟盘 / 镜像文件物理上无法读 SMART —— 这是硬件限制不是软件 bug。
+
+**修复**：把冷冰冰的"SMART 不可用"改成详细解释：
+
+```
+SMART 不可用（硬件限制，非软件 bug）
+
+常见原因：
+· U 盘 / SD 卡 / USB 移动硬盘（USB-SATA 桥不透传 SMART 命令，业界普遍限制）
+· 虚拟磁盘 / 镜像文件 / 网络盘（无物理 SMART 数据）
+· 部分 NVMe 走 nvme-cli 而非 SATA SMART
+
+不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。
+如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；
+或用 CrystalDiskInfo / smartctl --scan 等专业工具。
+```
+
+`duration: 0` 让 toast 不自动消失，用户能完整读完。
+
+### Files Changed
+
+- `app.go` — `SelectDirectory` / `InstallTesseractViaWinget` / `DeleteFile` / `ShowInFolder` 4 个新 IPC + scan stop 自动等待
+- `frontend/src/App.tsx` — 顶栏 🗂 任务按钮 + 重复图片 modal 状态管理 + dedup 入口改用 native 选目录 + SMART 文案
+- `frontend/src/components/DuplicateImagesModal.tsx` — 全新组件
+- `frontend/src/components/OCRSearchModal.tsx` — `WingetInstallButton` 子组件
+- `frontend/src/components/MobileToolsModals.tsx` — TasksSidebar shouldHide 注释更清晰（行为不变）
+- `frontend/src/icons.tsx` — 新增 `IconTrash`
+
+### 12/12 用户问题完整修复表
+
+| # | 问题 | 修复版本 |
+|---|---|---|
+| ① | 关闭按钮直接退出应用 | v2.8.16 ✅ |
+| ② | 扫描停止后启动新扫描报错 | v2.8.17 ✅ |
+| ③ | 任务面板收起后无法重新打开 | v2.8.17 ✅ |
+| ④ | 导出诊断包"取消"按钮还是导出 | v2.8.16 ✅ |
+| ⑤ | 桌面路径错位（OneDrive / 中文 / D: 重定向） | v2.8.16 ✅ |
+| ⑥ | SMART 不可用文案 | v2.8.17 ✅ |
+| ⑦ | 图片查重原生 prompt 弹窗丑 | v2.8.17 ✅ |
+| ⑧ | 图片查重无结果展示页 | v2.8.17 ✅ |
+| ⑨ | OCR "选目录"按钮无反应 | v2.8.17 ✅ |
+| ⑩ | OCR 引擎缺失只给 GitHub 链接 | v2.8.17 ✅ |
+| ⑪ | OCR 扫描弹 cmd.exe 黑窗 | v2.8.16 ✅ |
+| ⑫ | OCR modal 点背景误关 | v2.8.16 ✅ |
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 300s ./... ✅ 39 packages PASS
+```
+
+---
+
 ## v2.8.16 (2026-05-01)
 
 **UX 批 #1：关闭确认 / 取消按钮真取消 / 真桌面路径 / 隐藏 cmd.exe / OCR 不误关**

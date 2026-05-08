@@ -221,6 +221,12 @@ export default function OCRSearchModal({ wailsApp, outputDir, onClose }: Props) 
               <div className="banner__content">
                 <div className="banner__title">OCR 引擎未找到</div>
                 <div className="banner__text" style={{ whiteSpace: "pre-wrap" }}>{status.notFoundHint}</div>
+                {/* v2.8.17 Issue 10：一键 winget 安装。GitHub releases 在国内访问不稳，
+                    winget 内置在 Win10 21H1+ / Win11 命令一键。点击会打开 cmd 窗口
+                    让用户看到下载进度 + UAC 提示。 */}
+                {wailsApp?.Platform && (
+                  <WingetInstallButton wailsApp={wailsApp} onInstalled={refreshStatus} />
+                )}
               </div>
             </div>
           )}
@@ -431,6 +437,78 @@ export default function OCRSearchModal({ wailsApp, outputDir, onClose }: Props) 
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * WingetInstallButton — v2.8.17 加。
+ *
+ * 给"OCR 引擎未找到"banner 用：一键 winget install Tesseract。比让用户去 GitHub
+ * releases 手动下载安装包好得多（特别是国内访问 GitHub 不稳）。
+ *
+ * 用户点击 → 后端 cmd /C start winget install ... → 打开新 cmd 窗口跑 winget →
+ * UAC 提示 → 下载安装 → 装完用户回这里点"我已安装，重新检测"或重开 OCR modal。
+ */
+function WingetInstallButton({ wailsApp, onInstalled }: { wailsApp: any; onInstalled: () => void }) {
+  const [platform, setPlatform] = useState<string>("");
+  const [launching, setLaunching] = useState(false);
+  const [launched, setLaunched] = useState(false);
+
+  useEffect(() => {
+    wailsApp?.Platform?.().then((p: string) => setPlatform(p)).catch(() => {});
+  }, [wailsApp]);
+
+  if (platform !== "windows") {
+    return null; // 非 Windows 不显示（macOS/Linux 用 brew/apt）
+  }
+
+  const handleInstall = async () => {
+    if (!wailsApp?.InstallTesseractViaWinget) return;
+    setLaunching(true);
+    try {
+      await wailsApp.InstallTesseractViaWinget();
+      setLaunched(true);
+      // 不自动 refresh —— winget 异步下载，用户装完手动点重新检测
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      // 简化错误：winget 不存在的话提示用户
+      if (msg.includes("winget") || msg.includes("找不到") || msg.includes("not found")) {
+        alert("找不到 winget 命令。请先在 Microsoft Store 搜索 'App Installer' 安装。");
+      } else {
+        alert("启动 winget 失败：" + msg);
+      }
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  if (launched) {
+    return (
+      <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+        <span className="muted" style={{ fontSize: "var(--text-xs)" }}>
+          ✓ 已启动 winget。装完后点击下方按钮重新检测：
+        </span>
+        <button className="btn btn--sm btn--primary" onClick={onInstalled}>
+          重新检测
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button
+        className="btn btn--sm btn--primary"
+        onClick={handleInstall}
+        disabled={launching}
+        title="用 Windows 内置 winget 一键安装 Tesseract OCR（推荐）"
+      >
+        {launching ? "正在启动..." : "🚀 一键安装 (winget)"}
+      </button>
+      <span className="muted" style={{ marginLeft: 10, fontSize: "var(--text-xs)" }}>
+        Win10 21H1+ / Win11 内置 winget；首次安装会弹 UAC 提示
+      </span>
     </div>
   );
 }

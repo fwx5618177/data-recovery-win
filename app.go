@@ -1378,6 +1378,97 @@ func (a *App) Platform() string {
 	return runtime.GOOS
 }
 
+// DeleteFile 删除一个文件 —— v2.8.17 用于"重复图片结果"页面让用户删除冗余副本。
+//
+// 安全检查：
+//   - 必须绝对路径（拒绝相对路径，避免 cwd 注入）
+//   - 必须是已存在的 regular file（不允许目录 / device / pipe）
+//   - lstat 防止 symlink TOCTOU
+//
+// 返回 nil = 删除成功；error 含原因方便前端提示。
+func (a *App) DeleteFile(path string) error {
+	if path == "" {
+		return fmt.Errorf("path 为空")
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return fmt.Errorf("必须绝对路径: %s", path)
+	}
+	st, err := os.Lstat(clean)
+	if err != nil {
+		return fmt.Errorf("文件不存在或无访问权限: %w", err)
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("不是普通文件（拒绝删除目录/设备/管道）: %s", path)
+	}
+	// #nosec G304 G306 —— path 已经过 Clean + IsAbs + IsRegular 校验
+	if err := os.Remove(clean); err != nil {
+		return fmt.Errorf("删除失败: %w", err)
+	}
+	appLogger.Info("用户删除文件", "path", clean)
+	return nil
+}
+
+// ShowInFolder 在系统文件管理器中定位到一个文件 —— v2.8.17。
+// Windows: explorer /select,<path>
+// macOS:   open -R <path>
+// Linux:   xdg-open <dirname> （没有"选中"语义，只能打开父目录）
+func (a *App) ShowInFolder(path string) error {
+	if path == "" {
+		return fmt.Errorf("path 为空")
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return fmt.Errorf("必须绝对路径")
+	}
+	if _, err := os.Stat(clean); err != nil {
+		return fmt.Errorf("文件不存在: %w", err)
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", "/select,"+clean)
+	case "darwin":
+		cmd = exec.Command("open", "-R", clean)
+	case "linux":
+		cmd = exec.Command("xdg-open", filepath.Dir(clean))
+	default:
+		return fmt.Errorf("不支持的平台: %s", runtime.GOOS)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动文件管理器失败: %w", err)
+	}
+	return nil
+}
+
+// InstallTesseractViaWinget 在 Windows 上拉起 winget 自动安装 Tesseract OCR。
+//
+// v2.8.17 加 —— 之前 OCR 引擎未找到时只给个 GitHub releases 链接，国内用户经常
+// 访问不了；winget 内置在 Windows 11 + 10 21H1 后，命令一键安装。
+//
+// 用 cmd.exe /C start 包一层让 winget 在新 console 窗口跑（用户能看到进度 + UAC 提示）。
+// 安装完用户手动重启 OCR 搜图。
+//
+// 仅 Windows。其他系统返回错误。
+func (a *App) InstallTesseractViaWinget() error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("winget 仅在 Windows 可用；当前平台 %s 请用包管理器（apt/brew）", runtime.GOOS)
+	}
+	// 用 cmd /C start 让 winget 在独立窗口跑：用户能看到下载进度 + UAC 提示
+	// 不用 hideCmdWindow —— 这次我们故意要让用户看到 winget 的输出
+	cmd := exec.Command("cmd.exe", "/C", "start",
+		"winget", "install",
+		"--id", "UB-Mannheim.TesseractOCR",
+		"--accept-package-agreements",
+		"--accept-source-agreements",
+	)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("拉起 winget 失败（请确认系统有 winget 命令；Win10 21H1+ 内置）: %w", err)
+	}
+	// 不 cmd.Wait() —— 让 winget 异步跑；用户装完自己点"刷新"或重新打开 OCR 搜图。
+	return nil
+}
+
 // ============================================================
 // 扫描
 // ============================================================
@@ -1401,12 +1492,31 @@ func (a *App) StartScanWithOptions(drivePath string, mode string, includeDeleted
 }
 
 func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions bool) error {
+	// v2.8.17 Issue 2 修复：用户体验"点停止 → 立刻换盘 → 启动失败 已有任务"。
+	// 根因：Stop() 是异步的（cancel ctx + 让 goroutine 自己退），用户能在
+	// goroutine 真正退出前再次点开始。之前粗暴报错"已有任务正在执行"。
+	//
+	// 现在的策略：检测到还有扫描在跑 → 自动调一次 Stop() + 等最多 5 秒它退出。
+	// 用户既然已经显式点了"开始扫描"，意图很明确 = 放弃旧的开新的。
 	a.mu.Lock()
 	if a.engine.IsScanning() {
 		a.mu.Unlock()
-		return fmt.Errorf("已有扫描任务正在执行，请先停止当前扫描")
+		appLogger.Info("检测到上一次扫描尚在退出过程中，自动 Stop + 等待")
+		a.engine.Stop()
+		// 轮询等待 goroutine 真正退出
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !a.engine.IsScanning() {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if a.engine.IsScanning() {
+			return fmt.Errorf("上一个扫描任务还在停止中（IO 卡死？），请等 10 秒后重试")
+		}
+	} else {
+		a.mu.Unlock()
 	}
-	a.mu.Unlock()
 
 	if mode == "" {
 		mode = string(types.ScanFull)
@@ -1799,6 +1909,26 @@ func (a *App) SelectOutputDir() (string, error) {
 	})
 	if err != nil {
 		appLogger.Warn("打开目录选择对话框失败", "err", err)
+		return "", fmt.Errorf("打开目录选择对话框失败: %w", err)
+	}
+	return dir, nil
+}
+
+// SelectDirectory 通用目录选择对话框 —— 给 OCR / 图片查重 / 任何要选目录的功能用。
+//
+// title 参数让 caller 自定义对话框标题（例如 "选择要查重的目录" / "选择 OCR 搜索目录"）。
+// 用户取消返回 ""（不算 error，调用方自己处理）。
+//
+// v2.8.17 加 —— 之前 OCR modal 调 SelectDirectory 但后端没这个方法，导致"选目录"按钮无反应。
+func (a *App) SelectDirectory(title string) (string, error) {
+	if title == "" {
+		title = "选择目录"
+	}
+	dir, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: title,
+	})
+	if err != nil {
+		appLogger.Warn("打开目录选择对话框失败", "err", err, "title", title)
 		return "", fmt.Errorf("打开目录选择对话框失败: %w", err)
 	}
 	return dir, nil
