@@ -125,11 +125,53 @@ type App struct {
 	iosBackupCancel  context.CancelFunc // libimobiledevice 备份触发
 	ptpPullCancel    context.CancelFunc // gphoto2 相机 pull
 	diskDumpCancel   context.CancelFunc // 整盘镜像 dump
+
+	// v2.8.16: 关闭按钮二次确认。用户点 X 时 OnBeforeClose 拦截 → 发 app:closeRequested
+	// 事件给前端 → 前端弹模态对话框（退出 / 最小化 / 取消）→ 前端调 ConfirmExit() 设
+	// confirmedExit=true → 程序真正退出。
+	confirmedExitMu sync.Mutex
+	confirmedExit   bool
 }
 
 // NewApp 创建一个新的 App 实例
 func NewApp() *App {
 	return &App{}
+}
+
+// onBeforeClose 是 Wails 的关闭拦截 hook。返回 true 表示阻止关闭。
+//
+// v2.8.16 行为：
+//   - 第一次点 X：返回 true 阻止退出 + 发 "app:closeRequested" 事件给前端
+//   - 前端弹模态对话框 "退出 / 最小化 / 取消"
+//   - 用户选"退出" → 前端调 ConfirmExit() 设 confirmedExit=true → 再调 wails.Quit()
+//   - 用户选"最小化" → 前端调 MinimizeWindow()
+//   - 用户选"取消" → 前端关闭弹窗，啥也不做
+//
+// 防止扫描跑到一半被误关，丢失几小时进度。
+func (a *App) onBeforeClose(ctx context.Context) bool {
+	a.confirmedExitMu.Lock()
+	confirmed := a.confirmedExit
+	a.confirmedExitMu.Unlock()
+	if confirmed {
+		return false // 用户已经显式确认退出，放行
+	}
+	// 通知前端弹确认对话框
+	wailsRuntime.EventsEmit(ctx, "app:closeRequested")
+	return true // 阻止关闭
+}
+
+// ConfirmExit 给前端调：用户在关闭确认对话框选了"退出应用"。
+// 设标志位然后调 wails.Quit() 让 OnBeforeClose 放行。
+func (a *App) ConfirmExit() {
+	a.confirmedExitMu.Lock()
+	a.confirmedExit = true
+	a.confirmedExitMu.Unlock()
+	wailsRuntime.Quit(a.ctx)
+}
+
+// MinimizeWindow 给前端调：用户在关闭确认对话框选了"最小化"。
+func (a *App) MinimizeWindow() {
+	wailsRuntime.WindowMinimise(a.ctx)
 }
 
 // startup 是 Wails 的 startup hook，在应用启动时调用
@@ -1583,14 +1625,11 @@ func (a *App) GetLastRecoveryRecords() []*recovery.FileRecoveryRecord {
 // destDir 为空时自动写到用户"下载目录"/"桌面"/配置目录。
 func (a *App) ExportDiagnosticBundle(destDir, extraNotes string) (string, error) {
 	if destDir == "" {
-		if d, err := os.UserHomeDir(); err == nil {
-			// 尝试 Desktop，不存在就落回 UserHomeDir
-			desk := filepath.Join(d, "Desktop")
-			if fi, err := os.Stat(desk); err == nil && fi.IsDir() {
-				destDir = desk
-			} else {
-				destDir = d
-			}
+		// v2.8.16: 用 diag.ResolveDefaultExportDir，Windows 上走 SHGetKnownFolderPath
+		// 拿真实桌面（处理 OneDrive / 中文 / D: 重定向）。fallback ~/Desktop 然后家目录。
+		destDir = diag.ResolveDefaultExportDir()
+		if destDir == "" {
+			return "", fmt.Errorf("无法确定导出目录：请显式指定 destDir")
 		}
 	}
 

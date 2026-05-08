@@ -71,6 +71,8 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 244, G: 239, B: 231, A: 1},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
+		// v2.8.16: 关闭按钮二次确认 —— 防止扫描跑到一半被误关
+		OnBeforeClose: app.onBeforeClose,
 		Bind: []interface{}{
 			app,
 		},

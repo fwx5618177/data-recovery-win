@@ -192,8 +192,10 @@ export default function OCRSearchModal({ wailsApp, outputDir, onClose }: Props) 
   const downloadableLangs = langs.filter((l) => !l.installed);
 
   return (
-    <div className="preview-modal" onClick={tryClose} role="dialog" aria-label="OCR 搜图">
-      <div className="preview-modal__inner" style={{ maxWidth: 720, width: "92%" }} onClick={(e) => e.stopPropagation()}>
+    // 关键：v2.8.16 起背景层不再触发关闭 —— 关闭只走右上 X 或底部"关闭"按钮。
+    // 之前的 onClick={tryClose} 容易误触（用户拖到 OCR 搜索运行中点旁边整个工具关掉）。
+    <div className="preview-modal" role="dialog" aria-label="OCR 搜图">
+      <div className="preview-modal__inner" style={{ maxWidth: 720, width: "92%" }}>
         <div className="preview-modal__header">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <IconSearch size={18} style={{ color: "var(--accent)" }} />

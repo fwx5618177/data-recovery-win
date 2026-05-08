@@ -67,6 +67,8 @@ func Recognize(imagePath string, langs []string) (string, error) {
 	)
 	// 也设 env var 兜底（某些 tesseract 版本忽视 --tessdata-dir）
 	cmd.Env = append(os.Environ(), "TESSDATA_PREFIX="+tessdir)
+	// Windows: 阻止子进程弹出黑色 cmd.exe 窗口（v2.8.16，see exec_windows.go）
+	hideCmdWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		// 把 stderr 的"找不到语言包"错误转成对用户更有用的话

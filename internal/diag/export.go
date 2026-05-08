@@ -21,6 +21,36 @@ import (
 	"time"
 )
 
+// ResolveDefaultExportDir 返回最佳默认导出目录。
+//
+// 顺序：
+//  1. Windows: SHGetKnownFolderPath FOLDERID_Desktop（处理 OneDrive / D: 重定向 / 中文桌面）
+//  2. macOS / Linux: ~/Desktop
+//  3. 上述都拿不到：os.UserHomeDir()（家目录）
+//
+// 失败时返回空字符串让 caller 自行决定（比如弹"另存为"对话框）。
+//
+// v2.8.16 加 —— 之前固定写 ~/Desktop 在中文 Windows 上常常导出到 C:\Users\xxx\Desktop
+// 但用户真实桌面在 D:\桌面 / OneDrive\Desktop，文件凭空消失。
+func ResolveDefaultExportDir() string {
+	// 1. Windows 走 Shell API
+	if d := resolveRealDesktopPath(); d != "" {
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			return d
+		}
+	}
+	// 2. fallback: ~/Desktop
+	if home, err := os.UserHomeDir(); err == nil {
+		desk := filepath.Join(home, "Desktop")
+		if fi, err := os.Stat(desk); err == nil && fi.IsDir() {
+			return desk
+		}
+		// 3. 桌面不存在 → 用 home
+		return home
+	}
+	return ""
+}
+
 // Metadata 是写到 zip 里 metadata.json 的内容。
 type Metadata struct {
 	ExportedAt   time.Time `json:"exportedAt"`

@@ -287,7 +287,9 @@ func QueryStatus() *Status {
 }
 
 func tesseractVersion(bin string) string {
-	out, err := exec.Command(bin, "--version").CombinedOutput()
+	cmd := exec.Command(bin, "--version")
+	hideCmdWindow(cmd) // Windows: 不弹 console 窗口
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
 	}

@@ -4,6 +4,108 @@
 
 ---
 
+## v2.8.16 (2026-05-01)
+
+**UX 批 #1：关闭确认 / 取消按钮真取消 / 真桌面路径 / 隐藏 cmd.exe / OCR 不误关**
+
+5 条用户反馈的小但烦人 UX 问题一次清掉。
+
+### Fixed — Issue 1: 关闭按钮二次确认
+
+之前点窗口 X 直接退出，扫描跑到一半丢进度。
+
+**修复**：Wails `OnBeforeClose` hook 拦截 → 后端发 `app:closeRequested` 事件 → 前端弹模态框
+**退出 / 最小化 / 取消**。扫描中时退出按钮变 "强制退出" + 警告文案。
+
+```go
+// app.go
+func (a *App) onBeforeClose(ctx context.Context) bool {
+    if a.confirmedExit { return false }                    // 已确认 → 放行
+    wailsRuntime.EventsEmit(ctx, "app:closeRequested")      // 让前端弹框
+    return true                                             // 阻止
+}
+func (a *App) ConfirmExit()    { ... wailsRuntime.Quit(...) }
+func (a *App) MinimizeWindow() { ... wailsRuntime.WindowMinimise(...) }
+```
+
+### Fixed — Issue 4: 导出诊断包"取消"按钮真取消
+
+`prompt()` 返回 `null` 表示用户取消，但代码 `String(null) || ""` 转成空字符串后继续执行。
+
+```js
+// 之前 (bug)：
+notes = String(globalThis.prompt?.(...) || "");  // 取消 → notes=""，继续导出 ❌
+
+// v2.8.16 修复：
+const raw = globalThis.prompt?.(...);
+if (raw === null || raw === undefined) return;   // 取消 → 真取消 ✓
+const notes = String(raw);
+```
+
+### Fixed — Issue 5: 真桌面路径（Windows OneDrive / 中文桌面 / D: 重定向）
+
+之前用 `~/Desktop` 在中文 Windows 上经常导出到 `C:\Users\xxx\Desktop` 但用户真桌面在
+`D:\桌面` 或 `OneDrive\Desktop` —— 文件凭空消失。
+
+**修复**：调 Windows Shell API `SHGetKnownFolderPath` 拿真桌面路径（`FOLDERID_Desktop`）。
+新增 `internal/diag/desktop_windows.go`（Windows）/ `desktop_other.go`（其他平台 no-op）。
+新增 `diag.ResolveDefaultExportDir()` 统一逻辑：
+
+```
+1. Windows: SHGetKnownFolderPath(FOLDERID_Desktop) → 真桌面（含 OneDrive 重定向）
+2. macOS / Linux: ~/Desktop
+3. 都没有：~/  （家目录兜底）
+```
+
+### Fixed — Issue 11: OCR 扫描不再弹 cmd.exe 黑窗
+
+Tesseract 是 CLI 工具，Wails GUI 调它时 Windows 默认会弹 console。每次抢焦点用户体验灾难。
+
+**修复**：新增平台特定 `internal/ocr/exec_windows.go`：
+
+```go
+func hideCmdWindow(cmd *exec.Cmd) {
+    cmd.SysProcAttr = &syscall.SysProcAttr{
+        HideWindow:    true,
+        CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+    }
+}
+```
+
+应用到 `tesseract --version` 和 `tesseract image stdout` 两处调用。Linux/Mac no-op。
+
+### Fixed — Issue 12: OCR 工具不再因点背景关闭
+
+OCR 模态对话框的 backdrop 上有 `onClick={tryClose}` —— 用户拖鼠标偶尔点到旁边整个工具关掉。
+
+**修复**：删掉 backdrop click handler，关闭只走右上 X 或底部"关闭"按钮。
+
+### Files Changed
+
+- `app.go` — `onBeforeClose` + `ConfirmExit` + `MinimizeWindow` + `ExportDiagnosticBundle` 用新桌面解析
+- `main.go` — `OnBeforeClose: app.onBeforeClose` 注册
+- `internal/diag/export.go` — `ResolveDefaultExportDir` 新函数
+- `internal/diag/desktop_windows.go` + `desktop_other.go` — 平台特定桌面路径解析
+- `internal/ocr/exec_windows.go` + `exec_other.go` — 隐藏 cmd.exe 窗口
+- `internal/ocr/ocr.go` + `runtime.go` — 调用 `hideCmdWindow(cmd)`
+- `frontend/src/App.tsx` — 关闭确认 modal + 事件订阅 + Issue 4 prompt fix
+- `frontend/src/components/OCRSearchModal.tsx` — 删 backdrop click handler
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 240s ./... ✅ 39 packages PASS
+```
+
+### 后续路线（12 条用户问题中剩 7 条）
+
+- v2.8.17: ⑦ + ⑨ 自定义弹窗 + 系统选目录组件、⑩ Winget 集成、② + ③ 任务面板入口
+- v2.8.18: ⑧ 重复图片结果展示页、⑥ SMART 文案优化
+
+---
+
 ## v2.8.14 (2026-05-01)
 
 **MP4/MOV 视频每个都 4GB 根除 —— 业界标准 ISO BMFF moov sample-table 解析**

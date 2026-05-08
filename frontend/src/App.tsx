@@ -127,6 +127,11 @@ export default function App() {
   // BitLocker / FileVault / APFS 卷：本工具不解密，仅提示存在
   const [encryptedVolumes, setEncryptedVolumes] = useState([]);
 
+  // ------------------------- 关闭确认对话框 (v2.8.16) -------------------------
+  // 用户点窗口 X 时 Wails OnBeforeClose hook 拦截 → 后端发 app:closeRequested
+  // 事件 → 这里弹模态框（退出 / 最小化 / 取消）。
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
   // ------------------------- 扫描态 -------------------------
   const [scanActive, setScanActive] = useState(false);
   const [scanProgress, setScanProgress] = useState(INITIAL_SCAN_PROGRESS);
@@ -498,6 +503,11 @@ export default function App() {
       }));
     });
 
+    // v2.8.16: 关闭按钮二次确认 —— 后端 OnBeforeClose 拦截 X，发这个事件让前端弹框
+    const offCloseReq = wailsRuntime.EventsOn("app:closeRequested", () => {
+      setShowCloseConfirm(true);
+    });
+
     const offUpdate = wailsRuntime.EventsOn("update:available", (payload) => {
       if (payload?.hasUpdate) setUpdateInfo(payload);
     });
@@ -610,6 +620,7 @@ export default function App() {
     return () => {
       [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
        offFileDrop, offBLDerive, offBLUnlocked,
+       offCloseReq,
        offUpdate, offDownloadProg, offDownloaded, offDownloadErr,
        ...offMobile]
         .filter((fn) => typeof fn === "function")
@@ -1289,6 +1300,59 @@ export default function App() {
         onCancel={cancelTask}
       />
       <ToastViewport />
+      {showCloseConfirm && (
+        <CloseConfirmModal
+          scanActive={scanActive}
+          onMinimize={() => {
+            setShowCloseConfirm(false);
+            wailsApp?.MinimizeWindow?.();
+          }}
+          onExit={() => {
+            setShowCloseConfirm(false);
+            wailsApp?.ConfirmExit?.();
+          }}
+          onCancel={() => setShowCloseConfirm(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * CloseConfirmModal v2.8.16: 关闭按钮二次确认
+ * 防扫描跑到一半被误关。
+ */
+function CloseConfirmModal({ scanActive, onMinimize, onExit, onCancel }) {
+  return (
+    <div className="preview-modal" role="dialog" aria-label="关闭确认">
+      <div className="preview-modal__inner" style={{ maxWidth: 460, width: "92%" }}>
+        <div className="preview-modal__header">
+          <div className="preview-modal__title">
+            {scanActive ? "扫描进行中，确认要关闭吗？" : "关闭应用？"}
+          </div>
+        </div>
+        <div className="preview-modal__body" style={{ padding: "18px 20px", display: "block" }}>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
+            {scanActive ? (
+              <>
+                当前有扫描任务正在执行。<b>退出应用会丢失扫描进度</b>，下次需要从头重扫
+                （或从断点续扫）。
+                <br />
+                你也可以选择"最小化"，扫描会在后台继续。
+              </>
+            ) : (
+              "你想要退出应用，还是只把窗口最小化到任务栏？"
+            )}
+          </p>
+        </div>
+        <div className="preview-modal__footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end", padding: "12px 20px" }}>
+          <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+          <button className="btn btn--ghost" onClick={onMinimize}>最小化</button>
+          <button className="btn btn--primary" onClick={onExit}>
+            {scanActive ? "强制退出" : "退出应用"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1436,13 +1500,17 @@ function LocaleSwitcher() {
  */
 async function exportDiagnosticBundle(wailsApp) {
   if (!wailsApp?.ExportDiagnosticBundle) return;
-  let notes = "";
-  try {
-    notes = String(globalThis.prompt?.(
-      "可选：简单描述遇到的问题（会写入诊断包，不要含密码 / 个人信息）。直接 OK 跳过。",
-      "",
-    ) || "");
-  } catch {/* no-op */}
+  // prompt() 返回 null 表示用户点了"取消" —— 必须在这里 return，
+  // 否则 String(null) 转成空字符串后会继续执行导出（v2.8.15 之前的 bug）。
+  const raw = globalThis.prompt?.(
+    "可选：简单描述遇到的问题（会写入诊断包，不要含密码 / 个人信息）。直接 OK 跳过。",
+    "",
+  );
+  if (raw === null || raw === undefined) {
+    // 用户取消 → 不导出，不弹 toast
+    return;
+  }
+  const notes = String(raw);
   try {
     const path = await wailsApp.ExportDiagnosticBundle("", notes);
     toast.success({ title: "诊断包已导出", description: path });
