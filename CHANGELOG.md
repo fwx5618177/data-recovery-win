@@ -4,6 +4,63 @@
 
 ---
 
+## v2.8.19 (2026-05-09)
+
+**hotfix(ci) + UX 收尾：v2.8.18 嵌套引号挂 CI + 清掉最后 2 个 prompt**
+
+### Fixed — CI build 失败：嵌套双引号打断 JS 字符串
+
+CI 报：
+
+```
+ERROR: Expected "}" but found "已知良性软件"
+file: D:/.../frontend/src/App.tsx:1936:81
+```
+
+v2.8.18 在 ToolDialog 的 description 字符串里写了：
+
+```js
+"NSRL... 是 NIST 发布的"已知良性软件" hash 库..."
+                       ^ 这个 " 提前终止了字符串
+```
+
+vite/esbuild 解析失败，CI 直接挂。
+
+**修复**：所有内部双引号改成中文「」标点（同义但不会冲突 JS 字符串边界）。
+共 4 处：NSRL × 1 / 网络挂载 × 2 / iOS 备份 × 1。
+
+### Fixed — 清掉剩下 2 个 globalThis.prompt（v2.8.18 漏的）
+
+v2.8.18 把 4 个用户列出来的工具改成 ToolDialog，但还有 2 个**没在用户清单里**但同样用 native prompt 的：
+
+- 🛠 **导出诊断包** (`exportDiagnosticBundle`) — 顶栏点击直接弹 native prompt 问 notes
+- 🤖 **Android .ab 加密备份** — 选完文件 InspectAndroidBackup 发现加密时弹 native prompt 问密码
+
+**修复**：
+- `导出诊断包` 改成 setToolDialog 直接调用，包括详细解释（不会包含磁盘扇区/用户文件/密钥 + 自动保存到桌面）。删掉旧的 `exportDiagnosticBundle()` 全局函数。
+- `Android .ab` 加密时弹 ToolDialog 询问密码（含 .ab 加密机制说明 + 文件路径展示）。
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 300s ./... ✅ 39 packages PASS
+cd frontend && npx vite build               ✅ 55 modules transformed → 337KB
+grep -c "globalThis.prompt" frontend/src/App.tsx → 1 (注释里的，非实际调用)
+```
+
+### Files Changed
+
+- `frontend/src/App.tsx` —— 4 处 description 嵌套引号修复 + exportDiagnosticBundle 函数 inline 化为 ToolDialog + Android .ab prompt 改 ToolDialog
+
+### 教训
+
+中文 description 里写英文术语用引号包起来是常见想法（"已知良性软件"），但这跟 JS 字符串
+分隔符冲突。下次直接用「」中文括号或单引号 / 反引号字符串 / 模板字面量。
+
+---
+
 ## v2.8.18 (2026-05-09)
 
 **统一工具弹窗 ToolDialog + 发布产物带版本号**

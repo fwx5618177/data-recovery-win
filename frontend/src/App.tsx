@@ -1092,7 +1092,31 @@ export default function App() {
           <button
             className="btn btn--sm btn--ghost"
             title={t("diag.export")}
-            onClick={() => exportDiagnosticBundle(wailsApp)}
+            onClick={() => {
+              // v2.8.19: 用 ToolDialog 替代 native prompt
+              setToolDialog({
+                title: "🛠 导出诊断包",
+                description:
+                  "把最近 N 天的日志 + 会话快照 + pending update 状态打成 zip，方便贴到 GitHub issue 排障。\n\n" +
+                  "**不会**包含磁盘扇区 / 用户文件 / 加密密钥 —— 只是软件元数据。\n\n" +
+                  "导出位置：自动写到桌面（Win 上走 SHGetKnownFolderPath 拿真桌面，OneDrive / 重定向都正确）。",
+                fields: [
+                  {
+                    key: "notes",
+                    label: "可选：简单描述遇到的问题",
+                    type: "text",
+                    placeholder: "例：扫描 NAS 时进度卡 9% 几小时不动",
+                    hint: "会写入诊断包 metadata，不要含密码 / 个人信息。留空也可以。",
+                    required: false,
+                  },
+                ],
+                submitLabel: "导出",
+                onSubmit: async (vals) => {
+                  const path = await wailsApp?.ExportDiagnosticBundle?.("", vals.notes || "");
+                  return `已导出：${path}`;
+                },
+              });
+            }}
           >
             🛠 {t("diag.export")}
           </button>
@@ -1543,30 +1567,8 @@ function LocaleSwitcher() {
   );
 }
 
-/**
- * exportDiagnosticBundle 让用户一键打包"日志 + session + pending update"成 zip。
- * 不包含磁盘扇区 / 用户文件 / 密钥。
- */
-async function exportDiagnosticBundle(wailsApp) {
-  if (!wailsApp?.ExportDiagnosticBundle) return;
-  // prompt() 返回 null 表示用户点了"取消" —— 必须在这里 return，
-  // 否则 String(null) 转成空字符串后会继续执行导出（v2.8.15 之前的 bug）。
-  const raw = globalThis.prompt?.(
-    "可选：简单描述遇到的问题（会写入诊断包，不要含密码 / 个人信息）。直接 OK 跳过。",
-    "",
-  );
-  if (raw === null || raw === undefined) {
-    // 用户取消 → 不导出，不弹 toast
-    return;
-  }
-  const notes = String(raw);
-  try {
-    const path = await wailsApp.ExportDiagnosticBundle("", notes);
-    toast.success({ title: "诊断包已导出", description: path });
-  } catch (err) {
-    toast.error("导出诊断包失败: " + (err?.message || err));
-  }
-}
+// v2.8.19: exportDiagnosticBundle 函数已废弃 —— 改为 topbar 按钮 onClick 直接 setToolDialog
+// （走统一的 ToolDialog 框架而不是 native prompt）
 
 // pickAssetForPlatform 根据平台名从 release assets 里挑最匹配的那个。
 // Wails 的 platform 字段是 Go GOOS 风格（"windows" / "darwin" / "linux"）。
@@ -1933,12 +1935,12 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onToolDialog?.({
               title: "📥 载入 NSRL hash 库",
               description:
-                "NSRL（National Software Reference Library）是 NIST 发布的"已知良性软件" hash 库。\n\n" +
+                "NSRL（National Software Reference Library）是 NIST 发布的「已知良性软件」hash 库。\n\n" +
                 "用途：恢复出 50 万个文件后，绝大多数是 Windows / macOS / 已装软件的系统文件" +
-                "（用户根本不关心）。载入 NSRL 后扫描结果会**自动隐藏这些已知系统文件**，让真正的" +
+                "（用户根本不关心）。载入 NSRL 后扫描结果会自动隐藏这些已知系统文件，让真正的" +
                 "用户数据浮上来 —— 数据恢复行业标准做法。\n\n" +
                 "下载：https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl/" +
-                "nsrl-download/current-rds —— 选 \"Modern\" 或 \"Legacy\" 库下载，解压后是 NSRLFile.txt。\n\n" +
+                "nsrl-download/current-rds —— 选「Modern」或「Legacy」库下载，解压后是 NSRLFile.txt。\n\n" +
                 "文件格式：每行一个 SHA-1 / MD5 hash（NSRL 官方格式 / SleuthKit hashdb 格式都识别）。",
               fields: [
                 {
@@ -1963,10 +1965,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onToolDialog?.({
               title: "🌐 网络镜像挂载建议",
               description:
-                "扫描 NAS / 远程共享上的镜像文件时，先要把它"挂载"成本地路径。\n\n" +
-                "本工具不直接挂载（涉及凭据 + 平台命令），而是给你一份**针对你目标 URL 的可复制" +
-                "操作步骤**（mount / net use / iscsiadm 等命令），你在终端 / 管理员 PowerShell 里" +
-                "执行后就能在本地看到挂载点，然后用本工具的"选择镜像文件..."加载它。\n\n" +
+                "扫描 NAS / 远程共享上的镜像文件时，先要把它「挂载」成本地路径。\n\n" +
+                "本工具不直接挂载（涉及凭据 + 平台命令），而是给你一份针对你目标 URL 的可复制" +
+                "操作步骤（mount / net use / iscsiadm 等命令），你在终端 / 管理员 PowerShell 里" +
+                "执行后就能在本地看到挂载点，然后用本工具的「选择镜像文件...」加载它。\n\n" +
                 "支持协议：SMB（Windows 共享）/ NFS（Linux 共享）/ iSCSI（SAN 块设备）",
               fields: [
                 {
@@ -2042,7 +2044,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                   label: "加密备份密码（如果有）",
                   type: "password",
                   placeholder: "明文备份请留空",
-                  hint: "iOS 备份默认明文，若用户在 iTunes 勾了"加密本地备份"才需要密码",
+                  hint: "iOS 备份默认明文，若用户在 iTunes 勾了「加密本地备份」才需要密码",
                   required: false,
                 },
               ],
@@ -2054,19 +2056,46 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             });
           })}
 
-          {item("🤖 选 Android .ab 备份扫描", () => runAsync(
-            async () => {
+          {item("🤖 选 Android .ab 备份扫描", async () => {
+            // v2.8.19: 用 ToolDialog 替代 native prompt（只在文件加密时弹）
+            try {
               const path = await wailsApp?.SelectAndroidBackup?.();
-              if (!path) return null;
+              if (!path) return; // 用户取消文件选择
               const info = await wailsApp?.InspectAndroidBackup?.(path);
-              const pwd = info?.encrypted
-                ? globalThis.prompt?.(".ab 加密备份密码：", "") || ""
-                : "";
-              await wailsApp?.StartAndroidBackupScan?.(path, pwd);
-              return path;
-            },
-            (p) => p ? `✅ 已启动扫描：${p}` : "已取消"
-          ))}
+              if (!info?.encrypted) {
+                // 明文 .ab：直接启动扫描
+                await wailsApp?.StartAndroidBackupScan?.(path, "");
+                toast.success({ title: "Android .ab 扫描已启动", description: path });
+                return;
+              }
+              // 加密 .ab：弹 ToolDialog 让用户输密码
+              setOpen(false);
+              onToolDialog?.({
+                title: "🔒 Android .ab 加密备份扫描",
+                description:
+                  "选中的 .ab 备份是加密的（adb backup 时用户设了密码）。\n\n" +
+                  "Android 4.0+ adb backup 用 PBKDF2-SHA1 + AES 加密；密码错了解密会失败但不会损坏文件。\n\n" +
+                  "文件路径：" + path,
+                fields: [
+                  {
+                    key: "pwd",
+                    label: ".ab 加密备份密码",
+                    type: "password",
+                    placeholder: "用户在手机 adb backup 时设的密码",
+                    hint: "这个密码不存任何地方，仅用于本次扫描",
+                    required: true,
+                  },
+                ],
+                submitLabel: "解密并启动扫描",
+                onSubmit: async (vals) => {
+                  await wailsApp?.StartAndroidBackupScan?.(path, vals.pwd);
+                  return `已启动扫描：${path}`;
+                },
+              });
+            } catch (err: any) {
+              toast.error("Android .ab 扫描失败：" + (err?.message || err));
+            }
+          })}
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
 
