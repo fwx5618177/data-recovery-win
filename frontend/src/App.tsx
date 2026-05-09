@@ -14,6 +14,7 @@ import ToastViewport from "./components/ToastViewport";
 import OCRSearchModal from "./components/OCRSearchModal";
 import MultiDiskScanModal from "./components/MultiDiskScanModal";
 import { DuplicateImagesModal } from "./components/DuplicateImagesModal";
+import { ToolDialog, type ToolDialogProps } from "./components/ToolDialog";
 import { toast } from "./toast";
 import {
   CloudBackupsModal,
@@ -137,6 +138,11 @@ export default function App() {
   // FindDuplicateImages 返回 string[][]，每组一组相似图片的绝对路径。
   // 之前只 toast "找到 N 组"，现在弹模态框让用户看具体内容 + 删除/打开。
   const [duplicateGroups, setDuplicateGroups] = useState<string[][] | null>(null);
+
+  // ------------------------- 通用工具弹窗 (v2.8.18) -------------------------
+  // 替代 globalThis.prompt() 的丑 native 弹窗。
+  // null = 关闭；非 null = 当前打开哪个工具的配置。
+  const [toolDialog, setToolDialog] = useState<Omit<ToolDialogProps, "onClose" | "wailsApp"> | null>(null);
 
   // ------------------------- 扫描态 -------------------------
   const [scanActive, setScanActive] = useState(false);
@@ -1058,6 +1064,7 @@ export default function App() {
             selectedDrive={selectedDrive}
             onOpenMobileModal={setOpenMobileModal}
             onDuplicateGroups={setDuplicateGroups}
+            onToolDialog={setToolDialog}
           />
           <ThemeSwitcher />
           <LocaleSwitcher />
@@ -1335,6 +1342,13 @@ export default function App() {
           onClose={() => setDuplicateGroups(null)}
         />
       )}
+      {toolDialog && (
+        <ToolDialog
+          {...toolDialog}
+          wailsApp={wailsApp}
+          onClose={() => setToolDialog(null)}
+        />
+      )}
       {showCloseConfirm && (
         <CloseConfirmModal
           scanActive={scanActive}
@@ -1584,7 +1598,7 @@ function pickAssetForPlatform(assets, platform) {
  *   🌐 网络镜像：挂载建议
  *   ⚡ 多盘并行扫描
  */
-function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDuplicateGroups }) {
+function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDuplicateGroups, onToolDialog }) {
   const [open, setOpen] = React.useState(false);
   const [filter, setFilter] = React.useState("");
   const ref = React.useRef(null);
@@ -1851,14 +1865,51 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onOpenMobileModal?.("ocr-search");
           })}
           {item("📅 计划定时备份", () => {
-            const src = globalThis.prompt?.("源目录：", outputDir || "");
-            if (!src) return;
-            const dst = globalThis.prompt?.("目标目录（另一块盘）：", "");
-            if (!dst) return;
-            runAsync(
-              () => wailsApp?.ScheduleBackup?.(src, dst, 2),
-              () => "✅ 已安装每天 02:00 定时备份"
-            );
+            // v2.8.18 Issue 1: 替代原始 prompt 弹窗，用统一 ToolDialog
+            setOpen(false);
+            onToolDialog?.({
+              title: "📅 计划定时备份",
+              description:
+                "在系统计划任务里安装一个 cron / Task Scheduler 任务，每天定时把源目录复制到目标目录。\n\n" +
+                "用途：让恢复出来的数据自动备份到另一块盘，防止单盘故障再次丢数据。\n" +
+                "前提：目标盘必须和源盘是不同物理设备（避免源盘故障同时丢备份）。",
+              fields: [
+                {
+                  key: "src",
+                  label: "源目录",
+                  type: "directory",
+                  pickerTitle: "选择要备份的源目录",
+                  defaultValue: outputDir || "",
+                  hint: "通常是恢复输出目录或工作文件夹",
+                  required: true,
+                },
+                {
+                  key: "dst",
+                  label: "目标目录（另一块盘）",
+                  type: "directory",
+                  pickerTitle: "选择备份目标目录",
+                  hint: "必须在不同物理盘上 —— 否则源盘坏的时候备份也一起丢",
+                  required: true,
+                },
+                {
+                  key: "hour",
+                  label: "每天定时执行时间（小时，0-23）",
+                  type: "number",
+                  defaultValue: "2",
+                  placeholder: "2",
+                  hint: "默认凌晨 2 点（系统空闲时备份不影响白天使用）",
+                  required: true,
+                },
+              ],
+              submitLabel: "安装定时任务",
+              successPrefix: "✅",
+              onSubmit: async (vals) => {
+                const hour = parseInt(vals.hour, 10);
+                if (isNaN(hour) || hour < 0 || hour > 23) throw new Error("小时必须是 0-23 之间的整数");
+                await wailsApp?.ScheduleBackup?.(vals.src, vals.dst, hour);
+                return `已安装：每天 ${String(hour).padStart(2, "0")}:00 自动备份 ${vals.src} → ${vals.dst}`;
+              },
+            });
           })}
           {item("📜 导出时间线 (mactime)", () => runAsync(
             () => wailsApp?.ExportTimeline?.(outputDir || "", "mactime"),
@@ -1877,20 +1928,64 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             (probs) => probs.length === 0 ? "✅ 保管链完整" : "⚠️ 问题:\n" + probs.join("\n")
           ))}
           {item("📥 载入 NSRL hash 库", () => {
-            const p = globalThis.prompt?.("NSRL hash 列表文件（.txt）路径：", "");
-            if (!p) return;
-            runAsync(
-              () => wailsApp?.LoadNSRLDatabase?.(p),
-              (n) => `已载入 ${n} 个已知良性 hash`
-            );
+            // v2.8.18 Issue 1: ToolDialog 替代 prompt
+            setOpen(false);
+            onToolDialog?.({
+              title: "📥 载入 NSRL hash 库",
+              description:
+                "NSRL（National Software Reference Library）是 NIST 发布的"已知良性软件" hash 库。\n\n" +
+                "用途：恢复出 50 万个文件后，绝大多数是 Windows / macOS / 已装软件的系统文件" +
+                "（用户根本不关心）。载入 NSRL 后扫描结果会**自动隐藏这些已知系统文件**，让真正的" +
+                "用户数据浮上来 —— 数据恢复行业标准做法。\n\n" +
+                "下载：https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl/" +
+                "nsrl-download/current-rds —— 选 \"Modern\" 或 \"Legacy\" 库下载，解压后是 NSRLFile.txt。\n\n" +
+                "文件格式：每行一个 SHA-1 / MD5 hash（NSRL 官方格式 / SleuthKit hashdb 格式都识别）。",
+              fields: [
+                {
+                  key: "path",
+                  label: "NSRL hash 文件路径（.txt）",
+                  type: "text",
+                  placeholder: "例：D:\\NSRL\\NSRLFile.txt",
+                  hint: "暂不支持文件选择对话框；直接粘贴绝对路径",
+                  required: true,
+                },
+              ],
+              submitLabel: "载入",
+              onSubmit: async (vals) => {
+                const n = await wailsApp?.LoadNSRLDatabase?.(vals.path);
+                return `已载入 ${n?.toLocaleString?.() || n} 个已知良性 hash —— 后续扫描会自动隐藏匹配的文件`;
+              },
+            });
           })}
           {item("🌐 网络镜像挂载建议", () => {
-            const url = globalThis.prompt?.("远程 URL (smb:// / nfs:// / iscsi://)：", "smb://");
-            if (!url) return;
-            runAsync(
-              () => wailsApp?.SuggestNetworkMount?.(url),
-              (adv) => adv.map((a) => a.method + "\n" + a.steps.join("\n")).join("\n\n")
-            );
+            // v2.8.18 Issue 1: ToolDialog
+            setOpen(false);
+            onToolDialog?.({
+              title: "🌐 网络镜像挂载建议",
+              description:
+                "扫描 NAS / 远程共享上的镜像文件时，先要把它"挂载"成本地路径。\n\n" +
+                "本工具不直接挂载（涉及凭据 + 平台命令），而是给你一份**针对你目标 URL 的可复制" +
+                "操作步骤**（mount / net use / iscsiadm 等命令），你在终端 / 管理员 PowerShell 里" +
+                "执行后就能在本地看到挂载点，然后用本工具的"选择镜像文件..."加载它。\n\n" +
+                "支持协议：SMB（Windows 共享）/ NFS（Linux 共享）/ iSCSI（SAN 块设备）",
+              fields: [
+                {
+                  key: "url",
+                  label: "远程 URL",
+                  type: "text",
+                  defaultValue: "smb://",
+                  placeholder: "smb://192.168.1.100/share / nfs://10.0.0.1:/export / iscsi://target.example",
+                  hint: "包含完整协议 + 主机 + 路径；本工具只解析不发起连接",
+                  required: true,
+                },
+              ],
+              submitLabel: "生成挂载建议",
+              onSubmit: async (vals) => {
+                const adv = await wailsApp?.SuggestNetworkMount?.(vals.url);
+                if (!adv || adv.length === 0) return "没有匹配的挂载方案（URL 协议可能不支持）";
+                return adv.map((a: any) => a.method + ":\n" + a.steps.join("\n")).join("\n\n");
+              },
+            });
           })}
           {item("⚡ 多盘并行扫描", () => {
             setOpen(false);
@@ -1921,13 +2016,42 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
           ))}
 
           {item("🔍 启动 iOS 备份扫描", () => {
-            const path = globalThis.prompt?.("iOS 备份目录路径：", "");
-            if (!path) return;
-            const pwd = globalThis.prompt?.("加密备份密码（明文备份留空）：", "");
-            runAsync(
-              () => wailsApp?.StartIOSBackupScan?.(path, pwd || ""),
-              () => "✅ iOS 备份扫描已启动；详见主面板进度"
-            );
+            // v2.8.18 Issue 1: ToolDialog 替代两个连续 prompt
+            setOpen(false);
+            onToolDialog?.({
+              title: "🔍 启动 iOS 备份扫描",
+              description:
+                "扫描 iTunes / Finder 里的 iOS 设备本地备份，提取相册、消息、通讯录等数据。\n\n" +
+                "iOS 备份默认目录：\n" +
+                "  • Windows：C:\\Users\\<用户>\\Apple\\MobileSync\\Backup\\<UUID>\n" +
+                "  • macOS：~/Library/Application Support/MobileSync/Backup/<UUID>\n\n" +
+                "每个 UUID 子目录是一个 iPhone/iPad 的备份（多设备会有多个）。\n" +
+                "扫云端备份功能可以列出本机所有备份及其设备名 —— 可以先点那个找路径。",
+              fields: [
+                {
+                  key: "path",
+                  label: "iOS 备份目录路径",
+                  type: "directory",
+                  pickerTitle: "选择 iOS 备份目录（含 Manifest.plist 那层）",
+                  placeholder: "C:\\Users\\xxx\\Apple\\MobileSync\\Backup\\<UUID>",
+                  hint: "选到含 Manifest.db / Manifest.plist 的那一级",
+                  required: true,
+                },
+                {
+                  key: "pwd",
+                  label: "加密备份密码（如果有）",
+                  type: "password",
+                  placeholder: "明文备份请留空",
+                  hint: "iOS 备份默认明文，若用户在 iTunes 勾了"加密本地备份"才需要密码",
+                  required: false,
+                },
+              ],
+              submitLabel: "启动扫描",
+              onSubmit: async (vals) => {
+                await wailsApp?.StartIOSBackupScan?.(vals.path, vals.pwd || "");
+                return "iOS 备份扫描已启动；进度请见左侧任务面板";
+              },
+            });
           })}
 
           {item("🤖 选 Android .ab 备份扫描", () => runAsync(

@@ -29,13 +29,13 @@ jobs:
           - name: windows-amd64
             runner: windows-latest
             platform: windows/amd64
-            artifact: DataRecovery-windows-amd64.exe
+            artifactSuffix: windows-amd64.exe
             source: build/bin/DataRecovery.exe
             archive: copy
           - name: windows-arm64
             runner: windows-latest
             platform: windows/arm64
-            artifact: DataRecovery-windows-arm64.exe
+            artifactSuffix: windows-arm64.exe
             source: build/bin/DataRecovery.exe
             archive: copy
           # macOS 暂时移除：Wails 在 macos runner 上 darwin/* 构建完成后没有把 .app
@@ -44,10 +44,15 @@ jobs:
           - name: linux-amd64
             runner: ubuntu-22.04
             platform: linux/amd64
-            artifact: DataRecovery-linux-amd64.tar.gz
+            artifactSuffix: linux-amd64.tar.gz
             source: build/bin/DataRecovery
             archive: tar
     runs-on: ${{ matrix.runner }}
+    # v2.8.18: 产物文件名带版本号 —— 用户从浏览器下载多个版本时不会撞名
+    # （之前都叫 DataRecovery-windows-amd64.exe，下两个 release 的会变成 (1).exe / (2).exe，无法识别版本）
+    # github.ref_name 是触发本 workflow 的 tag 名，比如 "v2.8.18"。
+    env:
+      ARTIFACT_NAME: DataRecovery-${{ github.ref_name }}-${{ matrix.artifactSuffix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -120,25 +125,25 @@ jobs:
       - name: Package (Windows exe)
         if: matrix.archive == 'copy'
         shell: bash
-        run: cp "${{ matrix.source }}" "${{ matrix.artifact }}"
+        run: cp "${{ matrix.source }}" "${{ env.ARTIFACT_NAME }}"
 
       - name: Package (macOS .app → zip)
         if: matrix.archive == 'zip'
         run: |
           cd build/bin
-          zip -r -q "../../${{ matrix.artifact }}" "$(basename "${{ matrix.source }}")"
+          zip -r -q "../../${{ env.ARTIFACT_NAME }}" "$(basename "${{ matrix.source }}")"
 
       - name: Package (Linux binary → tar.gz)
         if: matrix.archive == 'tar'
         run: |
           chmod +x "${{ matrix.source }}"
-          tar -czf "${{ matrix.artifact }}" -C build/bin "$(basename "${{ matrix.source }}")"
+          tar -czf "${{ env.ARTIFACT_NAME }}" -C build/bin "$(basename "${{ matrix.source }}")"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
           retention-days: 7
 
@@ -155,12 +160,12 @@ jobs:
       - name: Download linux artifact
         uses: actions/download-artifact@v4
         with:
-          name: DataRecovery-linux-amd64.tar.gz
+          name: DataRecovery-${{ github.ref_name }}-linux-amd64.tar.gz
           path: linux-bin
       - name: Extract binary
         run: |
           mkdir -p package-staging/usr/bin
-          tar -xzf linux-bin/DataRecovery-linux-amd64.tar.gz -C package-staging/usr/bin
+          tar -xzf linux-bin/DataRecovery-${{ github.ref_name }}-linux-amd64.tar.gz -C package-staging/usr/bin
           chmod +x package-staging/usr/bin/DataRecovery
       - name: Install nfpm
         run: |
@@ -290,16 +295,16 @@ jobs:
 
             | 平台 | 架构 | 文件 |
             | --- | --- | --- |
-            | Windows | Intel/AMD 64位 | `DataRecovery-windows-amd64.exe` |
-            | Windows | ARM64 | `DataRecovery-windows-arm64.exe` |
-            | Linux | amd64 | `DataRecovery-linux-amd64.tar.gz` |
+            | Windows | Intel/AMD 64位 | `DataRecovery-${{ github.ref_name }}-windows-amd64.exe` |
+            | Windows | ARM64 | `DataRecovery-${{ github.ref_name }}-windows-arm64.exe` |
+            | Linux | amd64 | `DataRecovery-${{ github.ref_name }}-linux-amd64.tar.gz` |
 
             > macOS 版暂未包含，需要的用户可从源码自行 `make build-darwin` 构建。
 
             ### 使用方法
 
             - **Windows**：双击 exe 运行（会自动请求管理员权限）
-            - **Linux**：`tar -xzf DataRecovery-linux-amd64.tar.gz && sudo ./DataRecovery`（读块设备需要 root）
+            - **Linux**：`tar -xzf DataRecovery-${{ github.ref_name }}-linux-amd64.tar.gz && sudo ./DataRecovery`（读块设备需要 root）
 
             ### 注意事项
 

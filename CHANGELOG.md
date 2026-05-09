@@ -4,6 +4,86 @@
 
 ---
 
+## v2.8.18 (2026-05-09)
+
+**统一工具弹窗 ToolDialog + 发布产物带版本号**
+
+### Fixed — Issue 1: 4 个工具弹"wails.localhost 显示"丑弹窗
+
+之前下面这些工具用 `globalThis.prompt()` 弹浏览器原生对话框：标题硬是 `wails.localhost 显示`、
+没有字段说明、不能选目录、连续 prompt 体验割裂：
+
+- 📅 计划定时备份
+- 📥 载入 NSRL hash 库
+- 🌐 网络镜像挂载建议
+- 🔍 启动 iOS 备份扫描
+
+**修复**：新组件 `frontend/src/components/ToolDialog.tsx`，统一弹窗框架支持：
+
+- 标题 + 描述（解释这个工具是干啥的、用在什么场景，对非技术用户友好）
+- 字段类型：`text` / `password` / `directory` / `file` / `number`
+- 字段下方 hint（解释字段含义 + 示例）
+- 必填校验
+- `directory` 类型直接复用 `App.SelectDirectory` 拉起原生目录选择对话框
+- 提交时 loading + 错误内联展示
+- 成功 toast + 自动关闭
+
+每个工具的 description 详细解释**它在数据恢复流程里的位置**（比如 NSRL 是 NIST 的"已知良性
+软件 hash 库"，载入后能自动隐藏系统文件让真正用户数据浮上来），不再让用户对着空白输入框猜。
+
+### Fixed — Issue 2: build 产物带版本号
+
+之前 GitHub Release 里的文件叫 `DataRecovery-windows-amd64.exe`，每个版本同名 → 用户下载多个
+版本时浏览器自动重命名成 `DataRecovery-windows-amd64 (1).exe` / `(2).exe`，无法识别哪个是哪个版本。
+
+**修复**：所有 release artifact 文件名加 `${{ github.ref_name }}` 前缀：
+
+```yaml
+# .github/workflows/release.yml
+env:
+  ARTIFACT_NAME: DataRecovery-${{ github.ref_name }}-${{ matrix.artifactSuffix }}
+```
+
+文件名变成：
+
+```
+DataRecovery-v2.8.18-windows-amd64.exe
+DataRecovery-v2.8.18-windows-arm64.exe
+DataRecovery-v2.8.18-linux-amd64.tar.gz
+```
+
+下载后看文件名一眼知道版本。auto-updater 的 `pickPlatformAsset` 用 fuzzy 匹配
+（`strings.Contains(name, "windows")` + `Contains(name, "amd64")`），加版本号在中间不影响匹配。
+
+同步更新 `signing.yml` 用 `inputs.version` 拼新文件名。
+
+### Files Changed
+
+- `frontend/src/components/ToolDialog.tsx` — 新组件，~180 行
+- `frontend/src/App.tsx` — 4 个工具改用 ToolDialog + 顶层渲染 ToolDialog
+- `.github/workflows/release.yml` — `ARTIFACT_NAME` env + matrix 改 `artifactSuffix`
+- `.github/workflows/signing.yml` — 用 `inputs.version` 拼文件名
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 300s ./... ✅ 39 packages PASS
+```
+
+### 用户视角对比
+
+| | v2.8.17 之前 | v2.8.18 |
+|---|---|---|
+| 计划定时备份 | 弹 2 次"wails.localhost 显示"问 src + dst（手输路径） | 一个统一弹窗，2 个目录选择按钮 + 1 个时间数字框 + 详细说明 |
+| 载入 NSRL hash | 弹 1 次"输入 .txt 路径"（用户根本不知道 NSRL 是啥） | 弹窗解释 NSRL 是什么、做什么、去哪下载、文件格式 |
+| 网络挂载建议 | 弹 1 次"输入远程 URL"（不知道支持什么） | 弹窗解释支持 SMB/NFS/iSCSI、用途、示例 |
+| iOS 备份扫描 | 连弹 2 次（路径 + 密码），完全没说去哪找路径 | 一个统一弹窗，目录选择按钮 + 密码字段 + 默认路径说明 |
+| 下载文件名 | `DataRecovery-windows-amd64.exe`（不知道版本） | `DataRecovery-v2.8.18-windows-amd64.exe` |
+
+---
+
 ## v2.8.17 (2026-05-01)
 
 **UX 批 #2：剩下 7 条问题全清 + 重复图片结果展示页**
