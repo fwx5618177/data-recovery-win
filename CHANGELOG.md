@@ -4,6 +4,78 @@
 
 ---
 
+## v2.8.23 (2026-05-12)
+
+**致命级 IO 泄漏（v3 修订）—— v2.8.22 没真修，三处 bug 一起补**
+
+用户实测 v2.8.22 二进制：点停止后任务管理器仍 3.4 GB/s 持续读 `\Device\Harddisk0\DR0`，
+关进程才停。深挖发现 v2.8.22 的修复有三处缺陷叠加，全部修。
+
+### Bug A — ResilientReader **吃掉了** `ErrReaderCancelled`
+
+`ResilientReader.ReadAt` 的设计：底层错误 → `readWithRetry` → 逐扇区试 → 全失败的扇区
+**0 填充 + 返回 `(n, nil)`**。这是为坏扇区盘"边扫边跳过"准备的，让上层无感知地拿到一段
+带 0 的数据。
+
+v2.8.22 加的 `ErrReaderCancelled` 走进了同一条路径：每个 sector 也 fast-fail，
+全 0 填充，最后返回 `(4096, nil)`。**上层看到 `err==nil` 以为正常读到数据，继续往下走。**
+Carver Collector / per-format detectors / validateAll 这种没 ctx 的紧密读循环就这样被
+困死，永远不退。
+
+修复：`ResilientReader.ReadAt` 顶部 + `readWithRetry` 各回归点都加 `IsCancelled(err)` 判断，
+**穿透** `ErrReaderCancelled`，不当坏扇区 mask 掉。普通 IO 错误的 0-fill 行为不变。
+
+### Bug B — `windowsReader.Cancel` 不关 handle
+
+v2.8.22 只调 `CancelIoEx` + set 一个 `cancelled atomic.Bool`，handle 留着。
+fast-fail check 在 `mu.Lock` 外，理论上有 race window：goroutine A 通过了 flag check、
+正要 `mu.Lock`，goroutine B `Cancel`。A 拿到锁后 `windows.ReadFile` 照样读，因为 handle
+还活着。即使 CancelIoEx 来过，也只取消了"当下一个" IO 不影响未来的。
+
+修复：`Cancel` 在 set flag + `CancelIoEx` 之外，再 `CloseHandle` 兜底。**handle 关掉后
+任何后续 ReadFile 直接 ERROR_INVALID_HANDLE**，race 不再有空子可钻。`Close()` 用 `sync.Once`
+保证幂等，与 `Cancel` 协作不重复关。
+
+这就是 `unixReader.Cancel` 和 `imageFileReader.Cancel` 一直以来用的模式 —— Windows 之前
+是唯一的不一致点，现在统一。
+
+### Bug C — Carver Collector `for m := range matchCh` 不看 ctx
+
+防御性补强：matchCh 缓冲 1000 + workers 最后一波 send，可能让 Collector 在 Stop 之后
+还有几百个 match 等处理。即便底层 reader 已毒化、每个 ReadAt 立刻返 ErrReaderCancelled，
+Collector 还要花 CPU 做 dedup / AC 分类 / extCounter 维护。每轮加一次
+`select case <-ctx.Done(): return`，drain 利落退干净。
+
+### 关于 v2.8.22 的"绿色测试"
+
+`TestResilientReader_CancelStopsReadLoop` 当时 PASS 是因为 **mock reader 太快**：
+1<<24 字节循环 4ms 自然跑完，根本没等到 Cancel 触发。测试设计 buggy，没真测到 cancellation。
+
+v2.8.23 重写：用 `slowCancellableReader` 每读 sleep 1ms，循环跑 1TB 自然要 3 天。
+Cancel 必须真的让循环停。这个测试在 v2.8.22 的代码上 FAIL（用 2s 也退不出来），
+在 v2.8.23 修复后 PASS（40 次读后 Cancel，<50ms 退出）。再加新 test
+`TestResilientReader_PropagatesErrReaderCancelled` 直接断言 `ErrReaderCancelled` 必须
+穿透 ResilientReader.ReadAt，永不被 mask 成 nil。
+
+### Files Changed
+
+- `internal/disk/resilient.go` — ReadAt 顶 + readWithRetry 两处 `IsCancelled` 短路（透传不 mask）
+- `internal/disk/reader_windows.go` — `Cancel` 加 `CloseHandle` 兜底，`Close` 用 `sync.Once` 幂等
+- `internal/disk/reader_cancel_test.go` — 重写 `TestResilientReader_CancelStopsReadLoop` 用 slow mock；新增 `TestResilientReader_PropagatesErrReaderCancelled`
+- `internal/carver/engine.go` — Collector goroutine 加 ctx 检查（drain 更利落）
+
+### 测试
+
+```
+go test -race -count=1 ./...                ✅ 全绿（包括新回归 +bad-sector 老回归没破）
+TestResilientReader_CancelStopsReadLoop     ✅ 40 reads before Cancel, 1 after, exit < 50ms
+TestResilientReader_PropagatesErrReaderCancelled  ✅ ErrReaderCancelled 不再被 mask
+GOOS=windows go build ./...                 ✅
+GOOS=windows go vet ./...                   ✅（除 desktop_windows.go:61 pre-existing 警告）
+```
+
+---
+
 ## v2.8.22 (2026-05-12)
 
 **致命级 IO 泄漏（v2 修订） — Cancel 之后 ReadAt 必须立刻 fail**

@@ -135,33 +135,67 @@ func TestResilientReader_CancelPropagates(t *testing.T) {
 	}
 }
 
-// TestResilientReader_CancelStopsReadLoop 模拟一个"没 ctx 的紧密 read 循环"，
-// Cancel 后必须在很短时间内停止（fast-fail 让循环自然退）。
-// 这就是 carver Collector 的场景。
+// slowCancellableReader 仿真 Windows 真盘 IO：每次 ReadAt 睡 sleepPerRead，
+// 模拟真实 NVMe 的 4MB 读 ~1ms 节奏。这样测试代码里"循环跑 1TB"不会因为内存
+// 太快而自然跑完 —— 必须靠 Cancel 才能停。这是 v2.8.22 第一版测试漏掉的关键：
+// mock 太快 → 1<<24 字节的循环 4ms 跑完，Cancel 还没触发就 done 了。
+type slowCancellableReader struct {
+	cancelled    atomic.Bool
+	sleepPerRead time.Duration
+	readCount    atomic.Int64
+}
+
+func (m *slowCancellableReader) Open() error  { return nil }
+func (m *slowCancellableReader) Close() error { return nil }
+func (m *slowCancellableReader) ReadAt(buf []byte, offset int64) (int, error) {
+	if m.cancelled.Load() {
+		return 0, ErrReaderCancelled
+	}
+	time.Sleep(m.sleepPerRead) // 模拟真盘 IO 耗时
+	m.readCount.Add(1)
+	for i := range buf {
+		buf[i] = 0xAB // 任意非零数据，保证 ReadAt 看起来"成功"
+	}
+	return len(buf), nil
+}
+func (m *slowCancellableReader) Size() (int64, error) { return 1 << 40, nil } // 1TB
+func (m *slowCancellableReader) SectorSize() int      { return 512 }
+func (m *slowCancellableReader) DevicePath() string   { return "mock://slow" }
+func (m *slowCancellableReader) Cancel() error {
+	m.cancelled.Store(true)
+	return nil
+}
+
+var _ Canceller = (*slowCancellableReader)(nil)
+
+// TestResilientReader_CancelStopsReadLoop 回归 v2.8.23 核心 bug：
+// 一个"没 ctx 的紧密 read 循环"（carver Collector / format detectors / validateAll）
+// 在 Cancel 之后必须**很快**停止，不能继续读盘。
+//
+// v2.8.22 第一次修复后这个测试用法是 buggy 的（mock 太快循环 4ms 自然跑完）。
+// 重写：mock 每读 1ms，循环跑 1TB 自然需要数小时，Cancel 必须真的让循环退。
 func TestResilientReader_CancelStopsReadLoop(t *testing.T) {
-	mock := newMockCancellableReader(1<<24, 512) // 16MB
+	mock := &slowCancellableReader{sleepPerRead: 1 * time.Millisecond}
 	rr := NewResilientReader(mock, 512, 1)
 
-	var loopReads atomic.Int64
 	done := make(chan struct{})
-
-	// 模拟 Collector：紧密读循环，不带 ctx，靠 error 退出
+	// 模拟 Collector / format detector：紧密读循环，不带 ctx，靠 error 退出
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
-		for offset := int64(0); offset < 1<<24; offset += 4096 {
-			n, err := rr.ReadAt(buf, offset)
-			loopReads.Add(1)
-			if err != nil && n == 0 {
-				// fast-fail 让循环自然退（v2.8.22 设计）
+		// 1TB / 4KB ≈ 268M iter；mock 每读 1ms → 自然跑完要 3 天。Cancel 必须能停。
+		for offset := int64(0); offset < 1<<40; offset += 4096 {
+			_, err := rr.ReadAt(buf, offset)
+			if err != nil {
+				// fast-fail 让循环自然退（v2.8.23 设计：错误必须穿透到调用者）
 				return
 			}
 		}
 	}()
 
-	// 让循环先跑一会儿
-	time.Sleep(20 * time.Millisecond)
-	beforeCancel := loopReads.Load()
+	// 让循环先跑 50ms，确保它真的在转
+	time.Sleep(50 * time.Millisecond)
+	beforeCancel := mock.readCount.Load()
 	if beforeCancel == 0 {
 		t.Fatal("循环没启动起来 —— 测试设置有问题")
 	}
@@ -171,11 +205,31 @@ func TestResilientReader_CancelStopsReadLoop(t *testing.T) {
 		t.Fatalf("Cancel: %v", err)
 	}
 
-	// 必须很快退（Cancel + fast-fail + ResilientReader 的 retry 也快）
+	// 必须在 2 秒内退出
 	select {
 	case <-done:
 		// good
 	case <-time.After(2 * time.Second):
-		t.Fatal("Cancel 后 2 秒内循环没退出 —— fast-fail 没生效，回归 v2.8.20 的 bug")
+		t.Fatalf("Cancel 后 2 秒内循环没退出 —— v2.8.20/v2.8.22 bug 复发 (mock 总读次数 %d)", mock.readCount.Load())
+	}
+
+	// Cancel 后不应该再有任何成功读
+	afterDone := mock.readCount.Load()
+	t.Logf("Cancel 前 %d 次读，Cancel 后 stop 时累计 %d 次", beforeCancel, afterDone)
+}
+
+// TestResilientReader_PropagatesErrReaderCancelled 验证 ResilientReader 必须
+// 把 ErrReaderCancelled **透传**给调用方，不能像 v2.8.22 那样当 bad sector 0-fill +
+// 返回 (n, nil)。这是 v2.8.23 的关键修复 —— 否则上层 Collector 等"看 err"决定是否
+// 继续的循环就被 mask 了，永远不会停。
+func TestResilientReader_PropagatesErrReaderCancelled(t *testing.T) {
+	mock := &slowCancellableReader{sleepPerRead: 0}
+	rr := NewResilientReader(mock, 512, 1)
+	_ = rr.Cancel()
+
+	buf := make([]byte, 4096)
+	n, err := rr.ReadAt(buf, 0)
+	if !IsCancelled(err) {
+		t.Fatalf("ResilientReader.ReadAt 必须把 ErrReaderCancelled 透传，实际 n=%d err=%v", n, err)
 	}
 }

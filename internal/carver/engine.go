@@ -484,6 +484,17 @@ func (e *Engine) Scan(
 		extCounter := make(map[string]int)
 
 		for m := range matchCh {
+			// v2.8.23: Collector 每轮先看一眼 ctx。matchCh 缓冲 1000 + workers
+			// 退出前的最后一波 send 可能让 Collector 在 Stop 之后还有几百个 match
+			// 排队等处理，每个 match 会调 determineFileSize 读盘。即便底层 reader
+			// 已经毒化（ReadAt 立刻返 ErrReaderCancelled），还是花 CPU 处理几百次
+			// AC 分类。直接看 ctx 一次性 drain 掉，停下来更利落。
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			// 追踪最大偏移作为水位线
 			if m.Offset > maxSeenOffset {
 				maxSeenOffset = m.Offset

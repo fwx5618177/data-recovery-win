@@ -111,6 +111,11 @@ type windowsReader struct {
 	// 读循环可在 Stop 后持续打满磁盘几十秒～几分钟。这个 flag 一开就让所有
 	// 读路径瞬间快退。
 	cancelled atomic.Bool
+
+	// closeOnce 让 CloseHandle 在 Cancel 和 Close 两条路径里只调一次 ——
+	// v2.8.23 加 —— Cancel 现在会强制关 handle（兜底 race window），
+	// 后续 deferred Close 不能重复关，否则 Windows API 抛 ERROR_INVALID_HANDLE。
+	closeOnce sync.Once
 }
 
 // newPlatformReader 创建 Windows 平台磁盘读取器
@@ -165,21 +170,25 @@ func (r *windowsReader) Open() error {
 	return nil
 }
 
-// Close 关闭设备句柄
+// Close 关闭设备句柄。v2.8.23 起通过 closeOnce 与 Cancel 协作幂等 ——
+// Cancel 已强制关 handle 的话，这里就 no-op，不会触发 Windows ERROR_INVALID_HANDLE。
 func (r *windowsReader) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	var err error
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
 
-	if r.handle == windows.InvalidHandle {
-		return nil
-	}
+		if r.handle == windows.InvalidHandle {
+			return
+		}
 
-	err := windows.CloseHandle(r.handle)
-	r.handle = windows.InvalidHandle
-	if err != nil {
-		return fmt.Errorf("关闭设备句柄失败: %w", err)
-	}
-	return nil
+		closeErr := windows.CloseHandle(r.handle)
+		r.handle = windows.InvalidHandle
+		if closeErr != nil {
+			err = fmt.Errorf("关闭设备句柄失败: %w", closeErr)
+		}
+	})
+	return err
 }
 
 // ReadAt 从指定偏移量读取数据到 buf
@@ -332,20 +341,22 @@ func (r *windowsReader) DevicePath() string {
 	return r.path
 }
 
-// Cancel 把 reader 标为"毒化" + 取消所有 pending IO。
+// Cancel 把 reader 标为"毒化" + 取消所有 pending IO + 关闭 handle。
 //
-// v2.8.22 修订：
-//   - 先 atomic.Store cancelled=true → 后续 ReadAt 第一句就 fail，不再触达内核
-//   - 再 CancelIoEx → 让卡在内核 ReadFile 上的当前那个 goroutine 立刻醒来
+// v2.8.23 修订（v2.8.22 的 cancelled flag 仍保留作为快路径，但加了"强制关 handle"）：
+//   1. atomic.Store cancelled=true → 后续 ReadAt 第一句就 fail，不再触达内核
+//   2. CancelIoEx → 让卡在内核 ReadFile 上的当前那个 goroutine 立刻醒来
+//   3. **CloseHandle** → 即使有 race 让某次 ReadAt 跳过了 flag 检查、走到 ReadFile，
+//      关掉的 handle 让 ReadFile 立刻返回 ERROR_INVALID_HANDLE。这是 unixReader.Cancel
+//      已经在用的模式（f.Close 让所有现存+未来的 ReadAt 都 fail），现在 Windows 跟齐。
 //
-// 之前的版本只做 CancelIoEx 但是 CancelIoEx 是一次性的，handle 留着所以后续
-// ReadAt 又能正常读盘。carver Collector / per-format detector 等不带 ctx 的
-// read 循环就在 Stop 后继续打满磁盘 IO。
+// 之前 v2.8.22 只 set flag + CancelIoEx，不关 handle。但 CancelIoEx 是一次性的，
+// 而 flag 检查在 mu.Lock 外面 —— 极小但真实存在的 race window 里，某个 goroutine
+// 可能已经通过了 flag 检查、即将 syscall。关 handle 是兜底，让那个 race 也安全。
 //
-// CompareAndSwap 保证 Cancel 幂等 + 重复 Stop 不会乱套（用户可能连点 stop）。
-//
-// 不持锁：ReadAt 当前持有 mu —— 加锁会死等到 ReadAt 自然返回，丢失 Cancel 的意义。
-// handle 是 uintptr，原子读 + windows CancelIoEx 对已关闭/无效句柄安全（返回错误而非崩溃）。
+// 不持 mu：ReadAt 持锁时若死等，Cancel 拿不到 mu 就丢了 Cancel 的意义。
+// CloseHandle 对正在被另一线程 ReadFile 使用的 handle 是合法的（Windows 文档明确
+// 说"any pending IO will fail"）。后续 Close() 通过 closeOnce 保证幂等。
 func (r *windowsReader) Cancel() error {
 	if !r.cancelled.CompareAndSwap(false, true) {
 		return nil // 已经取消过
@@ -354,5 +365,13 @@ func (r *windowsReader) Cancel() error {
 	if h == windows.InvalidHandle {
 		return nil
 	}
-	return cancelIoEx(h)
+	_ = cancelIoEx(h)
+	// 关 handle 让所有 race window 里的 ReadAt 也 fail —— ResilientReader 看到
+	// 透传的 error 后立刻退（v2.8.23 ResilientReader 改成 cancel-error 不 0-fill）。
+	// 不通过 r.Close()：Close 持 mu 会死等 in-flight ReadAt；CancelIoEx + CloseHandle
+	// 已经让 in-flight 醒来。closeOnce 保证后续 deferred Close 不重复关。
+	r.closeOnce.Do(func() {
+		_ = windows.CloseHandle(h)
+	})
+	return nil
 }

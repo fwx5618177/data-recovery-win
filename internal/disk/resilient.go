@@ -87,10 +87,19 @@ func (r *ResilientReader) Cancel() error {
 // 这种策略让"500GB 盘有 100 个坏扇区"也能完成扫描，而不是从第一个坏扇区就死。
 // 副作用：返回的 buf 里坏扇区位置是 0，上层不知道（除非主动查 BadSectors()）。
 // 现实里这种取舍是对的 — 用户更关心"能扫完"而不是"每个 IO 错误都报"。
+//
+// v2.8.23 例外：ErrReaderCancelled 必须**穿透**，不能当坏扇区 0-fill。
+// 因为这条错误的语义是"reader 已停，不再服务"——继续重试不仅无意义，更会把
+// 上层不带 ctx 的紧密读循环（Collector / format detector / validateAll）困死，
+// 它们看 err==nil 就觉得读到了数据继续往下走，Cancel 信号完全失效。
 func (r *ResilientReader) ReadAt(buf []byte, offset int64) (int, error) {
 	n, err := r.underlying.ReadAt(buf, offset)
 	if err == nil || err == io.EOF || n == len(buf) {
 		return n, err
+	}
+	// v2.8.23: reader 已取消 → 直接透传，禁止当坏扇区 0-fill
+	if IsCancelled(err) {
+		return 0, err
 	}
 	// 出错：按扇区切分逐块重试
 	return r.readWithRetry(buf, offset)
@@ -134,6 +143,9 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 				if err == io.EOF {
 					return int(totalRead), nil
 				}
+			} else if IsCancelled(err) {
+				// v2.8.23: cancel 必须穿透；继续轮 chunk 会让循环跑完才返回
+				return int(totalRead), err
 			} else {
 				// 整 chunk 坏 —— 0 填充 + 记录 + 倍增下一轮 chunk
 				for i := int64(0); i < chunk; i++ {
@@ -166,6 +178,10 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 				break
 			}
 			lastErr = err
+			// v2.8.23: cancel 必须穿透；不浪费 sleep + retry 在已死的 reader 上
+			if IsCancelled(err) {
+				return int(totalRead), err
+			}
 			// 坏扇区常常需要短暂等待让控制器恢复
 			if attempt+1 < r.maxRetry {
 				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
