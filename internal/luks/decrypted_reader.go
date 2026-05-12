@@ -119,6 +119,21 @@ func NewDecryptedReader(cfg DecryptedReaderConfig) (*DecryptedReader, error) {
 func (d *DecryptedReader) Open() error  { return nil }
 func (d *DecryptedReader) Close() error { return nil }
 
+// Cancel 把"取消"信号透传给 underlying，让 Engine.Stop 能毒化 reader。
+//
+// v2.8.22 新增。之前 LUKS / VeraCrypt 扫描时 reader 是 DecryptedReader（不实现 Canceller），
+// Engine.Stop 的 disk.Canceller 类型断言静默 false，CancelIoEx 永远不触发；
+// 用户停扫描后磁盘还在 3 GB/s 持续读直到关进程。
+func (d *DecryptedReader) Cancel() error {
+	if c, ok := d.underlying.(disk.Canceller); ok {
+		return c.Cancel()
+	}
+	return nil
+}
+
+// 编译期断言：DecryptedReader 必须实现 disk.Canceller，否则 Engine.Stop 没法毒化它。
+var _ disk.Canceller = (*DecryptedReader)(nil)
+
 // CacheStats 返回 LRU sector 缓存命中率快照（cache 未启用时所有字段为 0）。
 // 给 UI / metrics 端点用 —— "缓存命中率 87%" 让用户能感知优化生效。
 func (d *DecryptedReader) CacheStats() disk.CacheStats { return d.cache.Stats() }

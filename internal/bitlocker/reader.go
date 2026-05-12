@@ -108,6 +108,22 @@ func (r *DecryptingReader) SetVolumeOffset(off int64) {
 func (r *DecryptingReader) Open() error  { return r.underlying.Open() }
 func (r *DecryptingReader) Close() error { return r.underlying.Close() }
 
+// Cancel 透传给 underlying —— 让 Engine.Stop() 能毒化 reader，BitLocker 扫描的
+// 所有后续 ReadAt 立刻 fail 而不打到内核 ReadFile。
+//
+// v2.8.22 新增。之前 BitLocker 扫描时 reader 是 DecryptingReader（不实现 Canceller），
+// Engine.Stop 的 `c, ok := reader.(disk.Canceller); ok` 静默 false，CancelIoEx
+// 永远不触发；用户停扫描后磁盘还在 3 GB/s 持续读直到关进程。
+func (r *DecryptingReader) Cancel() error {
+	if c, ok := r.underlying.(disk.Canceller); ok {
+		return c.Cancel()
+	}
+	return nil
+}
+
+// 编译期断言：DecryptingReader 必须实现 disk.Canceller，否则 Engine.Stop 没法毒化它。
+var _ disk.Canceller = (*DecryptingReader)(nil)
+
 // Size / SectorSize / DevicePath 透传或自定义
 func (r *DecryptingReader) Size() (int64, error) { return r.underlying.Size() }
 func (r *DecryptingReader) SectorSize() int      { return r.sectorSize }

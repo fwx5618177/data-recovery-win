@@ -4,6 +4,84 @@
 
 ---
 
+## v2.8.22 (2026-05-12)
+
+**致命级 IO 泄漏（v2 修订） — Cancel 之后 ReadAt 必须立刻 fail**
+
+v2.8.20 的修复"Engine.Stop 同步等 goroutine 真退出 10s"在 **真盘 NVMe 场景下不充分**：
+用户报点停止 / 换一块盘 / 关闭确认后，任务管理器 D: 仍 3.1 GB/s 持续读，
+只有杀进程才停。
+
+### Root cause（v2.8.20 漏掉的两条路径）
+
+**1. CancelIoEx 是一次性的，但 reader 路径里有"不带 ctx 的紧密读循环"。**
+
+`windowsReader.Cancel()` 只调 `CancelIoEx(handle, 0)` —— 它**仅取消当下那一个**
+in-flight ReadFile。handle 留着，后续 ReadAt 又能正常读盘。
+
+`internal/carver/engine.go:466` 的 Collector goroutine 在 `for m := range matchCh`
+里没 ctx 检查。matchCh 缓冲 1000，workers 退出前还会塞一波。每个 match 被 Collector
+处理时调 `determineFileSize` / `detectMP4Size` / `detectZIPSize` / `searchFooter` 等 ——
+全部走 `e.reader.ReadAt` 读盘确定文件大小，每个 detector 可能读到 maxSize（默认 2GB）。
+
+所以 Stop 之后：carver IO goroutine 看到 `ctx.Done()` 退掉 → Workers 退掉 →
+Collector 开始消耗 matchCh 缓冲，**每个 match 触发的 ReadAt 都成功**（CancelIoEx 已过期）。
+3 GB/s NVMe × 几十秒～几分钟 = 用户看到的"停不下来"。
+
+**2. BitLocker / LUKS / VeraCrypt 扫描时 reader 根本没收到 Cancel。**
+
+`bitlocker.DecryptingReader` 和 `luks.DecryptedReader` 不实现 `disk.Canceller`。
+`Engine.Stop` 的：
+
+```go
+if c, ok := reader.(disk.Canceller); ok { _ = c.Cancel() }
+```
+
+类型断言静默 false，CancelIoEx **永远不触发**。加密卷扫描的 Stop 比明文盘还糟。
+
+### Fixed — 毒化 reader：Cancel 之后所有 ReadAt 立刻 fail
+
+`internal/disk/reader.go` 加 `ErrReaderCancelled` sentinel + `IsCancelled` helper。
+
+`internal/disk/reader_windows.go`：
+- `windowsReader` 加 `cancelled atomic.Bool` flag
+- `ReadAt` 第一句：`if r.cancelled.Load() { return 0, ErrReaderCancelled }` —— 无锁、不进内核
+- `Cancel` 用 `CompareAndSwap` 幂等地 set flag，再调 CancelIoEx 让 in-flight 醒过来
+
+`internal/bitlocker/reader.go`：
+- `DecryptingReader.Cancel()` 透传到 underlying（编译期断言实现 `disk.Canceller`）
+
+`internal/luks/decrypted_reader.go`：
+- `DecryptedReader.Cancel()` 同上 —— LUKS / VeraCrypt 共享这套链
+
+### 修复效果
+
+Stop 触发后：
+1. flag 一开 + CancelIoEx 喊醒 in-flight ReadFile
+2. 上层任何读路径 —— carver Collector / format detectors / NTFS USN scanner /
+   ResilientReader.readWithRetry —— 调 `reader.ReadAt` 全部立刻 `ErrReaderCancelled`
+3. detectMP4Size / detectZIPSize 等遇 error 自然 break，determineFileSize 返回 0
+4. Collector 因为每个 match 都丢，drain matchCh 缩到毫秒级
+5. carver.Scan 退 → ScanWithReaderOptions 退 → `e.scanning=false`
+6. Engine.Stop 10s deadline 远没用上，<500ms 就退
+
+### Files Changed
+
+- `internal/disk/reader.go` — 新增 `ErrReaderCancelled` + `IsCancelled`
+- `internal/disk/reader_windows.go` — `windowsReader.cancelled` flag + ReadAt 快退 + Cancel 幂等 set
+- `internal/bitlocker/reader.go` — `DecryptingReader.Cancel()` 透传 + `var _ disk.Canceller` 断言
+- `internal/luks/decrypted_reader.go` — `DecryptedReader.Cancel()` 透传 + 断言
+- `internal/disk/reader_cancel_test.go` — 新增：image reader Cancel 毒化 / ResilientReader Cancel 透传 / Cancel 终止无 ctx 紧读循环 < 2s
+- `internal/bitlocker/reader_cancel_test.go` — 新增：BL reader 类型断言 + Cancel 透传
+- `internal/luks/reader_cancel_test.go` — 新增：LUKS reader 类型断言 + Cancel 透传
+
+### 测试
+
+`go test -race ./...` 全绿，包括 3 个 v2.8.22 新增回归测试。
+`go vet ./...` / `staticcheck ./...` / `GOOS=windows go vet ./...` 全过。
+
+---
+
 ## v2.8.21 (2026-05-12)
 
 **UI 规范修订：禁用单边 border → 全量切换 `box-shadow: inset`**

@@ -5,6 +5,7 @@ package disk
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -101,6 +102,15 @@ type windowsReader struct {
 	sectorSize int
 	diskSize   int64
 	mu         sync.Mutex
+
+	// cancelled 是 reader 的"毒化"开关。v2.8.22 加 —— Cancel 之后 ReadAt 立刻
+	// 返回 ErrReaderCancelled，不再触达内核 ReadFile。
+	//
+	// 背景：v2.8.20 的 CancelIoEx 只能取消"当下那一个" pending IO。后续 ReadAt
+	// 又能正常 ReadFile。carver Collector / per-format detector 这种没 ctx 的
+	// 读循环可在 Stop 后持续打满磁盘几十秒～几分钟。这个 flag 一开就让所有
+	// 读路径瞬间快退。
+	cancelled atomic.Bool
 }
 
 // newPlatformReader 创建 Windows 平台磁盘读取器
@@ -175,6 +185,11 @@ func (r *windowsReader) Close() error {
 // ReadAt 从指定偏移量读取数据到 buf
 // 自动处理扇区对齐，保证直接 I/O 模式下的正确读取
 func (r *windowsReader) ReadAt(buf []byte, offset int64) (int, error) {
+	// v2.8.22: reader 被取消 → 不进内核，直接 fail，让上层 read 循环（不带 ctx 的）
+	// 快退。无锁的 atomic.Load 比锁 ReadFile 快几个数量级。
+	if r.cancelled.Load() {
+		return 0, ErrReaderCancelled
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -317,13 +332,24 @@ func (r *windowsReader) DevicePath() string {
 	return r.path
 }
 
-// Cancel 取消所有 pending IO，强制让正在阻塞的 ReadAt 立即返回错误。
-// 用途：StopScan 时让卡在内核 ReadFile 上的 goroutine 立刻醒来，避免 stop
-// 半天没反应。不关 handle —— 后续 ReadAt 仍可继续；如要彻底释放，调 Close。
+// Cancel 把 reader 标为"毒化" + 取消所有 pending IO。
 //
-// 注意：Cancel 不持锁，因为 ReadAt 已经持有 mu —— 持锁等不到 ReadAt 释放就死锁。
-// handle 在 Open / Close 之外只读 + windows 句柄一旦获得后用法是线程安全的。
+// v2.8.22 修订：
+//   - 先 atomic.Store cancelled=true → 后续 ReadAt 第一句就 fail，不再触达内核
+//   - 再 CancelIoEx → 让卡在内核 ReadFile 上的当前那个 goroutine 立刻醒来
+//
+// 之前的版本只做 CancelIoEx 但是 CancelIoEx 是一次性的，handle 留着所以后续
+// ReadAt 又能正常读盘。carver Collector / per-format detector 等不带 ctx 的
+// read 循环就在 Stop 后继续打满磁盘 IO。
+//
+// CompareAndSwap 保证 Cancel 幂等 + 重复 Stop 不会乱套（用户可能连点 stop）。
+//
+// 不持锁：ReadAt 当前持有 mu —— 加锁会死等到 ReadAt 自然返回，丢失 Cancel 的意义。
+// handle 是 uintptr，原子读 + windows CancelIoEx 对已关闭/无效句柄安全（返回错误而非崩溃）。
 func (r *windowsReader) Cancel() error {
+	if !r.cancelled.CompareAndSwap(false, true) {
+		return nil // 已经取消过
+	}
 	h := r.handle
 	if h == windows.InvalidHandle {
 		return nil

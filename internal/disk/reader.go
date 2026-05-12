@@ -1,10 +1,27 @@
 package disk
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
 )
+
+// ErrReaderCancelled 表示 reader 已经被 Cancel() —— 任何后续 ReadAt 都立刻返回这个错误，
+// 不会再触达内核 syscall。
+//
+// v2.8.22 新增。背景：windowsReader.Cancel 之前只调 CancelIoEx 取消"当下"那一个
+// in-flight ReadFile，handle 留着；后续 ReadAt 又能成功读盘。
+// carver Collector / per-format size detectors 等 read 循环没 ctx，因此即便 Stop
+// 早就触发，它们还能在 Stop 后持续读盘几十秒～几分钟（NVMe 3 GB/s 持续打满）。
+// 加这个错误 + reader 的 cancelled flag，让 Cancel 之后任何 ReadAt 立即 fail，
+// 上面的所有不带 ctx 的 read 循环都会自然快退。
+var ErrReaderCancelled = errors.New("reader 已取消")
+
+// IsCancelled 判断错误是否来自 reader Cancel —— 上层 retry / wrap 后想区分时用。
+func IsCancelled(err error) bool {
+	return err != nil && errors.Is(err, ErrReaderCancelled)
+}
 
 // DiskReader 定义磁盘原始数据读取接口
 type DiskReader interface {
