@@ -4,6 +4,49 @@
 
 ---
 
+## v2.8.21 (2026-05-12)
+
+**UI 规范修订：禁用单边 border → 全量切换 `box-shadow: inset`**
+
+### Changed — UI 样式规范
+
+视觉上"只画一条边"的需求（卡片底部分割线、tab 高亮下划线、任务卡片左侧色条等），
+之前散落用 `border-top` / `border-bottom` / `border-left` / `border-right` 实现。
+单边 border 与全边 border 的盒模型尺寸不同 —— 一旦后续在同一元素再加 `border:`
+全边样式会撞框、错位。
+
+**改为全量 `box-shadow: inset`**：
+- `border-top: Wpx solid X` → `box-shadow: inset 0 Wpx 0 0 X`
+- `border-bottom: Wpx solid X` → `box-shadow: inset 0 -Wpx 0 0 X`
+- `border-left: Wpx solid X` → `box-shadow: inset Wpx 0 0 0 X`
+- `border-right: Wpx solid X` → `box-shadow: inset -Wpx 0 0 0 X`
+
+不占盒模型尺寸，与全边 `border` 可任意组合，视觉零差异。
+
+### Fixed — 重叠的 boxShadow key 导致工具栏右侧分割线消失
+
+`MobileToolsModals.tsx` 工具栏外层 `style={{}}` 在批量转换后出现两个 `boxShadow` key —
+后者覆盖前者，分割线丢失。合并为多 shadow 列表（`inset border, drop shadow`）。
+
+### Files Changed
+
+- `frontend/src/style.css` — 30+ 处单边 border → `box-shadow: inset`；checkbox ✓ 图标 / indeterminate 横线作为唯一例外（CSS border 构图技法，注释标注）
+- `frontend/src/App.tsx` — 5 处 inline `borderTop/borderBottom` 转换
+- `frontend/src/components/MobileToolsModals.tsx` — 8 处转换（含 ternary tab 指示线 + template literal 任务卡左色条）+ 工具栏 boxShadow 合并修复
+- `frontend/src/components/DuplicateImagesModal.tsx` — footer borderTop 转换
+- `frontend/src/components/ToolDialog.tsx` — footer borderTop 转换
+- `CLAUDE.md` — 新增 "UI 样式规范" 段落，禁单边 border + 审查命令
+
+### 审查
+
+```bash
+rg 'border(Top|Bottom|Left|Right)\s*:' frontend/src
+rg 'border-(top|bottom|left|right)\s*:' frontend/src
+```
+除 `style.css` 内 checkbox 图标 3 行（带 `/* 单边 border 例外：... */` 注释）外 0 结果。
+
+---
+
 ## v2.8.20 (2026-05-09)
 
 **致命级 IO 泄漏修复 + 系统盘警告 + S.M.A.R.T. UX + 工具菜单分类**

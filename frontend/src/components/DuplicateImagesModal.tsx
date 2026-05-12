@@ -102,7 +102,7 @@ export function DuplicateImagesModal({ groups, wailsApp, onClose }: DuplicateIma
 
         <div className="preview-modal__footer" style={{
           display: "flex", justifyContent: "flex-end", gap: 8, padding: "12px 20px",
-          borderTop: "1px solid var(--border)",
+          boxShadow: "inset 0 1px 0 0 var(--border)",
         }}>
           <button className="btn btn--ghost btn--sm" onClick={onClose}>关闭</button>
         </div>

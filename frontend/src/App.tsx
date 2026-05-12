@@ -1753,7 +1753,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             position: "sticky", top: 0,
             padding: "var(--space-3)",
             background: "var(--bg-surface)",
-            borderBottom: "1px solid var(--border)",
+            boxShadow: "inset 0 -1px 0 0 var(--border)",
             zIndex: 1,
           }}>
             <input
@@ -2060,7 +2060,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
 
           {/* ==================== 移动端 / 备份 / 云端 / NAS（v2.4 解锁）  ==================== */}
 
-          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+          <div style={{ boxShadow: "inset 0 1px 0 0 var(--border)", margin: "6px 0" }} />
 
           {item("☁️ 扫云端备份（iCloud/OneDrive/Drive...）", () => {
             setOpen(false);
@@ -2156,7 +2156,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             }
           })}
 
-          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+          <div style={{ boxShadow: "inset 0 1px 0 0 var(--border)", margin: "6px 0" }} />
 
           {item("🔌 手机直连 ADB 设备列表", () => runAsync(
             () => wailsApp?.MTPListDevices?.(),
@@ -2187,7 +2187,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onOpenMobileModal?.("ios-backup");
           })}
 
-          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+          <div style={{ boxShadow: "inset 0 1px 0 0 var(--border)", margin: "6px 0" }} />
 
           {item("📡 NAS SMB 扫描", () => {
             setOpen(false);
@@ -2213,7 +2213,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onOpenMobileModal?.("disk-dump");
           })}
 
-          <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />
+          <div style={{ boxShadow: "inset 0 1px 0 0 var(--border)", margin: "6px 0" }} />
           {item("📦 关于本工具", () => {
             setOpen(false);
             onOpenMobileModal?.("about");

@@ -207,7 +207,7 @@ export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }: ModalPro
           ) : (
             <ul style={{ margin: "0 0 16px 0", padding: 0, listStyle: "none", fontSize: 12 }}>
               {roots.map((r, i) => (
-                <li key={i} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
+                <li key={i} style={{ padding: "4px 0", boxShadow: "inset 0 -1px 0 0 var(--border)" }}>
                   <span className="badge badge--success" style={{ marginRight: 8, fontSize: 10 }}>
                     {r.provider}
                   </span>
@@ -232,7 +232,7 @@ export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }: ModalPro
           ) : (
             <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
               <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                <tr style={{ boxShadow: "inset 0 -1px 0 0 var(--border)" }}>
                   <th style={{ textAlign: "left", padding: "6px 4px" }}>类型</th>
                   <th style={{ textAlign: "left", padding: "6px 4px" }}>云端</th>
                   <th style={{ textAlign: "left", padding: "6px 4px" }}>路径</th>
@@ -242,7 +242,7 @@ export function CloudBackupsModal({ wailsApp, onClose, onStartedScan }: ModalPro
               </thead>
               <tbody>
                 {hits.map((h, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <tr key={i} style={{ boxShadow: "inset 0 -1px 0 0 var(--border)" }}>
                     <td style={{ padding: "6px 4px" }}>
                       {h.kind === "iOS-MobileSync" ? "📱 iOS" : "🤖 Android"}
                     </td>
@@ -1251,7 +1251,7 @@ export function AboutModal({ wailsApp, onClose }: ModalProps) {
         ))}
       </div>
 
-      <div className="muted" style={{ fontSize: 11, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+      <div className="muted" style={{ fontSize: 11, boxShadow: "inset 0 1px 0 0 var(--border)", paddingTop: 12 }}>
         <div>所有解锁/扫描在本机完成；除显式"检查更新"外不连任何外网。</div>
         <div>第三方依赖：go-smb2 (BSD-3) · aead/serpent (BSD-2) · klauspost/compress (BSD-3) · wails v2 (MIT) · React (MIT)</div>
       </div>
@@ -1351,8 +1351,9 @@ export function TasksSidebar({
         bottom: 0,
         width: collapsed ? 36 : 300,
         background: "var(--bg-surface)",
-        borderRight: "1px solid var(--border)",
-        boxShadow: collapsed ? "none" : "2px 0 12px rgba(0,0,0,0.08)",
+        boxShadow: collapsed
+          ? "inset -1px 0 0 0 var(--border)"
+          : "inset -1px 0 0 0 var(--border), 2px 0 12px rgba(0,0,0,0.08)",
         transition: "width 0.2s ease-out",
         zIndex: 80,
         display: "flex",
@@ -1363,7 +1364,7 @@ export function TasksSidebar({
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         padding: collapsed ? "8px 4px" : "10px 12px",
-        borderBottom: "1px solid var(--border)",
+        boxShadow: "inset 0 -1px 0 0 var(--border)",
       }}>
         {!collapsed && (
           <div style={{ fontSize: 12, fontWeight: 600 }}>
@@ -1383,14 +1384,15 @@ export function TasksSidebar({
       {!collapsed && (
         <>
           {/* Tab 切换 */}
-          <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", boxShadow: "inset 0 -1px 0 0 var(--border)" }}>
             <button
               onClick={() => setTab("active")}
               style={{
                 flex: 1, padding: "8px 0", fontSize: 11, fontWeight: 600,
                 background: tab === "active" ? "var(--accent-soft)" : "transparent",
                 color: tab === "active" ? "var(--accent)" : "var(--text-muted)",
-                border: "none", borderBottom: tab === "active" ? "2px solid var(--accent)" : "none",
+                border: "none",
+                boxShadow: tab === "active" ? "inset 0 -2px 0 0 var(--accent)" : "none",
                 cursor: "pointer",
               }}
             >
@@ -1402,7 +1404,8 @@ export function TasksSidebar({
                 flex: 1, padding: "8px 0", fontSize: 11, fontWeight: 600,
                 background: tab === "history" ? "var(--accent-soft)" : "transparent",
                 color: tab === "history" ? "var(--accent)" : "var(--text-muted)",
-                border: "none", borderBottom: tab === "history" ? "2px solid var(--accent)" : "none",
+                border: "none",
+                boxShadow: tab === "history" ? "inset 0 -2px 0 0 var(--accent)" : "none",
                 cursor: "pointer",
               }}
             >
@@ -1462,7 +1465,7 @@ function TaskCard({ task, isHistory, onDismiss, onCancel }) {
       style={{
         background: isError ? "var(--bg-danger-soft, #fee2e2)" : (task.done ? "var(--bg-inset)" : "var(--bg-inset)"),
         border: `1px solid ${isError ? "var(--danger)" : "var(--border)"}`,
-        borderLeft: `3px solid ${isError ? "var(--danger)" : (task.done && !isError ? "var(--success, #16a34a)" : meta.color)}`,
+        boxShadow: `inset 3px 0 0 0 ${isError ? "var(--danger)" : (task.done && !isError ? "var(--success, #16a34a)" : meta.color)}`,
         borderRadius: 6,
         padding: "8px 10px",
         marginBottom: 8,

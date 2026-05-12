@@ -214,7 +214,7 @@ export function ToolDialog({
             justifyContent: "flex-end",
             gap: 8,
             padding: "12px 20px",
-            borderTop: "1px solid var(--border)",
+            boxShadow: "inset 0 1px 0 0 var(--border)",
           }}
         >
           <button className="btn btn--ghost btn--sm" onClick={onClose} disabled={submitting}>
