@@ -1571,7 +1571,29 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 	stopHeartbeat := make(chan struct{})
 	go a.emitScanHeartbeat(stopHeartbeat, time.Now())
 
+	// v2.8.25: 用 "registered" channel 同步等扫描 goroutine 真正进入 ScanWithOptions
+	// 的临界区（设好 scanCancel/scanDone）才返回。否则用户点开始后立刻点停止，
+	// IPC 序列是 StartScan→return→StopScan→engine.Stop()，engine.Stop 看到 done=nil
+	// 返回 no-op，扫描 goroutine 之后才登记 —— 之后没人能取消它，扫描一路跑到底。
+	// 这是用户报的"取消扫描后依然在执行"的最后一条隐蔽路径。
+	registered := make(chan struct{})
 	go func() {
+		// engine.ScanWithOptions 第一件事是抢 mu 设 scanCancel/scanDone/scanning。
+		// 我们没法直接 hook 到那个时刻，只能 poll IsScanning。在自旋上限内一旦
+		// 看到 scanning=true，登记完成。
+		go func() {
+			for i := 0; i < 500; i++ {
+				if a.engine.IsScanning() {
+					close(registered)
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			// 1 秒还没启动起来 —— 异常路径（Open 失败、reader nil 等），也 close
+			// 让外层不死等
+			close(registered)
+		}()
+
 		result, err := a.engine.ScanWithOptions(drivePath, types.ScanOptions{
 			Mode:                     types.ScanMode(mode),
 			IncludeDeletedPartitions: includeDeletedPartitions,
@@ -1595,6 +1617,9 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 
 		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
 	}()
+
+	// 等扫描注册完成（最多 1s），确保后续 StopScan 能看到 scanCancel/scanDone
+	<-registered
 
 	return nil
 }

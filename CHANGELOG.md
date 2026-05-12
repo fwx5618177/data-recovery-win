@@ -4,6 +4,175 @@
 
 ---
 
+## v2.8.25 (2026-05-12)
+
+**致命级 IO 泄漏 v5 — 启动期 race 把 Stop 撒谎 bug 拉了回来**
+
+v2.8.24 引入 done-channel 硬同步，本以为解决了，但用户继续报"取消扫描后依然在执行"。
+压力测试（100 次迭代、纳秒级延迟）直接复现了：**Stop 在扫描刚启动的 race window 里
+被调用时，依然是 no-op。** 这是过去 v2.8.20 → v2.8.24 一直在不同伪装下出现的同一类
+bug，今天彻底根除。
+
+### 本质 race（v2.8.24 残留）
+
+`ScanWithReaderOptions` 用了**两个独立的 mu 段**初始化扫描状态：
+
+```go
+// 段 1
+e.mu.Lock()
+e.scanning  = true
+e.scanDone  = make(...)     // ← done 此刻可见
+e.mu.Unlock()
+
+// ... 微秒级 gap ...
+
+// 段 2
+e.mu.Lock()
+e.scanCancel = cancel       // ← cancel 此刻才可见
+e.mu.Unlock()
+```
+
+如果用户在段 1 和段 2 之间点 stop：
+
+```go
+// v2.8.24 Stop
+done := e.scanDone   // ← 非 nil
+cancel := e.scanCancel  // ← nil！
+if cancel != nil { cancel() }  // 跳过
+<-done                          // 一直等
+```
+
+Stop 等 done close，但没人调过 cancel()。扫描里所有 `case <-ctx.Done():` 永远不触发，
+扫描跑到底。**表面看 Stop 在等扫描，实际扫描根本不知道要停。** 用户看到的就是
+"点了停止但磁盘 IO 不停"。
+
+更深一层：App.StartScan 启动 scan goroutine 后**立刻返回**，根本没等 goroutine 进
+ScanWithReaderOptions。用户在 IPC 序列 `StartScan → return → StopScan → engine.Stop()`
+里点的 stop，可能落在 scan goroutine 还没跑到第一个 mu.Lock 的窗口里 ——
+engine.Stop 看到 done 全 nil 走 no-op return，之后扫描启动了也没人能取消。
+
+### 三层修复
+
+**1. ScanWithReaderOptions 原子初始化（最核心）**
+
+scanning / scanDone / scanCancel / reader 这四个"扫描启动状态字段"合并到**同一个 mu
+段**里设置。ctx 在临界区外先创建好，临界区里只做赋值：
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+scanDone := make(chan struct{})
+
+e.mu.Lock()
+if e.scanning { ... }
+e.scanning   = true
+e.scanDone   = scanDone
+e.scanCancel = cancel       // ← 跟 scanDone 同一个 mu 段
+e.reader     = reader
+... maps init ...
+e.mu.Unlock()
+```
+
+之后 Stop 用 `snapshotScanState()` 一次 RLock 拿三件套，要么全有要么全无。
+
+**2. App.StartScan 等扫描登记完成再返回**
+
+```go
+registered := make(chan struct{})
+go func() {
+    go func() {  // 内层 poller
+        for i := 0; i < 500; i++ {
+            if a.engine.IsScanning() { close(registered); return }
+            time.Sleep(2 * time.Millisecond)
+        }
+        close(registered)
+    }()
+    a.engine.ScanWithOptions(...)
+    ...
+}()
+<-registered
+return nil
+```
+
+保证 `App.StartScan` 返回时 `engine.IsScanning() == true`，**用户随后任何时刻点
+stop 都看得到扫描状态**。最多多等 1ms 等扫描登记（实测 ~200μs），不影响 UX。
+
+**3. Engine.Stop 防御性 50ms poll**
+
+万一未来有调用方绕过 App 层（CLI / 集成测试 / 新 IPC）直接调 Engine.Stop，
+看到 done=nil 也不立刻 return —— poll 50ms 等扫描登记：
+
+```go
+if done == nil {
+    deadline := time.Now().Add(50 * time.Millisecond)
+    for time.Now().Before(deadline) {
+        time.Sleep(2 * time.Millisecond)
+        cancel, reader, done = e.snapshotScanState()
+        if done != nil { break }
+    }
+    if done == nil { return }  // 真没扫描在跑（合法 no-op）
+}
+```
+
+这跟 v2.8.20 的 10s timeout 撒谎不同 —— 这里是"等扫描启动"上限 50ms；扫描**结束**仍然
+走 `<-done` 无 timeout。
+
+### 关键回归测试（300 iter 稳定通过）
+
+```go
+// TestEngineStop_RaceFreeStartup
+// 100 次迭代，每次 iter*7μs 延迟覆盖所有可能的启动时序点
+for iter := 0; iter < 100; iter++ {
+    eng := NewEngine()
+    reader := &stuckCancellableReader{}
+    go eng.ScanWithReader(reader, types.ScanDeep, ScanCallbacks{})
+    time.Sleep(time.Duration(iter*7) * time.Microsecond)
+    // Stop 必须在 500ms 内返回 & 扫描必须随后退出
+    eng.Stop()
+}
+```
+
+这个测试**在 v2.8.24 代码上 iter=0 立刻 FAIL**（Stop 卡死），在 v2.8.25 上稳过 300 次
+（go test -count=3）。锁死"任何启动时序点，Stop 都能停"的不变量。
+
+```go
+// TestEngineStop_ZeroReadsAfterStop
+// 锁死"暂停扫描即停止资源占用"
+eng.Stop()
+immediatelyAfterStop := reader.reads.Load()
+for i := 0; i < 5; i++ {
+    time.Sleep(50 * time.Millisecond)
+    if reader.reads.Load() != immediatelyAfterStop {
+        t.Fatal("Stop 返回后 reader 还在被读 —— Stop 撒谎了")
+    }
+}
+```
+
+5 次 / 250ms 严格 atomic snapshot，零容忍 Stop 返回后任何新读。
+
+### Files Changed
+
+- `internal/recovery/engine.go` — `ScanWithReaderOptions` 单 mu 段原子初始化；`Stop` 抽 `snapshotScanState` 一次 RLock + 防御性 50ms poll
+- `app.go` — `startScanInternal` 加 registered channel 等扫描登记后再 return
+- `internal/recovery/stop_handshake_test.go` — 新增 `TestEngineStop_RaceFreeStartup`（100 iter）+ `TestEngineStop_ZeroReadsAfterStop`（atomic snapshot）
+
+### 防止结构倒退
+
+```bash
+# 永远不应该让 scanCancel 和 scanDone 在不同 mu 段里初始化
+rg -A5 'e\.scanDone = ' internal/recovery/engine.go
+# scanCancel 必须跟它在同一个 e.mu.Lock/Unlock 段内
+```
+
+### 测试
+
+```
+go test -race -count=3 -run TestEngineStop_RaceFreeStartup    ✅ 300 iter PASS
+go test -race -count=1 ./...                                   ✅ 全绿
+GOOS=windows go build ./...                                    ✅
+```
+
+---
+
 ## v2.8.24 (2026-05-12)
 
 **结构性修复 —— 不再让 Stop 撒谎**

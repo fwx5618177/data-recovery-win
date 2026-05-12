@@ -339,16 +339,30 @@ func (e *Engine) ScanWithReaderOptions(
 		return nil, fmt.Errorf("reader 不能为 nil")
 	}
 
+	// v2.8.25: 把"宣布扫描启动"的所有状态字段（scanning / scanDone / scanCancel /
+	// reader）放进同一个 mu 临界区原子初始化。这关掉了 v2.8.24 留下的 race：
+	//   - 之前 scanning=true 和 scanCancel 是两个独立 mu 段
+	//   - 用户在这两段之间点 stop → Stop 看到 done 非 nil 但 cancel 仍 nil
+	//   - Stop 走 <-done 但没人调过 cancel()，扫描会一路跑到自然结束
+	//   - 现象：偶发的"点停止没反应"——和用户报的 bug 一致
+	ctx, cancel := context.WithCancel(context.Background())
+	scanDone := make(chan struct{})
+
 	e.mu.Lock()
 	if e.scanning {
 		e.mu.Unlock()
+		cancel() // 不会启动了，立刻释放 ctx
 		return nil, fmt.Errorf("已有扫描任务正在进行中")
 	}
 	e.scanning = true
-	// v2.8.24: 给本次扫描创建独占的 done channel。Stop 同步等它 close —— 这是
-	// "扫描真正结束"的权威信号，避免 polling e.scanning flag 的 10s 超时窗口。
-	scanDone := make(chan struct{})
 	e.scanDone = scanDone
+	e.scanCancel = cancel
+	e.reader = reader
+	if cs, ok := reader.(cacheStatsProvider); ok {
+		e.cacheStatsReader = cs
+	} else {
+		e.cacheStatsReader = nil
+	}
 	e.results = nil
 	e.ntfsSources = make(map[string]ntfsRecoverySource)
 	e.exfatSources = make(map[string]exfatRecoverySource)
@@ -369,25 +383,9 @@ func (e *Engine) ScanWithReaderOptions(
 		close(scanDone) // 信号：扫描 goroutine 已真正退出
 	}()
 
-	startTime := time.Now()
-
-	e.mu.Lock()
-	e.reader = reader
-	// 如果 reader 实现了 CacheStats（LUKS / VC / BitLocker DecryptedReader / DecryptingReader），
-	// 缓存住引用让 Engine.EncryptedReaderCacheStats() 能取到命中率
-	if cs, ok := reader.(cacheStatsProvider); ok {
-		e.cacheStatsReader = cs
-	} else {
-		e.cacheStatsReader = nil
-	}
-	e.mu.Unlock()
-
-	// 创建可取消的 context
-	ctx, cancel := context.WithCancel(context.Background())
-	e.mu.Lock()
-	e.scanCancel = cancel
-	e.mu.Unlock()
 	defer cancel()
+
+	startTime := time.Now()
 
 	// 安全的进度回调包装（防止 nil panic）
 	safeProgress := func(p types.ScanProgress) {
@@ -1376,15 +1374,30 @@ func (e *Engine) CurrentCarverOffset() int64 {
 // goroutine 实际会在毫秒级退出 —— done channel 立刻 close，Stop 立刻返回。timeout
 // 不该发生；如果真发生了，本身就是要修的 bug，不能被 fallback 静默吞掉。
 func (e *Engine) Stop() {
-	e.mu.RLock()
-	cancel := e.scanCancel
-	reader := e.reader
-	done := e.scanDone
-	e.mu.RUnlock()
+	// v2.8.25: 单次 RLock 读所有"扫描启动"状态字段，由 ScanWithReaderOptions 保证
+	// 它们在同一个 mu 段内原子初始化 —— 不存在 cancel/done 部分可见的中间态。
+	cancel, reader, done := e.snapshotScanState()
 
-	if cancel == nil && done == nil {
-		// 没扫描在跑（done 是当前扫描的，nil 意味着 ScanWithReaderOptions 还没进 / 已经结束）
-		return
+	// 防御性 50ms 等待：调用方（典型是 app.go startScanInternal）应该等 IsScanning
+	// 后再返回再让用户能点 Stop —— 但如果有人直接绕 app 层调 Engine.Stop（CLI / 测试 /
+	// 未来的新接口），仍可能落在 scan goroutine 还没跑到第一个 mu.Lock 的窗口里。
+	// 那种情况 done=nil；这里 50ms 内 poll 一下，让 scan 有机会登记。
+	//
+	// 注意：这跟 v2.8.20 那个 10s timeout 撒谎 fallback 不是一码事。这里是"等扫描启动"
+	// 不是"等扫描结束"；结束仍然走 <-done 无 timeout。
+	if done == nil {
+		deadline := time.Now().Add(50 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			time.Sleep(2 * time.Millisecond)
+			cancel, reader, done = e.snapshotScanState()
+			if done != nil {
+				break
+			}
+		}
+		if done == nil {
+			// 真没扫描在跑 —— 用户在没 scan 的状态点了 stop（合法 no-op）
+			return
+		}
 	}
 
 	if cancel != nil {
@@ -1395,24 +1408,6 @@ func (e *Engine) Stop() {
 		_ = c.Cancel()
 	}
 
-	if done == nil {
-		// cancel 已发但 done 不存在 —— 罕见的初始化中途状态，回退到旧的 poll 模式
-		// 给 ScanWithReaderOptions 几十毫秒去设 e.scanDone，避免错过
-		for i := 0; i < 20; i++ {
-			e.mu.RLock()
-			done = e.scanDone
-			e.mu.RUnlock()
-			if done != nil {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if done == nil {
-			logger.Info("Stop: scanDone 未初始化，扫描可能尚未真正启动")
-			return
-		}
-	}
-
 	// 同步等扫描 goroutine 真正退出 —— done close = ScanWithReaderOptions defer 跑完
 	// = 所有子 goroutine（carver IO / workers / collector / progress / validate / etc.）都退了
 	// = 没有任何代码还在调 reader.ReadAt
@@ -1420,6 +1415,14 @@ func (e *Engine) Stop() {
 	// 没 timeout。卡住 = 我们有 bug 要修，不能假装 OK。
 	<-done
 	logger.Info("Stop: 扫描已真正退出")
+}
+
+// snapshotScanState 在一次 RLock 里读出"启动状态"三件套，保证三者来自同一时间点。
+// 由 ScanWithReaderOptions 的"单 mu 段原子初始化"保证：要么全 nil、要么全非 nil。
+func (e *Engine) snapshotScanState() (context.CancelFunc, disk.DiskReader, chan struct{}) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.scanCancel, e.reader, e.scanDone
 }
 
 // StopRecovery 取消正在进行的恢复操作

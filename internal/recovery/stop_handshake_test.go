@@ -185,4 +185,92 @@ func TestEngineStop_StopDoesNotLieAboutCompletion(t *testing.T) {
 	}
 }
 
+// TestEngineStop_RaceFreeStartup 把 v2.8.24 残留的初始化 race 锁死。
+//
+// v2.8.24 的 ScanWithReaderOptions 是这样初始化的：
+//
+//	e.mu.Lock(); e.scanning = true; e.scanDone = make(...); e.mu.Unlock()
+//	... 中间没锁的 ms 级窗口 ...
+//	e.mu.Lock(); e.scanCancel = cancel; e.mu.Unlock()
+//
+// 用户在中间窗口点 stop → Stop 看到 done 非 nil 但 cancel 仍 nil。
+// Stop 会走 <-done 但谁都没调 cancel()，扫描一路跑到自然结束 —— 表现为
+// "我点了停止键但磁盘 IO 仍在持续，关掉才停"。
+//
+// v2.8.25 把这两个 mu 段合并成一个，cancel/done/scanning 同时可见。这个测试
+// 启动 100 次 scan，每次在 nanosecond 级 sleep 后立刻调 Stop，覆盖所有可能的
+// 初始化时序。如果 race 仍在，至少有一次 Stop 会阻塞 → 测试超时。
+func TestEngineStop_RaceFreeStartup(t *testing.T) {
+	for iter := 0; iter < 100; iter++ {
+		eng := NewEngine()
+		reader := &stuckCancellableReader{}
+
+		scanReturned := make(chan struct{})
+		go func() {
+			defer close(scanReturned)
+			_, _ = eng.ScanWithReader(reader, types.ScanDeep, ScanCallbacks{})
+		}()
+
+		// 用纳秒级延迟覆盖各种时序点：从 0（赶在 mu.Lock 之前）到 ~ms
+		// 不用 deterministic interleaving 因为 Go race detector + 100 次迭代
+		// 已经能稳定暴露原 race。
+		time.Sleep(time.Duration(iter*7) * time.Microsecond)
+
+		stopReturned := make(chan struct{})
+		go func() {
+			defer close(stopReturned)
+			eng.Stop()
+		}()
+
+		// Stop 必须在 500ms 内返回。race 时它会卡在 <-done 等永远不会 cancel 的扫描
+		select {
+		case <-stopReturned:
+			// good
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("iter=%d: Stop 卡住 —— 初始化 race 让 cancel/done 不一致", iter)
+		}
+
+		// 扫描 goroutine 也必须收尾
+		select {
+		case <-scanReturned:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("iter=%d: scan goroutine 在 Stop 返回后仍未退出", iter)
+		}
+	}
+}
+
+// TestEngineStop_ZeroReadsAfterStop 把"暂停扫描即停止资源占用"的承诺
+// 用最严格的方式锁死：Stop 返回的那一刻起，reader.ReadAt 必须零调用。
+//
+// 不像 TestEngineStop_StopDoesNotLieAboutCompletion 给 100ms 缓冲检查趋势，
+// 这里直接 atomic snapshot：Stop 之前 N 次，Stop 之后必须仍是 N 次。
+func TestEngineStop_ZeroReadsAfterStop(t *testing.T) {
+	eng := NewEngine()
+	reader := &stuckCancellableReader{}
+
+	go func() { _, _ = eng.ScanWithReader(reader, types.ScanDeep, ScanCallbacks{}) }()
+
+	// 等读起来
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && reader.reads.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if reader.reads.Load() == 0 {
+		t.Fatal("扫描没启动")
+	}
+
+	eng.Stop()
+	immediatelyAfterStop := reader.reads.Load()
+
+	// Stop 返回后再观察 5 次 / 共 250ms。读次数必须严格不变。
+	for i := 0; i < 5; i++ {
+		time.Sleep(50 * time.Millisecond)
+		now := reader.reads.Load()
+		if now != immediatelyAfterStop {
+			t.Fatalf("Stop 返回后第 %d 次采样仍在读：%d → %d (新增 %d 次)",
+				i+1, immediatelyAfterStop, now, now-immediatelyAfterStop)
+		}
+	}
+}
+
 var _ = errors.New // avoid unused
