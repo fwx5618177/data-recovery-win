@@ -152,6 +152,15 @@ type Engine struct {
 	scanCancel    context.CancelFunc
 	recoverCancel context.CancelFunc
 
+	// scanDone 是当前扫描的"真正退出"信号。v2.8.24 加 —— 结构性修复：
+	// 之前 Engine.Stop 只 poll e.scanning flag 10s 超时返回，把"扫描已停"假象
+	// 报给前端但 goroutine 还活着持续读盘。现在 ScanWithReaderOptions 启动时
+	// 创建这个 channel，defer 时 close 之；Stop 同步等它 close。无 timeout —
+	// 卡死时宁可 IPC 挂起让用户看到"停止中..."，也不能撒谎说"已停"实际还在读。
+	//
+	// 为 nil 时表示当前没有扫描在跑（初始 / 上次 Done 后未清）。
+	scanDone chan struct{}
+
 	// resilientReader 当前扫描会话用的带坏块保护的 reader（由 Scan 自动包装）
 	// 用来在扫完后汇报 BadSectors 给前端"坏扇区清单"UI
 	resilientReader *disk.ResilientReader
@@ -336,6 +345,10 @@ func (e *Engine) ScanWithReaderOptions(
 		return nil, fmt.Errorf("已有扫描任务正在进行中")
 	}
 	e.scanning = true
+	// v2.8.24: 给本次扫描创建独占的 done channel。Stop 同步等它 close —— 这是
+	// "扫描真正结束"的权威信号，避免 polling e.scanning flag 的 10s 超时窗口。
+	scanDone := make(chan struct{})
+	e.scanDone = scanDone
 	e.results = nil
 	e.ntfsSources = make(map[string]ntfsRecoverySource)
 	e.exfatSources = make(map[string]exfatRecoverySource)
@@ -350,7 +363,10 @@ func (e *Engine) ScanWithReaderOptions(
 		e.mu.Lock()
 		e.scanning = false
 		e.scanCancel = nil
+		// 不清 e.scanDone —— Stop 可能正在 select 等它，清掉会让等待变 nil-channel 永久阻塞。
+		// close 即可，e.scanDone 留着，下次扫描启动时覆盖。
 		e.mu.Unlock()
+		close(scanDone) // 信号：扫描 goroutine 已真正退出
 	}()
 
 	startTime := time.Now()
@@ -1342,24 +1358,34 @@ func (e *Engine) CurrentCarverOffset() int64 {
 	return start + c.BytesScanned()
 }
 
-// Stop 取消正在进行的扫描，并**同步等待**所有 goroutine 真正退出。
+// Stop 取消正在进行的扫描，并**同步等待**扫描 goroutine 真正退出。
 //
-// v2.8.20 修订（致命级 bug 修复）：
-//   之前 Stop() 只发取消信号就返回，但后台 carver/IO/worker goroutines 可能还在跑
-//   ReadAt 大块（4MB）—— 用户看到的"取消扫描"按钮变了但实际 IO 仍然占满磁盘
-//   （任务管理器显示 100%、2.3 GB/s 持续读）。
+// v2.8.24 结构性重写 —— 弃掉 v2.8.20 的"poll e.scanning 10s timeout"模式。
+// 那种模式的致命缺陷：timeout 触发后 Stop 返回成功，前端 await 解锁、UI 显示"已停"，
+// 但 scan goroutine 还活着持续读盘。用户看到的就是"暂停后磁盘仍 3.4 GB/s 直到杀进程"。
 //
-// 现在：
+// 新模式 —— 用 done channel 做硬同步：
 //  1. cancel context — 通知所有 ctx.Done() 监听者
-//  2. 调 reader.Cancel() — 强制中断卡在内核 ReadAt syscall 上的 goroutine
-//  3. **轮询 e.scanning 等待真退出**（最多 10 秒；超时记日志返回）
+//  2. reader.Cancel() — 强制关 handle，让所有 in-flight 和未来的 ReadFile 都 fail
+//  3. **<-scanDone** — 等到 ScanWithReaderOptions 的 defer 真正跑完才返回
 //
-// 调用方可以确信 Stop() 返回后无 IO 在进行。
+// 没有隐式 timeout：如果 goroutine 真卡死，Stop 也卡住、前端 IPC 也挂起 ——
+// 用户会看到 UI "停止中..." 而不是被骗成"已停"。这比谎报状态好得多。
+//
+// 配合 v2.8.23 的 windowsReader.Cancel 关 handle + ResilientReader 透传 ErrReaderCancelled，
+// goroutine 实际会在毫秒级退出 —— done channel 立刻 close，Stop 立刻返回。timeout
+// 不该发生；如果真发生了，本身就是要修的 bug，不能被 fallback 静默吞掉。
 func (e *Engine) Stop() {
 	e.mu.RLock()
 	cancel := e.scanCancel
 	reader := e.reader
+	done := e.scanDone
 	e.mu.RUnlock()
+
+	if cancel == nil && done == nil {
+		// 没扫描在跑（done 是当前扫描的，nil 意味着 ScanWithReaderOptions 还没进 / 已经结束）
+		return
+	}
 
 	if cancel != nil {
 		logger.Info("正在取消扫描")
@@ -1369,18 +1395,31 @@ func (e *Engine) Stop() {
 		_ = c.Cancel()
 	}
 
-	// v2.8.20: 同步等待 scanning goroutine 真退出。
-	// scanning 在 ScanWithReaderOptions 的 defer 里清零；只有 carver/validator 等所有
-	// 子 goroutine 都退出后才会到那个 defer。
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if !e.IsScanning() {
-			logger.Info("Stop: 扫描已真正退出")
+	if done == nil {
+		// cancel 已发但 done 不存在 —— 罕见的初始化中途状态，回退到旧的 poll 模式
+		// 给 ScanWithReaderOptions 几十毫秒去设 e.scanDone，避免错过
+		for i := 0; i < 20; i++ {
+			e.mu.RLock()
+			done = e.scanDone
+			e.mu.RUnlock()
+			if done != nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if done == nil {
+			logger.Info("Stop: scanDone 未初始化，扫描可能尚未真正启动")
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	logger.Warn("Stop: 等 10 秒 scan 仍未退出（可能 IO syscall 卡死），强制返回")
+
+	// 同步等扫描 goroutine 真正退出 —— done close = ScanWithReaderOptions defer 跑完
+	// = 所有子 goroutine（carver IO / workers / collector / progress / validate / etc.）都退了
+	// = 没有任何代码还在调 reader.ReadAt
+	//
+	// 没 timeout。卡住 = 我们有 bug 要修，不能假装 OK。
+	<-done
+	logger.Info("Stop: 扫描已真正退出")
 }
 
 // StopRecovery 取消正在进行的恢复操作

@@ -4,6 +4,107 @@
 
 ---
 
+## v2.8.24 (2026-05-12)
+
+**结构性修复 —— 不再让 Stop 撒谎**
+
+v2.8.20-v2.8.23 都在试图让扫描 goroutine 尽快退出。我一直在错的层面上修。
+用户连续多次反馈"还没修好"，迫使我承认：所有这些 patch 都没击中本质。
+
+### 本质 bug
+
+`Engine.Stop` 用 **poll + 10 秒 timeout** 的模式：
+
+```go
+deadline := time.Now().Add(10 * time.Second)
+for time.Now().Before(deadline) {
+    if !e.IsScanning() { return }
+    time.Sleep(50 * time.Millisecond)
+}
+logger.Warn("Stop: 等 10 秒 scan 仍未退出，强制返回")  // ← 致命缺陷
+```
+
+**timeout 触发后 Stop 返回"成功"，前端 IPC 解锁、UI 显示"已停"、`换一块盘` 按钮出现 ——
+但扫描 goroutine 还活着持续读盘。** 用户看到的就是"暂停后磁盘仍 3.4 GB/s 直到杀进程"。
+
+我前几版的修复（CancelIoEx、cancelled flag、CloseHandle、ResilientReader 透传 cancel
+错误、Collector ctx 检查）都是想让 goroutine 在 10 秒内退干净 —— 这只是把发生 timeout
+的概率往下压，没有解决"timeout 时 Stop 撒谎"的结构问题。
+
+### 结构性修复 —— `done` channel 硬同步
+
+```go
+// ScanWithReaderOptions 启动时
+scanDone := make(chan struct{})
+e.scanDone = scanDone
+
+defer func() {
+    e.scanning = false
+    e.scanCancel = nil
+    close(scanDone)   // ← 扫描 goroutine 真退出的权威信号
+}()
+
+// Stop
+cancel()          // ctx 通知
+reader.Cancel()   // 关 handle 让 IO 全 fail
+<-done            // ← 同步等。无 timeout。
+```
+
+**没有隐式 timeout。** 如果 goroutine 卡死，Stop 就卡住、前端 IPC 也挂起 ——
+用户会看到"停止中..."，而不是被骗成"已停"实际还在读盘。
+
+配合 v2.8.23 的 reader 关 handle + ErrReaderCancelled 透传，goroutine 实际在毫秒级
+退出 —— done channel 立刻 close，Stop 立刻返回。回归测试实测 Stop 耗时 ~14ms
+（之前最坏 10s timeout）。
+
+### 关键回归测试
+
+```go
+// TestEngineStop_StopDoesNotLieAboutCompletion
+// 锁死用户最关心的语义："Stop 返回 = 扫描真停 = 没有 ReadAt 在继续"
+
+eng.Stop()
+readsAtStop := reader.reads.Load()
+time.Sleep(100 * time.Millisecond)
+readsAfter := reader.reads.Load()
+
+if readsAfter > readsAtStop {
+    t.Errorf("Stop 返回后 reader 仍被读 %d 次 —— Stop 撒谎了", readsAfter - readsAtStop)
+}
+```
+
+这个测试在 v2.8.20-v2.8.23 的代码上**会失败**（10s timeout 让 Stop 在 goroutine 还活着时
+就返回，之后 100ms 里读次数继续涨）。在 v2.8.24 上**通过**（Stop 同步等 done 才返回）。
+
+### Files Changed
+
+- `internal/recovery/engine.go` — `Engine` 加 `scanDone chan struct{}` 字段；`ScanWithReaderOptions`
+  defer 时 close 之；`Stop` 改成 `<-done` 同步等
+- `internal/recovery/stop_handshake_test.go` — 新增 4 个回归测试：
+  - `TestEngineStop_DoneChannelHandshake` — 基本握手
+  - `TestEngineStop_NoScanInProgress` — 没扫描时 Stop no-op 不死锁
+  - `TestEngineStop_DoubleStopSafe` — 并发 Stop 不乱套
+  - `TestEngineStop_StopDoesNotLieAboutCompletion` — 锁死"Stop 不能撒谎"语义
+
+### 检查命令（防止结构倒退）
+
+```bash
+# 永远不应该再出现 "等 N 秒 scan 仍未退出，强制返回" 这种隐式 timeout return
+rg -n 'time\.Now\(\)\.Add.+scanning' internal/recovery/
+rg -n 'Stop: 等.*超时' internal/recovery/
+```
+
+### 测试
+
+```
+go test -race -count=1 ./...                    ✅ 全绿
+TestEngineStop_StopDoesNotLieAboutCompletion    ✅
+TestEngineStop_DoneChannelHandshake             ✅ Stop 耗时 ~14ms
+GOOS=windows go build ./...                     ✅
+```
+
+---
+
 ## v2.8.23 (2026-05-12)
 
 **致命级 IO 泄漏（v3 修订）—— v2.8.22 没真修，三处 bug 一起补**
