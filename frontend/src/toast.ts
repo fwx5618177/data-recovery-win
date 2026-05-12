@@ -27,6 +27,9 @@ export interface ToastInput {
   duration?: number;
   /** 可选 action 按钮 */
   action?: { label: string; onClick: () => void };
+  /** v2.8.20: 去重 key —— 同 key 的 toast 已存在时不重复弹（避免叠了 N 条相同提示）。
+   * 例如 SMART 不可用提示，用户重复点击工具菜单不该叠 5 条相同弹窗。 */
+  dedupeKey?: string;
 }
 
 export interface ToastEntry extends Required<Pick<ToastInput, "level">> {
@@ -36,6 +39,7 @@ export interface ToastEntry extends Required<Pick<ToastInput, "level">> {
   duration: number;
   action?: ToastInput["action"];
   createdAt: number;
+  dedupeKey?: string;
 }
 
 type Listener = (toasts: ToastEntry[]) => void;
@@ -51,6 +55,11 @@ export function showToast(input: ToastInput | string): number {
   const obj: ToastInput = typeof input === "string" ? { description: input } : input;
   const level = obj.level ?? "info";
   const duration = obj.duration ?? (level === "error" ? 8000 : 5000);
+  // v2.8.20: 去重 —— 同 dedupeKey 已存在的 toast 不重复弹（直接返回已存在 id）
+  if (obj.dedupeKey) {
+    const existing = toasts.find((t) => t.dedupeKey === obj.dedupeKey);
+    if (existing) return existing.id;
+  }
   const id = nextId++;
   const entry: ToastEntry = {
     id,
@@ -60,6 +69,7 @@ export function showToast(input: ToastInput | string): number {
     duration,
     action: obj.action,
     createdAt: Date.now(),
+    dedupeKey: obj.dedupeKey,
   };
   // 队列上限：超过 5 个时丢最早的（避免 toast 风暴塞屏）
   toasts = [...toasts, entry].slice(-5);

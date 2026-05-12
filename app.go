@@ -1378,6 +1378,14 @@ func (a *App) Platform() string {
 	return runtime.GOOS
 }
 
+// IsSystemDrive 给前端在用户选盘后查询：这个盘是不是系统盘？
+// 用于警告用户"扫系统盘会让 OS 占用 IO 严重，系统可能假死"+ 提供继续选项。
+//
+// v2.8.20 加 —— 用户报"扫系统盘卡死整个系统"。
+func (a *App) IsSystemDrive(drivePath string) bool {
+	return disk.IsSystemDrive(drivePath)
+}
+
 // DeleteFile 删除一个文件 —— v2.8.17 用于"重复图片结果"页面让用户删除冗余副本。
 //
 // 安全检查：

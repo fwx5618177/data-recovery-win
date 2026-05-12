@@ -4,6 +4,74 @@
 
 ---
 
+## v2.8.20 (2026-05-09)
+
+**致命级 IO 泄漏修复 + 系统盘警告 + S.M.A.R.T. UX + 工具菜单分类**
+
+### Fixed — Issue 22 (致命级): 取消扫描后 IO 持续占用磁盘
+
+用户报：扫描中点"换一块盘"或停止后，任务管理器仍显示 100% 磁盘活动 + 持续 2-3 GB/s 读取
+（NVMe 系统盘）；只有关闭应用才真正停止。
+
+**根因**：
+1. `Workbench` 的"换一块盘"按钮 onClick 只调 `setCurrentPage("welcome")` —— **从未调 stopScan**。前端切了页面但后端 scan goroutine 还在跑 carver / validate。
+2. `Engine.Stop()` 只发取消信号就返回，**不等 goroutine 真退出**。前端 `setScanActive(false)` 后用户以为停了，实际仍在读盘。
+
+**修复**：
+- 新 `safeBackToWelcome` 切页前 await `stopScan`（且不管前端 `scanActive` 状态如何都防御性再调一次后端 `StopScan`，防 backend 残留 IO）。
+- `Engine.Stop()` 现在**同步等**：cancel ctx + reader.Cancel() 后轮询 `IsScanning()` 最多 10 秒，确保所有 carver/worker/collector goroutine 真退出。
+- 应用关闭路径（`CloseConfirmModal` 退出选项）也先 `StopScan` 再 `ConfirmExit`。
+
+### Fixed — Issue 23: 系统盘扫描 IO 占满致系统假死
+
+之前用户对系统盘启动扫描 → carver 满负荷读 → Windows / OS 无 IO 配额 → 系统响应假死。
+
+**修复**：
+- 新增 `internal/disk/system_drive_windows.go` 调用 `GetWindowsDirectoryW` 拿系统目录的盘符，与目标 devicePath 比对。
+- 新增 `App.IsSystemDrive(drivePath) bool` IPC。
+- `startScan` 启动前检测 —— 系统盘则弹强烈警告 `confirm()`，建议拆盘外接或先 ddrescue 成镜像扫描；用户确认才继续。
+- macOS/Linux：路径启发式（`/dev/disk0` / `/dev/sda` / `/dev/nvme0n1`）。
+
+### Fixed — Issue 20: S.M.A.R.T. 工具 deviceWebPath 为空 + 重复 toast + 文案
+
+- **未选盘报错**：之前未选盘点 SMART → 后端报 `deviceWebPath 为空`。现在 frontend 先判 drivePath，未选盘弹友好提示。
+- **重复 toast**：用户重复点击工具菜单时同一个"S.M.A.R.T. 不可用"toast 叠 N 条。新增 `toast.dedupeKey` 机制，同 key 已存在的 toast 不重弹。
+- **文案**：菜单项 "🩺 磁盘 SMART 健康" → **"🩺 磁盘 S.M.A.R.T. 健康"**（百度百科标准简称）。所有 toast 文本同步。
+
+### Fixed — Issue 21: 工具菜单分类 (需选盘 vs 通用)
+
+工具分两类，未选盘时操作硬件类工具会失败但无前置提示。
+
+**修复**：`item` 助手加 `needsDisk` 形参；未选盘时按钮变灰 + tooltip 提示「请先在主界面选源盘」 + 标签后加「（需先选源盘）」。
+
+需选盘的工具（4 个）：
+- 🩺 磁盘 S.M.A.R.T. 健康
+- 🔒 SED OPAL 锁定状态
+- 🗂 GPT 备份表恢复
+- 📸 APFS 时光快照
+
+其他通用工具（不需要选盘的：图片查重 / OCR / NSRL / 计划备份 / 网络挂载建议 / 导出时间线 / DFXML / 保管链 / iOS 备份扫描 / 等）维持原状。
+
+### Files Changed
+
+- `internal/recovery/engine.go` — `Engine.Stop()` 同步等 goroutine 真退出（最多 10 秒）
+- `internal/disk/system_drive_windows.go` — 新文件，SHGetWindowsDirectoryW 系统盘检测
+- `internal/disk/system_drive_other.go` — 新文件，macOS/Linux 启发式
+- `app.go` — `IsSystemDrive` IPC 新增
+- `frontend/src/App.tsx` — `safeBackToWelcome` + 系统盘启动确认 + S.M.A.R.T. 文案 + 工具 needsDisk 标记
+- `frontend/src/toast.ts` — `dedupeKey` 去重机制
+
+### 验证
+
+```
+go vet ./...                                ✅ clean
+go build ./...                              ✅ clean
+go test -race -count=1 -timeout 300s ./... ✅ 39 packages PASS
+vite build                                  ✅ 55 modules → 338KB
+```
+
+---
+
 ## v2.8.19 (2026-05-09)
 
 **hotfix(ci) + UX 收尾：v2.8.18 嵌套引号挂 CI + 清掉最后 2 个 prompt**

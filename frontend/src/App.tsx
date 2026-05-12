@@ -664,6 +664,21 @@ export default function App() {
 
   const startScan = useCallback(async () => {
     if (!selectedDrive || bridgeState !== "ready" || !wailsApp?.StartScan) return;
+    // v2.8.20 Issue 23: 系统盘扫描 IO 占满会让 OS 假死 —— 启动前警告
+    try {
+      const isSys = await wailsApp?.IsSystemDrive?.(selectedDrive.path);
+      if (isSys) {
+        const ok = confirm(
+          "⚠️ 这是系统盘\n\n" +
+          "扫描系统盘会占用大量磁盘 IO，可能导致系统响应变慢甚至假死。\n\n" +
+          "强烈建议：\n" +
+          "• 把要扫描的盘拆下来用硬盘盒外接到另一台机器\n" +
+          "• 或者用 ddrescue / DMDE 先把盘 dump 成 .img 镜像再扫描镜像（更安全）\n\n" +
+          "如果你确认要继续扫系统盘，请点「确定」。"
+        );
+        if (!ok) return; // 用户取消
+      }
+    } catch { /* 检测失败不阻塞，继续扫 */ }
     resetScanState();
     setScanActive(true);
     setCurrentPage("workbench");
@@ -721,11 +736,30 @@ export default function App() {
     }
   }, [wailsApp]);
 
-  const stopScan = useCallback(() => {
+  // v2.8.20: stopScan 现在 await 后端 Stop() 完成（后端等所有 IO goroutine 真退出
+  // 最多 10s）。修复致命 bug：之前用户点 stopScan 后任务管理器仍显示 100% IO 持续读盘。
+  const stopScan = useCallback(async () => {
     if (!wailsApp?.StopScan) return;
-    wailsApp.StopScan().catch(() => {});
+    try {
+      await wailsApp.StopScan(); // 后端同步等 goroutine 真退出
+    } catch {
+      // 忽略 —— scan:error 事件会更新 UI
+    }
     setScanActive(false);
   }, [wailsApp]);
+
+  // v2.8.20: 切换界面前确保扫描真停掉 —— 防止 "换一块盘" / 关闭后 IO 持续占用
+  // （致命级 bug：用户停扫描后任务管理器仍 100% 占用磁盘 IO，可能导致系统假死）
+  const safeBackToWelcome = useCallback(async () => {
+    if (scanActive) {
+      await stopScan();
+    } else if (wailsApp?.StopScan) {
+      // 即便前端 scanActive=false，后端可能 still alive（validate / saveSnapshot 等阶段）
+      // 防御性也调一次 StopScan，确保彻底无 IO
+      try { await wailsApp.StopScan(); } catch { /* no-op */ }
+    }
+    setCurrentPage("welcome");
+  }, [scanActive, stopScan, wailsApp]);
 
   // 全局键盘快捷键（必须在 stopScan 声明之后，否则 TDZ 报错）
   // - Esc: 关弹窗 / 停扫描
@@ -1235,7 +1269,7 @@ export default function App() {
             onStopScan={stopScan}
             onStartRecovery={startRecovery}
             onSelectOutputDir={selectOutputDir}
-            onBackToWelcome={() => setCurrentPage("welcome")}
+            onBackToWelcome={safeBackToWelcome}
             onRequestPreview={requestPreview}
           />
         )}
@@ -1380,8 +1414,13 @@ export default function App() {
             setShowCloseConfirm(false);
             wailsApp?.MinimizeWindow?.();
           }}
-          onExit={() => {
+          onExit={async () => {
             setShowCloseConfirm(false);
+            // v2.8.20: 关闭应用前必须先 stopScan，否则后台 IO 在进程退出前继续占用磁盘
+            // （Windows OS 可能还会清理一段时间）。让 backend Stop 同步等真退出再 Quit。
+            if (scanActive && wailsApp?.StopScan) {
+              try { await wailsApp.StopScan(); } catch { /* no-op */ }
+            }
             wailsApp?.ConfirmExit?.();
           }}
           onCancel={() => setShowCloseConfirm(false)}
@@ -1658,22 +1697,31 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
     return s.includes(filter.toLowerCase().trim());
   };
 
-  const item = (label, handler) => {
+  // v2.8.20 Issue 21: item 加 needsDisk 形参标记"需要先选盘才能用的工具"。
+  // 未选盘时按钮变灰 + 不可点 + tooltip 提示，避免点了报"deviceWebPath 为空"。
+  const item = (label, handler, needsDisk = false) => {
     if (!matches(label)) return null;
+    const disabled = needsDisk && !drivePath;
     return (
       <button
         key={label}
-        onClick={handler}
+        onClick={disabled ? undefined : handler}
+        disabled={disabled}
+        title={disabled ? "请先在主界面选源盘 —— 这个工具需要针对具体磁盘操作" : undefined}
         style={{
           display: "block", width: "100%", textAlign: "left",
           padding: "var(--space-2) var(--space-3)",
           border: "none", background: "transparent",
-          cursor: "pointer", fontSize: "var(--text-sm)", color: "var(--text)",
+          cursor: disabled ? "not-allowed" : "pointer",
+          fontSize: "var(--text-sm)",
+          color: disabled ? "var(--text-muted)" : "var(--text)",
+          opacity: disabled ? 0.55 : 1,
         }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-surface-2)"; }}
+        onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-surface-2)"; }}
         onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
       >
         {label}
+        {disabled && <span style={{ marginLeft: 6, fontSize: 10 }}>（需先选源盘）</span>}
       </button>
     );
   };
@@ -1734,12 +1782,22 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             />
           </div>
           <div style={{ padding: "var(--space-1) 0" }}>
-          {item("🩺 磁盘 SMART 健康", async () => {
+          {item("🩺 磁盘 S.M.A.R.T. 健康", async () => {
             setOpen(false);
+            // v2.8.20 Issue 20: 未选盘时直接告诉用户去选盘（双重保险 —— item disabled 之外再判一次）
+            if (!drivePath) {
+              toast.warning({
+                title: "请先选源盘",
+                description: "S.M.A.R.T. 健康检查需要先在主界面选中一块物理盘 / 逻辑盘；" +
+                  "本工具是针对具体磁盘读 SMART 寄存器的，没盘可查时无意义。",
+                duration: 8000,
+              });
+              return;
+            }
             try {
-              const r = await wailsApp?.QueryDiskHealth?.(drivePath || "");
+              const r = await wailsApp?.QueryDiskHealth?.(drivePath);
               if (!r) {
-                toast.warning("SMART 查询无返回");
+                toast.warning("S.M.A.R.T. 查询无返回");
                 return;
               }
               if (!r.available) {
@@ -1754,7 +1812,8 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                   `不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。\n` +
                   `如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；` +
                   `或用 CrystalDiskInfo / smartctl --scan 等专业工具。`;
-                toast.warning({ title: "SMART 不可用（硬件限制，非软件 bug）", description: desc, duration: 0 });
+                // v2.8.20 Issue 20: toast 加 id 防止重复触发时叠加（之前用户截图见过两条相同 toast）
+                toast.warning({ title: "S.M.A.R.T. 不可用（硬件限制，非软件 bug）", description: desc, duration: 0, dedupeKey: "smart-unavailable" });
                 return;
               }
               // 拼装多行 description：型号 / 通电时长 / 温度 / 坏扇区
@@ -1776,7 +1835,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             } catch (err: any) {
               toast.error("SMART 查询失败：" + (err?.message || err));
             }
-          })}
+          }, true /* needsDisk */)}
           {item("🔒 SED OPAL 锁定状态", async () => {
             setOpen(false);
             if (!drivePath) {
@@ -1810,7 +1869,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             } catch (err: any) {
               toast.error("SED 查询失败：" + (err?.message || err));
             }
-          })}
+          }, true /* needsDisk */)}
           {item("🗂 GPT 备份表恢复", async () => {
             setOpen(false);
             if (!drivePath) {
@@ -1843,7 +1902,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 duration: 0,
               });
             }
-          })}
+          }, true /* needsDisk */)}
           {item("🖼 查找重复图片", async () => {
             // v2.8.17 Issue 7 + 9 + 8: 用 Wails native 目录选择 + 弹出结果展示页
             // （之前 native prompt 标题 "wails.localhost 显示" + 只 toast 提示数量，无结果界面）
@@ -1997,7 +2056,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             () => wailsApp?.ListAPFSSnapshots?.(drivePath || ""),
             (list) => list.length === 0 ? "未发现 APFS snapshot" :
               list.map((c) => `容器 0x${c.containerOffset.toString(16)}: ${c.snapshots.length} 个 snapshot`).join("\n")
-          ))}
+          ), true /* needsDisk */)}
 
           {/* ==================== 移动端 / 备份 / 云端 / NAS（v2.4 解锁）  ==================== */}
 

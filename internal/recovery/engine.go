@@ -1342,12 +1342,19 @@ func (e *Engine) CurrentCarverOffset() int64 {
 	return start + c.BytesScanned()
 }
 
-// Stop 取消正在进行的扫描。
+// Stop 取消正在进行的扫描，并**同步等待**所有 goroutine 真正退出。
 //
-// 两步终止：
-//  1. cancel context — 让所有循环里检查 ctx.Done() 的 goroutine 自然退出
+// v2.8.20 修订（致命级 bug 修复）：
+//   之前 Stop() 只发取消信号就返回，但后台 carver/IO/worker goroutines 可能还在跑
+//   ReadAt 大块（4MB）—— 用户看到的"取消扫描"按钮变了但实际 IO 仍然占满磁盘
+//   （任务管理器显示 100%、2.3 GB/s 持续读）。
+//
+// 现在：
+//  1. cancel context — 通知所有 ctx.Done() 监听者
 //  2. 调 reader.Cancel() — 强制中断卡在内核 ReadAt syscall 上的 goroutine
-//     （ctx.Cancel 无法穿透 syscall；不调 Cancel 则大块读会让 Stop 看似无反应）
+//  3. **轮询 e.scanning 等待真退出**（最多 10 秒；超时记日志返回）
+//
+// 调用方可以确信 Stop() 返回后无 IO 在进行。
 func (e *Engine) Stop() {
 	e.mu.RLock()
 	cancel := e.scanCancel
@@ -1361,6 +1368,19 @@ func (e *Engine) Stop() {
 	if c, ok := reader.(disk.Canceller); ok {
 		_ = c.Cancel()
 	}
+
+	// v2.8.20: 同步等待 scanning goroutine 真退出。
+	// scanning 在 ScanWithReaderOptions 的 defer 里清零；只有 carver/validator 等所有
+	// 子 goroutine 都退出后才会到那个 defer。
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !e.IsScanning() {
+			logger.Info("Stop: 扫描已真正退出")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	logger.Warn("Stop: 等 10 秒 scan 仍未退出（可能 IO syscall 卡死），强制返回")
 }
 
 // StopRecovery 取消正在进行的恢复操作
