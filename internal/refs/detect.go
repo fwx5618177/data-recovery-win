@@ -15,9 +15,11 @@
 package refs
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"data-recovery/internal/disk"
 )
@@ -112,8 +114,29 @@ func NewScanner(reader disk.DiskReader) *Scanner {
 	return &Scanner{reader: reader}
 }
 
-// FindVolumes 全盘步进搜索 ReFS 签名
-func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
+// FindOptions 控制 ReFS 卷扫描行为。
+//
+// v2.8.26 引入 —— 之前 FindVolumes 永远做全盘 4MB 步进扫描，没 ctx 没开关。
+// 这是用户报"取消扫描后磁盘 IO 不停"的真正根因：每次在 welcome 页选盘，
+// app.ScanEncryptedVolumes 都会调本 scanner，对 2TB SSD 跑 ~11 分钟全盘 read。
+// 与 apfs / hfsplus / btrfs 等同套 FindOptions 的 fast/brute-force 选项对齐。
+type FindOptions struct {
+	// BruteForce=false 时只检测 offset 0（ReFS 卷必然位于分区起点 / 整盘起点）。
+	// 默认 false —— 用户选盘的"加密卷预警"诊断只需要 fast path。
+	BruteForce bool
+	// OnProgress brute-force 模式下每 500ms 上报一次进度。
+	OnProgress func(curr, total int64)
+}
+
+// FindVolumes 定位 ReFS 卷。
+//
+// 策略（v2.8.26 修订）：
+//   1. offset 0 检测（fast path）
+//   2. 1MB 步进全盘扫 OEM ID + FS signature —— **仅 opts.BruteForce=true 启用**
+//
+// 之前没 opt-in 默认做全盘扫，2TB SSD 跑 ~11 分钟。诊断路径（ScanEncryptedVolumes）
+// 现在走 BruteForce=false，秒级返回。
+func (s *Scanner) FindVolumes(ctx context.Context, opts FindOptions) ([]*VolumeHeader, error) {
 	size, err := s.reader.Size()
 	if err != nil {
 		return nil, err
@@ -122,6 +145,11 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 	if v, _ := Detect(s.reader, 0); v != nil {
 		out = append(out, v)
 	}
+
+	if !opts.BruteForce {
+		return out, nil
+	}
+
 	const (
 		blockSize int64 = 4 * 1024 * 1024
 		step      int64 = 1024 * 1024
@@ -131,7 +159,15 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 	for _, v := range out {
 		seen[v.Offset] = true
 	}
+
+	const progressEmitInterval = 500 * time.Millisecond
+	lastEmit := time.Now()
+
 	for blockOff := int64(0); blockOff < size; blockOff += blockSize {
+		// v2.8.26: ctx 检查，让 brute-force 扫描可被 Stop 取消
+		if ctx != nil && ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		read := blockSize
 		if blockOff+read > size {
 			read = size - blockOff
@@ -156,6 +192,14 @@ func (s *Scanner) FindVolumes() ([]*VolumeHeader, error) {
 				seen[abs] = true
 			}
 		}
+
+		if opts.OnProgress != nil && time.Since(lastEmit) >= progressEmitInterval {
+			opts.OnProgress(blockOff+read, size)
+			lastEmit = time.Now()
+		}
+	}
+	if opts.OnProgress != nil {
+		opts.OnProgress(size, size)
 	}
 	return out, nil
 }

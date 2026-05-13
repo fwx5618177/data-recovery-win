@@ -4,6 +4,146 @@
 
 ---
 
+## v2.8.26 (2026-05-13)
+
+**真正的本质 bug — 用户报的"取消后 IO 不停"根本不是扫描没停**
+
+v2.8.20~v2.8.25 我一直在 `Engine.Stop` 周边修，全部修错位置。用户报的现象
+（welcome 页 + DataRecovery-v2.8.25 + 3 GB/s 持续读 PhysicalDrive0）这次终于
+让我看清了**关键线索**：UI 在 welcome 页，但 IO 不停。Scan 必然已经结束了
+（前端能渲染 welcome 说明 await StopScan 已经返回过）—— 高速 IO 来自**另一条
+路径**：用户在 welcome 页点选磁盘时触发的"加密卷诊断"。
+
+### 真正的本质 bug
+
+`refs.FindVolumes()` 是整套加密卷诊断中**唯一没接受 `FindOptions`** 的扫描器：
+
+```go
+// apfs, hfsplus, btrfs - 都有：
+func (s *Scanner) FindXxx(ctx, opts FindOptions) {
+    ...
+    if !opts.BruteForce { return out, nil }   // ← fast path
+    // 全盘扫
+}
+
+// refs - 之前没有：
+func (s *Scanner) FindVolumes() {
+    // 直接全盘 4MB 步进扫，没 ctx 没 opts
+}
+```
+
+被 `app.ScanEncryptedVolumes` 调用：
+
+```go
+if vols, err := refs.NewScanner(reader).FindVolumes(); err == nil { ... }
+```
+
+每次用户在 welcome 页选一块盘 → `loadEncryptedVolumesForDrive` 触发 →
+`wailsApp.ScanEncryptedVolumes(drivePath)` → ReFS scanner 对 2TB SSD 做
+**11 分钟全盘 read storm**（2TB ÷ 3 GB/s ≈ 660s）。
+
+用户的视角：
+1. 启动扫描 → 跑了一会儿
+2. 点取消扫描 → ✅ 扫描真的停了（v2.8.25 已确认）
+3. 点换一块盘 → 回到 welcome
+4. 点选磁盘 0 → 后端开始 ReFS 全盘扫
+5. 磁盘 IO 又涨到 3 GB/s ← 用户以为是"取消的扫描又起来了"
+6. 关掉程序才停（因为 ReFS 全盘扫到自然结束才会停）
+
+**这就是为什么从 v2.8.20 起每次"修好"用户都说没修好** —— 因为根本不在 scan engine 里。
+
+### 修复
+
+`internal/refs/detect.go`：
+
+```go
+type FindOptions struct {
+    BruteForce bool   // 默认 false，只查 offset 0
+    OnProgress func(curr, total int64)
+}
+
+func (s *Scanner) FindVolumes(ctx context.Context, opts FindOptions) ([]*VolumeHeader, error) {
+    // 1. offset 0 fast path（ReFS 卷本来就在分区起点）
+    if v, _ := Detect(s.reader, 0); v != nil { out = append(out, v) }
+
+    if !opts.BruteForce { return out, nil }    // ← 默认到这里就 return
+
+    // 2. brute-force 全盘扫（仅取证模式启用）
+    for blockOff := 0; blockOff < size; blockOff += blockSize {
+        if ctx != nil && ctx.Err() != nil { return out, ctx.Err() }   // ← 加 ctx 检查
+        ...
+    }
+}
+```
+
+`app.go ScanEncryptedVolumes` 改用 fast path：
+
+```go
+// 之前：
+refs.NewScanner(reader).FindVolumes()
+// 现在：
+refs.NewScanner(reader).FindVolumes(a.ctx, refs.FindOptions{})
+```
+
+整套 `ScanEncryptedVolumes` 现在 ≤ 几次 ReadAt，秒级返回，不会让 ReFS 把
+盘 IO 打满。
+
+### 关键回归测试
+
+```go
+// TestFindVolumes_DefaultIsFastPath - 锁死"默认不能全盘扫"
+func TestFindVolumes_DefaultIsFastPath(t *testing.T) {
+    cr := &countingReader{inner: testutil.NewMemReader(disk)}
+    _, _ = NewScanner(cr).FindVolumes(context.Background(), FindOptions{})
+    if cr.reads.Load() > 2 {
+        t.Errorf("默认触发了 %d 次 ReadAt（期望 ≤2）—— 全盘扫描回归了", cr.reads.Load())
+    }
+}
+
+// TestFindVolumes_BruteForceRespectsCtx - 锁死 brute-force 必须可被取消
+func TestFindVolumes_BruteForceRespectsCtx(t *testing.T) {
+    ctx, cancel := context.WithCancel(context.Background())
+    cancel()  // 立刻 cancel
+    _, err := NewScanner(cr).FindVolumes(ctx, FindOptions{BruteForce: true})
+    if err != context.Canceled { ... }
+    if cr.reads.Load() > 2 { ... }
+}
+```
+
+这两个测试如果在 v2.8.25 代码上跑：
+- `TestFindVolumes_DefaultIsFastPath` **会爆**（默认就跑全盘）
+- `TestFindVolumes_BruteForceRespectsCtx` **甚至编译不过**（FindVolumes 没 ctx 参数）
+
+也就是说，这次 bug 不是 lurking corner case —— 是直接缺失功能，但因为它在 ReFS 探测
+路径（不是主扫描路径）所以一直没被注意到。
+
+### 为什么 v2.8.20~v2.8.25 都没修对
+
+每次用户提供截图都显示 IO 不停。我每次都假设"那是 scan goroutine 没退"。但
+关键信息每次都在截图里：**UI 是不是在 welcome 页？** 如果在 welcome 页，
+scan 必然停了（前端只在 await StopScan 后才会切到 welcome）。这次截图里
+welcome 页是最显眼的，我才终于看进去。
+
+教训：**用户给的诊断信息要逐项 verify**，不能因为"上次也是这样"就跳过。
+
+### Files Changed
+
+- `internal/refs/detect.go` — `FindVolumes` 加 `(ctx, FindOptions)` 参数；默认 fast path
+- `internal/refs/detect_test.go` — 老 test 适配新签名；新增 2 个回归测试
+- `app.go` — `ScanEncryptedVolumes` 用 `FindOptions{}` fast path 调 ReFS
+
+### 测试
+
+```
+go test -race ./internal/refs/...                            ✅ 3/3
+TestFindVolumes_DefaultIsFastPath                            ✅
+TestFindVolumes_BruteForceRespectsCtx                        ✅
+go test -race -count=1 ./...                                 ✅ 全绿
+GOOS=windows go build ./...                                  ✅
+```
+
+---
+
 ## v2.8.25 (2026-05-12)
 
 **致命级 IO 泄漏 v5 — 启动期 race 把 Stop 撒谎 bug 拉了回来**

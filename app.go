@@ -1028,8 +1028,11 @@ func (a *App) ScanEncryptedVolumes(drivePath string) ([]EncryptedVolumeInfo, err
 			})
 		}
 	}
-	// 2b. ReFS 卷（Server / Win11 Pro for Workstations）
-	if vols, err := refs.NewScanner(reader).FindVolumes(); err == nil {
+	// 2b. ReFS 卷（Server / Win11 Pro for Workstations）—— 诊断 fast path
+	// v2.8.26: 用 BruteForce=false 走 offset 0 fast path。之前 ReFS 是全套 scanner 里
+	// 唯一不接受 FindOptions 的，永远做全盘 4MB 步进扫描；2TB SSD 上跑 ~11 分钟，
+	// 用户在 welcome 页每选一次盘都会触发，看到的就是"取消扫描后 IO 不停"。
+	if vols, err := refs.NewScanner(reader).FindVolumes(a.ctx, refs.FindOptions{}); err == nil {
 		for _, v := range vols {
 			out = append(out, EncryptedVolumeInfo{
 				DrivePath: drivePath,
