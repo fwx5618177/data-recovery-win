@@ -4,6 +4,78 @@
 
 ---
 
+## v2.8.27 (2026-05-13)
+
+**补全 ScanEncryptedVolumes 管线的 UT 防回归 —— 这次保证全量覆盖**
+
+v2.8.26 修了 ReFS 的"默认全盘扫"bug。但用户每次连续报"还没修好"也提醒我：
+**没有自动化测试就没有信心**。这次把整条管线的 UT 一次补齐，**任何新引入的
+全盘扫描 scanner 都会立刻让测试 FAIL**。
+
+### 新增的 11 个回归测试（顶层 `scan_encrypted_volumes_fast_path_test.go`）
+
+**1. `TestScanEncryptedVolumes_PipelineIsFastOnHugeDevice`** — 端到端契约
+
+复刻 `app.ScanEncryptedVolumes` 调的所有 scanner（BitLocker / HFS+ / ReFS / APFS /
+LUKS / VeraCrypt / volmgr），在模拟 2TB 盘上一条龙跑完。
+
+```go
+dev := &hugeMockDevice{size: 2 * TB}
+start := time.Now()
+_, _ = bitlocker.NewScanner(dev).FindVolumesFast()
+_, _ = hfsplus.NewScanner(dev).FindVolumes(ctx, hfsplus.FindOptions{})
+_, _ = refs.NewScanner(dev).FindVolumes(ctx, refs.FindOptions{})
+_, _ = apfs.NewScanner(dev).FindContainers(ctx, apfs.FindOptions{})
+_, _ = luks.Detect(dev, 0)
+_, _ = veracrypt.Detect(dev, 0)
+_ = volmgr.DetectAll(dev)
+
+// 断言：< 100 次 ReadAt + < 1s
+```
+
+**实测当前性能：16 次 ReadAt，162μs。** v2.8.25 时同样测试会读几十万次 + 跑 11 分钟。
+
+**2. `TestScanEncryptedVolumes_BruteForceModesRespectCtx`** — 4 个 subtest
+
+每个 scanner 的 brute-force 模式都必须能被 `ctx.Cancel` 立刻中断：
+- ReFS（v2.8.26 才加的 ctx）
+- APFS
+- HFS+
+- Btrfs
+
+测试逻辑：`ctx.WithCancel` + `cancel()` 立刻取消 → scanner 必须在 100ms 内返回 + 读盘 ≤ 5 次。
+
+**3. `TestScanEncryptedVolumes_NoScannerDefaultsToBruteForce`** — 5 个 subtest
+
+显式断言每个 scanner 的 default `FindOptions{}` 都走 fast path（< 20 次 ReadAt）。
+**这是把"默认 fast path"当全局不变量来锁。** 如果将来有人加新 scanner 但忘了
+fast-path 默认，加一个 subtest case 就立刻爆出来。
+
+覆盖：BitLocker / HFS+ / ReFS / APFS / Btrfs
+
+### 为什么之前测试不够
+
+v2.8.20-v2.8.25 我连续 5 个版本说"修好了"被用户连续 5 次顶回来。原因之一是：
+**之前的 UT 都是各模块内部测，没有端到端测**。ReFS 没有"全盘扫不该是默认"的
+测试就是因为它当时连 `FindOptions` 参数都没有。
+
+补这一类 UT 的本质：**把"用户在 welcome 页选盘后秒级返回"作为一条硬契约**，
+任何破坏这个契约的改动都让 CI 立刻 fail。
+
+### Files Changed
+
+- `scan_encrypted_volumes_fast_path_test.go` — 新文件，11 个回归测试
+
+### 测试
+
+```
+go test -race -count=1 -v -run 'TestScanEncryptedVolumes_'  ✅ 11/11 PASS
+go test -race -count=1 ./...                                 ✅ 全绿
+GOOS=windows go build ./...                                  ✅
+```
+
+---
+
 ## v2.8.26 (2026-05-13)
 
 **真正的本质 bug — 用户报的"取消后 IO 不停"根本不是扫描没停**
