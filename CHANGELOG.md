@@ -4,6 +4,100 @@
 
 ---
 
+## v2.8.31 (2026-05-15)
+
+**用户报新 3 条全修 + UT 锁死**
+
+### Issue 22 ✅ 多盘并行扫描停止后 IO 不停
+
+**本质问题**：`internal/parallel/multidisk.go:81-86` 的 ctx 取消监听放在
+`engine.Scan(...)` 返回**之后**：
+
+```go
+// v2.8.30 之前的代码
+res, err := engine.Scan(job.DrivePath, job.Mode, scb)
+results[i] = JobResult{...}
+// ↓ scan 已经完了才看 ctx
+select {
+case <-ctx.Done():
+    engine.Stop()
+default:
+}
+```
+
+`engine.Scan` 是同步阻塞调用，对真盘几分钟到几小时。等到这段 select 跑到时
+扫描早就结束，stop 完全没用。前端 cancel 信号传到了 ctx，但被这段死代码吞了。
+
+**修复**：把 watcher 改成**并发** goroutine，scan 跑的同时盯 ctx：
+
+```go
+watcherDone := make(chan struct{})
+go func() {
+    select {
+    case <-ctx.Done():
+        engine.Stop()  // 真盘上 reader 关 handle，毫秒级退
+    case <-watcherDone:
+    }
+}()
+res, err := engine.Scan(...)
+close(watcherDone) // 通知 watcher 退出
+```
+
+回归测试 `TestScanMultiple_CtxCancelDuringScan` 锁死："cancel 后 2 秒内
+ScanMultiple 必须返回"。实测 53ms 退出。
+
+### Issue 23 ✅ 整盘镜像 dump 工具加 `needsDisk` 预拦截
+
+之前用户点了"💾 整盘镜像 dump (.img)"工具才发现"未选源盘"。其它工具
+（SMART / SED / GPT）一直有 `needsDisk` gate —— 菜单按钮变灰 + tooltip
+"请先在主界面选源盘" + 文案加"（需先选源盘）"后缀。Dump 工具一直漏掉。
+
+**修复**：`item("💾 整盘镜像 dump (.img)", ..., true /* needsDisk */)`，
+跟 SMART / SED / GPT 统一行为。
+
+### Issue 0 ✅ 计划定时备份 — 隐藏黑窗口 + 强反馈
+
+用户原话："打开之后运行了一个类似 cmd 脚本的东西，最好在运行结束之后有个提示
+任务添加完成"。
+
+**本质问题 1**：`powershell.exe -Command "..."` 在 Windows 上默认弹出可见
+控制台窗口（哪怕一闪而过）。
+
+**修复**：新增 `internal/backup/hide_window_windows.go` —— `SysProcAttr.HideWindow=true`
++ `CreationFlags |= CREATE_NO_WINDOW`，让 PowerShell 子进程完全静默。非 Windows
+no-op。
+
+**本质问题 2**：成功 toast 只是简单一行"已安装：每天 02:00 自动备份 ..."，
+用户不确定是否真装上。
+
+**修复**：
+- 多行 success message：任务名 / 触发时间 / 源 / 目标 / 验证方法
+- `ToolDialog.handleSubmit` 检测长 message 自动延长 toast 显示到 20s（短 message 保持 8s）
+- ToolDialog description 写清楚"装在哪 / 怎么卸载"
+
+### Files Changed
+
+- `internal/parallel/multidisk.go` — watcher 改并发 goroutine
+- `internal/parallel/multidisk_cancel_test.go` — 新增（2 个回归测试）
+- `internal/backup/hide_window_windows.go` — 新增（CREATE_NO_WINDOW + HideWindow）
+- `internal/backup/hide_window_other.go` — 新增（non-Windows no-op）
+- `internal/backup/monitor.go` — Install / Uninstall 调 `hideWindow(cmd)`
+- `frontend/src/App.tsx` — 整盘镜像 dump 加 `needsDisk=true`；计划备份 ToolDialog
+  description / fields hint / success message 大幅强化
+- `frontend/src/components/ToolDialog.tsx` — 长 message 自动延长 toast 时长
+
+### 测试
+
+```
+go test -race -count=1 ./...                          ✅ 全绿（含 internal/parallel 新包）
+TestScanMultiple_CtxCancelDuringScan                  ✅ 53ms 退出（之前会卡住）
+TestScanMultiple_NaturalCompletionStillCleansUpWatcher ✅
+GOOS=windows go build ./...                           ✅
+pnpm run build                                         ✅
+```
+
+---
+
 ## v2.8.30 (2026-05-15)
 
 **继续打磨 — 把 v2.8.28/29 漏掉的本质 bug 补到位**

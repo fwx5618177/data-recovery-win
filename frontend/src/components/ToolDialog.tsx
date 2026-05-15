@@ -117,7 +117,14 @@ export function ToolDialog({
     try {
       const result = await onSubmit(values);
       const message = typeof result === "string" && result ? result : `${successPrefix} 操作完成`;
-      toast.success({ title: title, description: message, duration: 8000 });
+      // v2.8.31: 成功 toast 时长与内容长度成正比，让多行结果（如计划任务安装详情）
+      // 给用户充分阅读时间。短结果保持 8s，长结果（>120 字符）给 20s。
+      const isLong = message.length > 120 || (message.match(/\n/g) || []).length >= 3;
+      toast.success({
+        title: title,
+        description: message,
+        duration: isLong ? 20000 : 8000,
+      });
       onClose();
     } catch (err: any) {
       const msg = err?.message || String(err);

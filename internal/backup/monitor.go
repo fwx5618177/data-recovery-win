@@ -95,6 +95,10 @@ func (s Schedule) Install() error {
 	default:
 		return fmt.Errorf("不支持的 OS: %s", runtime.GOOS)
 	}
+	// v2.8.31: Windows 下隐藏弹出的 PowerShell 黑窗口 —— 之前用户报"打开之后运行了一个
+	// 类似 cmd 脚本的东西"。SysProcAttr.HideWindow + CREATE_NO_WINDOW 让进程完全静默，
+	// 成功 / 失败靠上层 toast 反馈。
+	hideWindow(cmd)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -107,11 +111,15 @@ func (s Schedule) Install() error {
 func (s Schedule) Uninstall() error {
 	switch runtime.GOOS {
 	case "linux", "darwin":
-		return exec.Command("sh", "-c", `crontab -l 2>/dev/null | grep -v 'DataRecoveryBackup' | crontab -`).Run()
+		c := exec.Command("sh", "-c", `crontab -l 2>/dev/null | grep -v 'DataRecoveryBackup' | crontab -`)
+		return c.Run()
 	case "windows":
 		// v2.8.29: 改 PowerShell 卸载，跟 Install 路径一致
+		// v2.8.31: 加 hideWindow 隐藏黑窗口
 		script := `Unregister-ScheduledTask -TaskName 'DataRecoveryBackup' -Confirm:$false -ErrorAction SilentlyContinue`
-		return exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script).Run()
+		c := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+		hideWindow(c)
+		return c.Run()
 	}
 	return fmt.Errorf("unsupported OS")
 }

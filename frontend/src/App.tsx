@@ -1990,30 +1990,40 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             onOpenMobileModal?.("ocr-search");
           })}
           {item("📅 计划定时备份", () => {
-            // v2.8.18 Issue 1: 替代原始 prompt 弹窗，用统一 ToolDialog
+            // v2.8.31 Issue 0: 强化用户能看到的信息（说明做什么 / 装在哪 / 怎么卸载）
+            // + Windows 隐藏 PowerShell 黑窗口（已在 internal/backup hideWindow 里做）
+            // + 成功多行 toast 让用户看到任务名/时间/路径/验证方法
             setOpen(false);
             onToolDialog?.({
               title: "📅 计划定时备份",
               description:
-                "在系统计划任务里安装一个 cron / Task Scheduler 任务，每天定时把源目录复制到目标目录。\n\n" +
+                "在系统计划任务里装一个 daily 任务：每天指定时间用 robocopy（Windows）或 rsync（macOS/Linux）\n" +
+                "把源目录镜像复制到目标目录。\n\n" +
                 "用途：让恢复出来的数据自动备份到另一块盘，防止单盘故障再次丢数据。\n" +
-                "前提：目标盘必须和源盘是不同物理设备（避免源盘故障同时丢备份）。",
+                "前提：目标盘必须和源盘是**不同物理设备**（避免源盘故障同时丢备份）。\n\n" +
+                "实现：\n" +
+                "  · Windows: PowerShell Register-ScheduledTask，任务名 DataRecoveryBackup（v2.8.31 起隐藏黑窗口）\n" +
+                "  · macOS / Linux: crontab 加一行 rsync 任务\n\n" +
+                "卸载：Windows 开「任务计划程序」找 DataRecoveryBackup 右键删；或命令行\n" +
+                "  schtasks /Delete /TN DataRecoveryBackup /F；Linux/macOS: crontab -e 删对应行。",
               fields: [
                 {
                   key: "src",
-                  label: "源目录",
+                  label: "源目录（要备份的）",
                   type: "directory",
                   pickerTitle: "选择要备份的源目录",
                   defaultValue: outputDir || "",
-                  hint: "通常是恢复输出目录或工作文件夹",
+                  placeholder: "例：C:\\Users\\xxx\\Documents 或 D:\\recovered",
+                  hint: "通常是恢复输出目录或工作文件夹。Windows 路径含中文也支持。",
                   required: true,
                 },
                 {
                   key: "dst",
-                  label: "目标目录（另一块盘）",
+                  label: "目标目录（另一块盘上的位置）",
                   type: "directory",
                   pickerTitle: "选择备份目标目录",
-                  hint: "必须在不同物理盘上 —— 否则源盘坏的时候备份也一起丢",
+                  placeholder: "例：E:\\backup\\daily",
+                  hint: "⚠ 必须在不同物理盘上 —— 否则源盘坏的时候备份也一起丢",
                   required: true,
                 },
                 {
@@ -2022,7 +2032,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                   type: "number",
                   defaultValue: "2",
                   placeholder: "2",
-                  hint: "默认凌晨 2 点（系统空闲时备份不影响白天使用）",
+                  hint: "默认凌晨 2 点（系统空闲时备份，不影响白天使用）",
                   required: true,
                 },
               ],
@@ -2032,7 +2042,15 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 const hour = parseInt(vals.hour, 10);
                 if (isNaN(hour) || hour < 0 || hour > 23) throw new Error("小时必须是 0-23 之间的整数");
                 await wailsApp?.ScheduleBackup?.(vals.src, vals.dst, hour);
-                return `已安装：每天 ${String(hour).padStart(2, "0")}:00 自动备份 ${vals.src} → ${vals.dst}`;
+                // v2.8.31: 多行 success message 给用户充分确认信息
+                return `任务已装好 ✅\n\n` +
+                  `任务名：DataRecoveryBackup\n` +
+                  `触发时间：每天 ${String(hour).padStart(2, "0")}:00\n` +
+                  `源：${vals.src}\n` +
+                  `→ 目标：${vals.dst}\n\n` +
+                  `验证：\n` +
+                  `  · Windows: 开「任务计划程序」找 DataRecoveryBackup\n` +
+                  `  · macOS / Linux: crontab -l 看到任务行即装好`;
               },
             });
           })}
@@ -2398,10 +2416,13 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             }
           ))}
 
+          {/* v2.8.31 Issue 23: 加 needsDisk gate —— 跟 SMART/SED/GPT 等"必须先选源盘"的工具
+              统一行为：菜单上文案带「（需先选源盘）」+ 按钮变灰 + tooltip 提示。
+              之前点开 modal 才提示"未选源盘"，体验割裂。 */}
           {item("💾 整盘镜像 dump (.img)", () => {
             setOpen(false);
             onOpenMobileModal?.("disk-dump");
-          })}
+          }, true /* needsDisk */)}
 
           <div style={{ boxShadow: "inset 0 1px 0 0 var(--border)", margin: "6px 0" }} />
           {item("📦 关于本工具", () => {

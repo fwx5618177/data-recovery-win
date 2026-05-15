@@ -71,17 +71,25 @@ func ScanMultiple(ctx context.Context, jobs []DiskJob, maxParallel int, cb ScanC
 					}
 				},
 			}
+
+			// v2.8.31: ctx 监听必须**并发**跑 —— 之前的代码把 `<-ctx.Done() { engine.Stop() }`
+			// 放在 `engine.Scan` 返回之后，那时候扫描早就结束了，stop 完全没用。用户报
+			// "多盘并行扫描时停止扫描依然存在 IO 占用必须退出" 的真正原因。
+			// 现在开 watcher 在 Scan 跑的同时盯 ctx，触发就调 engine.Stop()。
+			watcherDone := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					engine.Stop()
+				case <-watcherDone:
+				}
+			}()
+
 			res, err := engine.Scan(job.DrivePath, job.Mode, scb)
+			close(watcherDone) // 通知 watcher 退出（如果是自然完成而非被 cancel）
 			results[i] = JobResult{DrivePath: job.DrivePath, Result: res, Err: err}
 			if cb.OnDiskDone != nil {
 				cb.OnDiskDone(results[i])
-			}
-
-			// ctx 取消时 engine.Stop 让本 goroutine 早退
-			select {
-			case <-ctx.Done():
-				engine.Stop()
-			default:
 			}
 		}()
 	}
