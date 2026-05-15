@@ -25,6 +25,65 @@ func TestBuildTimeline_SortedByTime(t *testing.T) {
 	}
 }
 
+// TestBuildTimeline_CarverFilesWithoutTimestamps 回归 v2.8.32 修复的 issue 10：
+//
+// 用户报"导出时间线文件是空的"。根因：BuildTimeline 之前严格要求 mtime/ctime
+// 非空，深度扫描的 carver 文件没 FS 时间戳 → 0 events → 0 字节文件。
+//
+// v2.8.32: carver 文件兜底写一条 "found" 事件，至少让用户看见有恢复结果。
+// 这个测试模拟"只有 carver 文件"的输入（mtime/ctime 全 nil），断言：
+//   1. events 数 == 文件数（不是 0）
+//   2. 所有 event 的 Action == "found"
+//   3. 用 WriteTimelineMACTime 写出来不是空文件
+func TestBuildTimeline_CarverFilesWithoutTimestamps(t *testing.T) {
+	files := []*types.RecoveredFile{
+		{FileName: "carve_0x12345.jpg", Source: "carver", Size: 1024 * 1024},
+		{FileName: "carve_0x67890.pdf", Source: "carver", Size: 512 * 1024},
+		{FileName: "carve_0xABCDE.png", Source: "carver", Size: 256 * 1024},
+	}
+	events := BuildTimeline(files)
+	if len(events) != 3 {
+		t.Fatalf("应生成 3 条 found 事件（不能丢失任何 carver 文件），实际 %d 条", len(events))
+	}
+	for i, e := range events {
+		if e.Action != "found" {
+			t.Errorf("event[%d].Action=%q，期望 \"found\"", i, e.Action)
+		}
+		if e.Time.IsZero() {
+			t.Errorf("event[%d].Time 不应为零", i)
+		}
+	}
+
+	// 写到 mactime body 文件检查不是空的
+	var buf bytes.Buffer
+	if err := WriteTimelineMACTime(&buf, events); err != nil {
+		t.Fatalf("WriteTimelineMACTime: %v", err)
+	}
+	out := buf.String()
+	if len(out) == 0 {
+		t.Fatal("mactime 输出是空字符串 —— v2.8.32 修复前的 bug 复发！")
+	}
+	if !strings.Contains(out, "carve_0x12345.jpg") {
+		t.Errorf("mactime 输出应含文件名，实际：%s", out)
+	}
+}
+
+// TestBuildTimeline_MixedFSAndCarver 验证混合场景（部分文件有时间戳、部分没）
+// 都不丢失，且每个文件都产生至少一条事件。
+func TestBuildTimeline_MixedFSAndCarver(t *testing.T) {
+	tm := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	files := []*types.RecoveredFile{
+		// NTFS 文件，有 mtime + ctime → 2 个事件
+		{FileName: "doc.docx", Source: "ntfs", ModifiedTime: &tm, CreatedTime: &tm},
+		// carver 文件，没时间戳 → 1 个 found 事件
+		{FileName: "carved.jpg", Source: "carver"},
+	}
+	events := BuildTimeline(files)
+	if len(events) != 3 {
+		t.Errorf("ntfs 文件 2 事件 + carver 文件 1 found = 3，实际 %d", len(events))
+	}
+}
+
 func TestWriteTimelineMACTime(t *testing.T) {
 	tm := time.Date(2024, 1, 15, 14, 30, 0, 0, time.UTC)
 	events := []TimelineEvent{

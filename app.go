@@ -2251,24 +2251,40 @@ func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, 
 	return out, nil
 }
 
-// ExportTimeline 时间线 mactime/JSON 输出
+// ExportTimeline 时间线 mactime/JSON 输出。
+//
+// 优先用 scanFiles（扫描发现的全部候选，含 NTFS/APFS 等带时间戳的）；没有时
+// fallback 到 recovery records（仅含恢复记录元数据）。
+//
+// v2.8.32: 之前 scanFiles 是 carver-only 时 mtime/ctime 全 nil → BuildTimeline
+// 返空切片 → 写 0 字节文件。现在 BuildTimeline 给无时间戳的文件兜底写 "found"
+// 事件；同时这里加防御：如果走到最后 events 仍是空，明确报错告诉用户原因。
 func (a *App) ExportTimeline(outputDir, format string) (string, error) {
-	files := a.engine.GetLastRecoveryResult()
-	if len(files) == 0 {
-		return "", fmt.Errorf("尚无可导出的恢复记录")
-	}
 	scanFiles := a.scanFiles
+	recoveryFiles := a.engine.GetLastRecoveryResult()
+	if len(scanFiles) == 0 && len(recoveryFiles) == 0 {
+		return "", fmt.Errorf("没有可导出的内容 —— 先做一次扫描或恢复再导时间线")
+	}
+
+	var events []forensics.TimelineEvent
 	if len(scanFiles) > 0 {
-		// 用扫描到的文件（更完整），否则退化到最近恢复记录
-		events := forensics.BuildTimeline(scanFiles)
-		return writeTimelineFile(outputDir, format, events)
+		// 用扫描到的文件（更完整 + 含 NTFS/APFS 时间戳）
+		events = forensics.BuildTimeline(scanFiles)
+	} else {
+		// 从 recovery records 构造最简 event list
+		rfs := make([]*types.RecoveredFile, 0, len(recoveryFiles))
+		for _, r := range recoveryFiles {
+			rfs = append(rfs, &types.RecoveredFile{FileName: r.FileName, Size: r.Size})
+		}
+		events = forensics.BuildTimeline(rfs)
 	}
-	// 从 recovery records 构造最简 event list
-	var rfs []*types.RecoveredFile
-	for _, r := range files {
-		rfs = append(rfs, &types.RecoveredFile{FileName: r.FileName, Size: r.Size})
+
+	if len(events) == 0 {
+		// 理论上 v2.8.32 的 BuildTimeline 兜底 "found" 事件后这条不会触发；
+		// 留着是防御性 —— 万一未来 BuildTimeline 又改回严格模式，用户能看到明确报错。
+		return "", fmt.Errorf("无可导出的时间事件（这是已知问题：纯 carver 雕刻文件没有 FS 时间戳；只有 NTFS/APFS/exFAT 等 FS 扫描结果才有 mtime/ctime）")
 	}
-	events := forensics.BuildTimeline(rfs)
+
 	return writeTimelineFile(outputDir, format, events)
 }
 

@@ -4,6 +4,86 @@
 
 ---
 
+## v2.8.32 (2026-05-15)
+
+**Issue 0 + Issue 10 真根因修复 — 之前都是表面补**
+
+### Issue 10 ✅ 时间线导出 0 字节文件（真 bug）
+
+之前的 v2.8.29 只加了 ToolDialog 描述说"时间线是什么"——但**没动**底层的 0 字节 bug。
+用户实测仍能导出空文件。
+
+**本质问题**：`forensics.BuildTimeline` 严格要求每个文件有 `ModifiedTime` 或
+`CreatedTime` 之一非空 —— 否则整个文件被跳过。深度扫描的 carver 文件**没**
+FS 时间戳（雕刻只看签名不读 FS 元数据），整个事件列表 0 条 → mactime body 0 字节。
+
+**修复**：carver / 无时间戳的文件兜底写一条 `"found"` 事件（time=scanTime），
+mactime body 里用 `X..X` 标志位标记。**至少让用户看见有恢复结果**而不是空文件。
+
+App.ExportTimeline 也加防御：如果走完路径仍 0 事件，明确报错告诉用户为什么。
+
+回归测试 `TestBuildTimeline_CarverFilesWithoutTimestamps`：模拟 3 个 carver 文件
+（mtime/ctime 全 nil），断言：① events 数 = 3 ② 所有 Action = "found" ③ mactime
+输出**非空**且含文件名。`TestBuildTimeline_MixedFSAndCarver` 验证混合场景。
+
+### Issue 0 ✅ ToolDialog 加倒计时确认覆盖层（用户原话）
+
+用户原话："运行结束之后有个提示『任务添加完成3秒后自动关闭』"。
+v2.8.31 只做了"长 message → 长 toast"，**没**实现用户明确要求的"3 秒倒计时关闭"。
+
+**v2.8.32 补完**：ToolDialog 的 `handleSubmit` 在长 message（>=80 字符 / 多行）
+情况下不立刻关闭弹窗，而是切到一个新的"已完成 + N 秒后自动关闭"覆盖层：
+
+```jsx
+{successInfo !== null ? (
+  <div style={{...success-green-box}}>
+    <div>✅ 完成 — {countdown} 秒后自动关闭</div>
+    <div>{successInfo}</div>
+    <button onClick={onClose}>立刻关闭</button>
+  </div>
+) : (
+  /* 正常表单 */
+)}
+
+useEffect(() => {
+  if (successInfo === null) return;
+  if (countdown <= 0) { onClose(); return; }
+  setTimeout(() => setCountdown(c => c - 1), 1000);
+}, [successInfo, countdown]);
+```
+
+行为：
+1. 点提交 → onSubmit 跑 → 成功
+2. 表单切换成绿色"已完成"卡片（含完整 message 详情）
+3. 顶部显示 "✅ 完成 — 3 秒后自动关闭"
+4. 倒计时归 0 自动 `onClose()`
+5. 用户也能点"立刻关闭"提前关
+6. toast 也同时弹（双保险）
+
+对短 message（< 80 字符 + 单行），保持旧行为：直接 toast + 关闭，不打扰用户。
+
+### Files Changed
+
+- `internal/forensics/timeline.go` — `BuildTimeline` 给无时间戳文件兜底写 "found"
+  事件；`WriteTimelineMACTime` 加 found action 标记
+- `internal/forensics/forensics_test.go` — 新增 2 个回归测试
+- `app.go` — `ExportTimeline` 加防御 + 明确错误信息
+- `frontend/src/components/ToolDialog.tsx` — `successInfo` + `countdown` 状态 +
+  绿色"已完成"覆盖层 + `立刻关闭` 按钮
+
+### 测试
+
+```
+go test -race -count=1 ./...                       ✅ 全绿
+TestBuildTimeline_CarverFilesWithoutTimestamps     ✅ events.len > 0 + mactime 非空
+TestBuildTimeline_MixedFSAndCarver                 ✅ 混合场景每个文件都有事件
+TestBuildTimeline_SortedByTime                     ✅ 时间排序回归
+GOOS=windows go build ./...                        ✅
+pnpm run build                                      ✅
+```
+
+---
+
 ## v2.8.31 (2026-05-15)
 
 **用户报新 3 条全修 + UT 锁死**

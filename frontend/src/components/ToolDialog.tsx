@@ -13,7 +13,7 @@
  * 用一个组件覆盖所有"输入参数 → 调 IPC → 显示结果"工具。
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { IconX, IconFolderOpen } from "../icons";
 import { toast } from "../toast";
 
@@ -73,6 +73,21 @@ export function ToolDialog({
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // v2.8.32 Issue 0: 成功后展示一个"已完成 + N 秒后自动关闭"的确认覆盖层。
+  // 用户原话："运行结束之后有个提示『任务添加完成3秒后自动关闭』"——之前只 toast
+  // 用户不一定看见。successInfo 非 null 时整个表单切换成"成功 + 倒计时"视图。
+  const [successInfo, setSuccessInfo] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState(3);
+
+  useEffect(() => {
+    if (successInfo === null) return;
+    if (countdown <= 0) {
+      onClose();
+      return;
+    }
+    const id = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [successInfo, countdown, onClose]);
 
   const update = (key: string, value: string) => {
     setValues((v) => ({ ...v, [key]: value }));
@@ -117,15 +132,22 @@ export function ToolDialog({
     try {
       const result = await onSubmit(values);
       const message = typeof result === "string" && result ? result : `${successPrefix} 操作完成`;
-      // v2.8.31: 成功 toast 时长与内容长度成正比，让多行结果（如计划任务安装详情）
-      // 给用户充分阅读时间。短结果保持 8s，长结果（>120 字符）给 20s。
-      const isLong = message.length > 120 || (message.match(/\n/g) || []).length >= 3;
+      // v2.8.32: 成功后不立刻关闭弹窗，而是切换到"已完成 + 3 秒倒计时关闭"覆盖层 ——
+      // 用户原话"运行结束之后有个提示『任务添加完成3秒后自动关闭』"。
+      // 短结果（< 80 字符）只用 toast；长/重要结果（≥80 字符或多行）用覆盖层 +
+      // toast 双保险。
+      const isLong = message.length >= 80 || (message.match(/\n/g) || []).length >= 2;
       toast.success({
         title: title,
         description: message,
         duration: isLong ? 20000 : 8000,
       });
-      onClose();
+      if (isLong) {
+        setSuccessInfo(message);
+        setCountdown(3);
+      } else {
+        onClose();
+      }
     } catch (err: any) {
       const msg = err?.message || String(err);
       setError(msg);
@@ -151,6 +173,31 @@ export function ToolDialog({
         </div>
 
         <div className="preview-modal__body" style={{ display: "block", padding: "16px 20px" }}>
+          {/* v2.8.32 Issue 0: 成功后切到这个面板（含倒计时） */}
+          {successInfo !== null ? (
+            <div>
+              <div
+                style={{
+                  padding: "12px 14px",
+                  background: "color-mix(in srgb, var(--success) 12%, transparent)",
+                  border: "1px solid var(--success)",
+                  borderRadius: 6,
+                  marginBottom: 12,
+                }}
+              >
+                <div style={{ fontWeight: 700, fontSize: "var(--text-sm)", marginBottom: 8, color: "var(--success)" }}>
+                  ✅ 完成 — {countdown} 秒后自动关闭
+                </div>
+                <div style={{ fontSize: "var(--text-xs)", lineHeight: 1.7, whiteSpace: "pre-wrap", color: "var(--text)" }}>
+                  {successInfo}
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button className="btn btn--sm" onClick={onClose}>立刻关闭</button>
+              </div>
+            </div>
+          ) : (
+          <>
           {description && (
             <div
               className="banner banner--info"
@@ -251,25 +298,31 @@ export function ToolDialog({
               {error}
             </div>
           )}
+          </>
+          )}
         </div>
 
-        <div
-          className="preview-modal__footer"
-          style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            gap: 8,
-            padding: "12px 20px",
-            boxShadow: "inset 0 1px 0 0 var(--border)",
-          }}
-        >
-          <button className="btn btn--ghost btn--sm" onClick={onClose} disabled={submitting}>
-            取消
-          </button>
-          <button className="btn btn--primary btn--sm" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? "执行中..." : submitLabel}
-          </button>
-        </div>
+        {/* v2.8.32: 成功倒计时面板自带"立刻关闭"按钮，所以这里底部按钮组只在
+            正常表单态显示 */}
+        {successInfo === null && (
+          <div
+            className="preview-modal__footer"
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+              padding: "12px 20px",
+              boxShadow: "inset 0 1px 0 0 var(--border)",
+            }}
+          >
+            <button className="btn btn--ghost btn--sm" onClick={onClose} disabled={submitting}>
+              取消
+            </button>
+            <button className="btn btn--primary btn--sm" onClick={handleSubmit} disabled={submitting}>
+              {submitting ? "执行中..." : submitLabel}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

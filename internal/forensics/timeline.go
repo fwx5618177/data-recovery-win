@@ -29,9 +29,20 @@ type TimelineEvent struct {
 
 // BuildTimeline 把 files 拍平成时间排序的事件列表。
 //
-// 每个文件可能产生多达 3 个事件（mtime/ctime/atime 不为空时各算一个）。
+// 每个文件最多产生 2 个时间戳事件（mtime / ctime 非空时各算一个）。
+//
+// v2.8.32: 之前如果 mtime/ctime 都为 nil（深度扫描 carver 结果就是这样 —— 雕刻
+// 不知道原 FS 时间戳），整个文件被忽略 → timeline 文件 0 字节。用户报"导出的
+// 文件是空的"的真正成因。
+//
+// 现在退路：mtime/ctime 都没有时，仍然生成一条 "found" 事件（time=now()）。
+// mactime 输出里这些 "found" 集中在同一时刻不影响 ctime/mtime 类的时间序分析；
+// 至少**让用户看见有恢复结果**而不是空文件。
+//
+// 同时 carver 文件标 `Source="carver"` → 报告里 grep "carver" 一目了然。
 func BuildTimeline(files []*types.RecoveredFile) []TimelineEvent {
 	var events []TimelineEvent
+	scanTime := time.Now().UTC()
 	for _, f := range files {
 		if f == nil {
 			continue
@@ -43,16 +54,26 @@ func BuildTimeline(files []*types.RecoveredFile) []TimelineEvent {
 			Source:    f.Source,
 			IsDeleted: f.IsDeleted,
 		}
+		had := false
 		if f.ModifiedTime != nil && !f.ModifiedTime.IsZero() {
 			e := base
 			e.Time = *f.ModifiedTime
 			e.Action = "modified"
 			events = append(events, e)
+			had = true
 		}
 		if f.CreatedTime != nil && !f.CreatedTime.IsZero() {
 			e := base
 			e.Time = *f.CreatedTime
 			e.Action = "created"
+			events = append(events, e)
+			had = true
+		}
+		if !had {
+			// v2.8.32: 没 FS 时间戳（carver 文件）→ 仍写一条 found 事件
+			e := base
+			e.Time = scanTime
+			e.Action = "found"
 			events = append(events, e)
 		}
 	}
@@ -78,6 +99,10 @@ func WriteTimelineMACTime(w io.Writer, events []TimelineEvent) error {
 			actionFlag = "..b"
 		case "accessed":
 			actionFlag = ".a."
+		case "found":
+			// v2.8.32: 我们新增的 carver "found" 标记。复用 mactime 的"自定义"位
+			// — 4 个点位都置 "X" 让 mactime 分析工具仍能解析行但区分出来。
+			actionFlag = "X..X"
 		}
 		path := e.FilePath
 		if path == "" {
