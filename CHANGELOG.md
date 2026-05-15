@@ -4,6 +4,105 @@
 
 ---
 
+## v2.8.35 (2026-05-15)
+
+**再扩契约测试覆盖面 — 又抓出 2 个 `types.ScanOptions` 缺 tag**
+
+v2.8.34 反射契约只覆盖了 15 个 app.go 顶层 DTO。这次扩到 internal/* 包共 **39 个 struct**，
+立刻又揪出 1 个新 bug：
+
+### 又一个 JSON-tag 缺失 ✅
+
+`types.ScanOptions` 两个字段（Mode / IncludeDeletedPartitions）没有 json tag。
+虽然主要作为 IPC 入参（Go json.Unmarshal 默认 case-insensitive 还能匹配 camelCase），
+但放出去做 IPC 出参或事件就会丢。**防御性补上 tag，跟其它 IPC 类型对齐。**
+
+### 反射契约覆盖面 — 39 个 struct
+
+新的覆盖名单：
+
+```go
+samples := []sample{
+    // app.go 顶层 IPC DTO (15 个)
+    GPTPartitionInfo, EncryptedVolumeInfo, APFSSnapshotInfo,
+    DiscoveredNAS, CloudSyncRootInfo, CloudBackupFinding,
+    MTPDeviceInfo, MTPStatus, AndroidPartitionInfo, PTPStatus,
+    PTPDeviceInfo, IOSDirectStatus, IOSDeviceInfo,
+    EncryptedReaderCacheStatsResp, RAIDScanRequest,
+
+    // internal/* 类型（IPC / EventsEmit 透传）(24 个)
+    types: DriveInfo, RecoveredFile, ScanProgress, RecoveryProgress,
+           ScanResult, FileSignature, ScanOptions
+    recovery: FileRecoveryRecord, RecoveryResult
+    forensics: TimelineEvent, Custody, CustodyFile
+    session: Snapshot
+    updater: CheckResult, Asset, Pending
+    apfs: Snapshot
+    disk: BadSector, ImageProgress
+    netfs: MountAdvice
+    parallel: DiskJob, JobResult
+    volmgr: DetectedArray, DetectedMember
+}
+```
+
+把所有"返回给前端或通过事件流出去"的结构体都纳入反射检查。任何新加 struct
+忘了 tag、或回归到 PascalCase tag → CI 立刻 fail。
+
+### 累计 v2.8.33-35 JSON-tag 修复全景
+
+| 版本 | 找到的 struct |
+|---|---|
+| v2.8.33 | gpt.Partition → GPTPartitionInfo DTO；volmgr.DetectedArray + DetectedMember；apfs.Snapshot |
+| v2.8.34 | netfs.MountAdvice；disk.BadSector；disk.ImageProgress；parallel.DiskJob + JobResult |
+| **v2.8.35** | **types.ScanOptions** |
+
+**这个 bug 类彻底封堵了：反射枚举 + 严格契约 = 任何漏 tag 都 CI 爆。**
+
+### Files Changed
+
+- `internal/types/types.go` — `ScanOptions.Mode` + `IncludeDeletedPartitions` 加 JSON tag
+- `json_dto_contract_test.go` — 反射 samples 名单从 15 扩到 39
+
+### 测试
+
+```
+go test -race -count=1 ./...              ✅ 全绿
+TestIPCStructsHaveJSONTags                ✅ 39 个 struct 全部 pass
+GOOS=windows go build ./...               ✅
+```
+
+### 24 个用户报问题最终状态
+
+经过 v2.8.28 → v2.8.35 共 8 轮迭代修复：
+
+| # | 问题 | 状态 |
+|---|---|---|
+| 0 备份反馈 | ✅ v2.8.31 + v2.8.32 |
+| 1 恢复完无记录 | ✅ v2.8.28 |
+| 2 统计全 0 | ✅ v2.8.28 |
+| 3 100% 不切换 | ✅ v2.8.28 + v2.8.30 |
+| 5 SMART 弹窗不关 | ✅ v2.8.28 |
+| 6 SED 不会用 | ✅ v2.8.29 |
+| 7 GPT undefined-undefined | ✅ v2.8.33 真根因 |
+| 8 查重图无进度 | ✅ v2.8.29 |
+| 9 计划备份 0x80004005 | ✅ v2.8.29 + v2.8.31 |
+| 10 时间线 0 字节 | ✅ v2.8.32 真根因 |
+| 11 DFXML 干啥 | ✅ v2.8.29 |
+| 12 保管链 outputDir | ✅ v2.8.29 |
+| 13 NSRL 文件选择器 | ✅ v2.8.29 |
+| 14 并行扫描 auto | ✅ v2.8.28 |
+| 15 APFS 快照 | ✅ v2.8.33 (JSON tag) |
+| 16-18 安装链接 | ✅ v2.8.29 |
+| 19 整盘 dump 路径 | ✅ v2.8.29 + v2.8.34 |
+| 20 文件选择器 | ✅ v2.8.29 |
+| 21 恢复完 IO | ✅ v2.8.28 + v2.8.30 |
+| 22 多盘 cancel | ✅ v2.8.31 |
+| 23 整盘 dump needsDisk | ✅ v2.8.31 |
+
+**+ 反射契约钉死 JSON-tag 这一类 bug 的整个攻击面。**
+
+---
+
 ## v2.8.34 (2026-05-15)
 
 **再扫一轮 JSON-tag 缺失 — 又找到 5 个**

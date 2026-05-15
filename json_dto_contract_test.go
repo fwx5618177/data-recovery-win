@@ -8,8 +8,13 @@ import (
 
 	"data-recovery/internal/apfs"
 	"data-recovery/internal/disk"
+	"data-recovery/internal/forensics"
 	"data-recovery/internal/netfs"
 	"data-recovery/internal/parallel"
+	"data-recovery/internal/recovery"
+	"data-recovery/internal/session"
+	"data-recovery/internal/types"
+	"data-recovery/internal/updater"
 	"data-recovery/internal/volmgr"
 )
 
@@ -224,7 +229,7 @@ func TestIPCStructsHaveJSONTags(t *testing.T) {
 		val  interface{}
 	}
 	samples := []sample{
-		// 已修
+		// === app.go 顶层 IPC DTO ===
 		{"GPTPartitionInfo", GPTPartitionInfo{}},
 		{"EncryptedVolumeInfo", EncryptedVolumeInfo{}},
 		{"APFSSnapshotInfo", APFSSnapshotInfo{}},
@@ -240,6 +245,33 @@ func TestIPCStructsHaveJSONTags(t *testing.T) {
 		{"IOSDeviceInfo", IOSDeviceInfo{}},
 		{"EncryptedReaderCacheStatsResp", EncryptedReaderCacheStatsResp{}},
 		{"RAIDScanRequest", RAIDScanRequest{}},
+
+		// === internal/* 类型，会被 IPC / EventsEmit 透传 ===
+		// 任何一个少 tag，UI 上都会出现 undefined。
+		{"types.DriveInfo", types.DriveInfo{}},
+		{"types.RecoveredFile", types.RecoveredFile{}},
+		{"types.ScanProgress", types.ScanProgress{}},
+		{"types.RecoveryProgress", types.RecoveryProgress{}},
+		{"types.ScanResult", types.ScanResult{}},
+		{"types.FileSignature", types.FileSignature{}},
+		{"types.ScanOptions", types.ScanOptions{}},
+		{"recovery.FileRecoveryRecord", recovery.FileRecoveryRecord{}},
+		{"recovery.RecoveryResult", recovery.RecoveryResult{}},
+		{"forensics.TimelineEvent", forensics.TimelineEvent{}},
+		{"forensics.Custody", forensics.Custody{}},
+		{"forensics.CustodyFile", forensics.CustodyFile{}},
+		{"session.Snapshot", session.Snapshot{}},
+		{"updater.CheckResult", updater.CheckResult{}},
+		{"updater.Asset", updater.Asset{}},
+		{"updater.Pending", updater.Pending{}},
+		{"apfs.Snapshot", apfs.Snapshot{}},
+		{"disk.BadSector", disk.BadSector{}},
+		{"disk.ImageProgress", disk.ImageProgress{}},
+		{"netfs.MountAdvice", netfs.MountAdvice{}},
+		{"parallel.DiskJob", parallel.DiskJob{}},
+		{"parallel.JobResult", parallel.JobResult{}},
+		{"volmgr.DetectedArray", volmgr.DetectedArray{}},
+		{"volmgr.DetectedMember", volmgr.DetectedMember{}},
 	}
 
 	for _, s := range samples {

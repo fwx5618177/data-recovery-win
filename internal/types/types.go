@@ -86,8 +86,8 @@ const (
 // v2.8.7 之前的行为是"永远 brute-force"，本质上把所有用户的扫描时间放大 N×
 // （N = brute-force 跑的 FS 数），换不到任何额外文件。
 type ScanOptions struct {
-	Mode                     ScanMode
-	IncludeDeletedPartitions bool
+	Mode                     ScanMode `json:"mode"`
+	IncludeDeletedPartitions bool     `json:"includeDeletedPartitions"`
 }
 
 // DriveInfo 驱动器信息
