@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   IconAlertTriangle,
   IconArrowLeft,
@@ -29,6 +29,7 @@ export default function RecoveryPage({
   records,
   outputDir,
   onStopRecovery,
+  onForceComplete,
   onOpenFolder,
   onRetryFailed,
   onExportReport,
@@ -78,15 +79,37 @@ export default function RecoveryPage({
     progress?.total > 0 ? (progress.current / progress.total) * 100 : 0,
   );
   const hasFailures = counts.failed + counts.partial + counts.skipped > 0;
+  // v2.8.30 Issue 3: 进度跑满后展示"下一步"按钮 + 自动 5 秒倒计时切到结果页。
+  // 用户期望"理想效果是执行完之后进行倒计时若干秒后自动进入恢复结果页面"。
+  // 这是 isActive=true 还卡着的兜底（如果 recovery:completed 事件延迟没触发）。
+  const isFinished = isActive && percent >= 99.95 && (progress?.total ?? 0) > 0;
+  const [countdown, setCountdown] = useState(5);
+
+  useEffect(() => {
+    if (!isFinished) {
+      setCountdown(5);
+      return;
+    }
+    if (countdown <= 0) {
+      onForceComplete?.();
+      return;
+    }
+    const id = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [isFinished, countdown, onForceComplete]);
 
   // 活动中：只显示实时进度
   if (isActive) {
     return (
       <div className="page">
         <div className="page__header">
-          <div className="page__title">正在恢复文件…</div>
+          <div className="page__title">
+            {isFinished ? "✅ 文件恢复完成 — 正在切换..." : "正在恢复文件…"}
+          </div>
           <div className="page__subtitle">
-            请勿拔出源盘或目标盘。单个文件写入完成后会做 SHA256 二次校验。
+            {isFinished
+              ? `${countdown} 秒后自动进入恢复结果页面，或点右侧"下一步"立刻查看`
+              : "请勿拔出源盘或目标盘。单个文件写入完成后会做 SHA256 二次校验。"}
           </div>
         </div>
 
@@ -100,9 +123,15 @@ export default function RecoveryPage({
                 </div>
               </div>
               <div className="btn-group">
-                <button className="btn btn--danger" onClick={onStopRecovery}>
-                  <IconStop size={14} /> 停止
-                </button>
+                {isFinished ? (
+                  <button className="btn btn--primary" onClick={onForceComplete}>
+                    下一步 ({countdown}s) →
+                  </button>
+                ) : (
+                  <button className="btn btn--danger" onClick={onStopRecovery}>
+                    <IconStop size={14} /> 停止
+                  </button>
+                )}
               </div>
             </div>
             <div className="progress" style={{ position: "relative" }}>

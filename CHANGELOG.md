@@ -4,6 +4,124 @@
 
 ---
 
+## v2.8.30 (2026-05-15)
+
+**继续打磨 — 把 v2.8.28/29 漏掉的本质 bug 补到位**
+
+### Issue 21 ✅ 深度修复 — 恢复完成后磁盘 IO 真正归零
+
+v2.8.28 把 forensics 抽到独立 goroutine，但 **`BuildAndWrite` 内部还在
+`filepath.Walk(outputDir)`** —— 用户的 outputDir 经常是 `C:\` 之类的盘根目录，
+走完整盘 + 每个文件算 SHA256 是几十 GB 数据，磁盘 IO 持续好几分钟到几小时。
+前端虽然切到了"恢复完成"页，但任务管理器里磁盘活动还在涨。
+
+**v2.8.30 真修复**：
+- 新增 `forensics.BuildAndWriteFromPaths(outputDir, custody, []absPaths)`
+- 新增 `forensics.BuildSignAndWriteFromPaths(outputDir, custody, []absPaths)`
+- `app.runForensicsPostProcess` 改用这两个 path-based 函数，只 hash **实际写盘**
+  的恢复文件（来自 `result.Records[].OutputPath`）。1 张 1.2MB 图片 = 1 次 sha256
+  毫秒级完成，不再 walk 整盘。
+
+```go
+// 收集本次实际写盘的文件 —— 只 hash 这些
+var recoveredPaths []string
+for _, r := range result.Records {
+    if r.State == recovery.RecoveryStateSuccess || r.State == recovery.RecoveryStatePartial {
+        recoveredPaths = append(recoveredPaths, r.OutputPath)
+    }
+}
+forensics.BuildSignAndWriteFromPaths(outputDir, custody, recoveredPaths)
+```
+
+回归测试 `TestBuildAndWriteFromPaths_OnlyHashesProvidedFiles` 直接锁死：
+模拟一个 outputDir 含 2 个恢复文件 + 1 个无关大文件（模拟用户 C: 盘上自己的 100GB
+视频），manifest 必须**只**含 2 个恢复文件，**绝不能**含那个无关大文件。
+将来谁不小心把 post-recovery 切回 walk 模式，这个测试立刻 fail。
+
+### Issue 3 ✅ 用户期望的 UX 完整落地 — 倒计时 + "下一步" 按钮
+
+用户原话："理想效果是执行完之后进行倒计时若干秒后自动进入恢复结果页面，
+操作按钮在执行结束后文案变为下一步提示用户点击"。
+
+v2.8.28 修了"recovery:completed 事件延迟"的底层 bug，但用户期望的 UX **没**实现。
+v2.8.30 补完：
+
+```jsx
+const isFinished = isActive && percent >= 99.95 && progress.total > 0;
+useEffect(() => {
+  if (!isFinished) return;
+  if (countdown <= 0) { onForceComplete(); return; }
+  setTimeout(() => setCountdown(c => c - 1), 1000);
+}, [isFinished, countdown]);
+
+// 进度到 100% 时：
+{isFinished ? (
+  <button className="btn btn--primary" onClick={onForceComplete}>
+    下一步 ({countdown}s) →
+  </button>
+) : (
+  <button className="btn btn--danger" onClick={onStopRecovery}>停止</button>
+)}
+```
+
+进度跑满后：
+1. 按钮文案立刻变成 "下一步 (5s) →"
+2. 标题变成 "✅ 文件恢复完成 — 正在切换..."
+3. 5 秒倒计时自动 `onForceComplete`（强制切结果页）
+4. 切之前 `GetLastRecoveryRecords` 兜底拉一次记录，避免空列表
+
+这是 recovery:completed 万一延迟时的"用户视角兜底"——他们看得到反馈、点得动按钮。
+
+### Files Changed
+
+- `internal/forensics/chain_of_custody.go` — 新增 `BuildAndWriteFromPaths` /
+  `BuildSignAndWriteFromPaths` + 抽 `writeCustodyManifest` 公共尾段 +
+  `signExistingCustody` helper
+- `internal/forensics/custody_from_paths_test.go` — 新增（3 个回归测试）
+- `app.go` — `runForensicsPostProcess` 用 path-based 接口
+- `frontend/src/components/RecoveryPage.tsx` — 加 isFinished 状态 + 倒计时 +
+  "下一步" 按钮
+- `frontend/src/App.tsx` — RecoveryPage 加 `onForceComplete` prop
+
+### 测试
+
+```
+go test -race -count=1 ./...                          ✅ 全绿
+TestBuildAndWriteFromPaths_OnlyHashesProvidedFiles    ✅ 锁住"只 hash 提供的文件"
+TestBuildAndWriteFromPaths_EmptyPathsStillWritesManifest ✅
+TestBuildAndWriteFromPaths_SkipsMissingFiles          ✅
+GOOS=windows go build ./...                           ✅
+pnpm run build                                         ✅
+```
+
+### 21 个问题全量复盘
+
+| # | 问题 | 修复版本 | 状态 |
+|---|---|---|---|
+| 1 | 恢复完成无文件列表 | v2.8.28 | ✅ records 回退 + RecoveryPage 已渲染 |
+| 2 | 统计数字全 0 | v2.8.28 | ✅ records 拿到 counts 自然对 |
+| 3 | 100% 后页面不切 + 停止按钮还在 | v2.8.28 + v2.8.30 | ✅ forensics 后台跑 + 倒计时 + "下一步" |
+| 4 | 部分工具不能用（总括） | v2.8.29 | ✅ 各工具 6-20 都具体修过 |
+| 5 | SMART 弹窗不自动关 | v2.8.28 | ✅ duration: 0 → 15000 |
+| 6 | SED 不会用 | v2.8.29 | ✅ 详细说明 + sedutil-cli 装法 |
+| 7 | GPT 备份表恢复没下文 | v2.8.29 | ✅ 结果 toast 解释这是诊断 + 5 种 0 结果原因 |
+| 8 | 查重图无进度提示 | v2.8.29 | ✅ 加 dismissByKey toast |
+| 9 | 计划备份 install 0x80004005 | v2.8.29 | ✅ 改 PowerShell Register-ScheduledTask |
+| 10 | 时间线导出干啥的 | v2.8.29 | ✅ ToolDialog 说明 + 选 outputDir |
+| 11 | DFXML 干啥的 | v2.8.29 | ✅ ToolDialog 说明 + 选 outputDir |
+| 12 | 保管链/校验 outputDir 为空 | v2.8.29 | ✅ ToolDialog 强制选目录 |
+| 13 | NSRL 要手贴路径 | v2.8.29 | ✅ SelectFile IPC + ToolDialog file 类型 |
+| 14 | 并行扫描 "auto" 模式报错 | v2.8.28 | ✅ ScanWithReaderOptions 归一化 auto→full |
+| 15 | APFS 快照点了没反应 | v2.8.29 | ✅ 0 结果详细解释 macOS-only |
+| 16 | ADB 未装提示 | v2.8.29 | ✅ banner + Google Platform Tools 链接 |
+| 17 | gphoto2 未装提示 | v2.8.29 | ✅ banner + libgphoto2 + Zadig 链接 |
+| 18 | libimobiledevice 未装提示 | v2.8.29 | ✅ banner + libimobiledevice-net 链接 |
+| 19 | 整盘镜像输出路径要手贴 | v2.8.29 | ✅ 接 SelectImageSavePath |
+| 20 | 文件路径要用系统选择器（总括） | v2.8.29 | ✅ #13 #19 + ToolDialog file 类型 |
+| 21 | 恢复完磁盘 IO 不停 | v2.8.28 + v2.8.30 | ✅ forensics 后台 + 不 walk outputDir |
+
+---
+
 ## v2.8.29 (2026-05-15)
 
 **用户报的 21 个问题里 v2.8.28 没动的 16 个一起补 —— 9 个真 bug + 7 个 UX**

@@ -1291,6 +1291,17 @@ export default function App() {
             records={recoveryRecords}
             outputDir={outputDir}
             onStopRecovery={stopRecovery}
+            // v2.8.30 Issue 3 兜底：用户手动点"下一步"或倒计时归 0 自动调，
+            // 强制切到结果页。如果后端 records 还没回，先去 GetLastRecoveryRecords 拉一次。
+            onForceComplete={async () => {
+              if (wailsApp?.GetLastRecoveryRecords) {
+                try {
+                  const list = await wailsApp.GetLastRecoveryRecords();
+                  if (list && list.length > 0) setRecoveryRecords(list);
+                } catch { /* 不阻塞切页 */ }
+              }
+              setRecoveryActive(false);
+            }}
             onOpenFolder={openFolder}
             onRetryFailed={retryFailed}
             onExportReport={exportReport}

@@ -1733,30 +1733,42 @@ func (a *App) startRecoveryInternal(fileIDs []string, outputDir string, allowSam
 }
 
 // runForensicsPostProcess 跑取证证据链（manifest / 签名 / HTML / zip bundle）。
-// v2.8.28 抽出来独立 goroutine 跑 —— 之前在 recovery 主 goroutine 里同步跑会让
-// recovery:completed 事件被几十秒到几分钟的 forensics 工作阻塞，前端 UI 看起来
-// "卡在 100% 不动"。现在 emit 早就发了，这里只在后台默默生成附加证据文件。
+//
+// v2.8.28 抽到独立 goroutine 跑 —— recovery:completed 事件不再被它阻塞。
+// v2.8.30 改用 BuildAndWriteFromPaths —— 只 hash 实际写盘的恢复文件，不再 walk
+// 整个 outputDir。修 v2.8.21 用户报"恢复完成后磁盘 IO 不停"的真正成因：
+// 之前 BuildAndWrite 用 filepath.Walk(outputDir) 走整个盘根目录（用户经常选 C:\），
+// 几十 GB 数据每个文件算 SHA256 是磁盘 IO 灾难，要好几分钟才完成。
 func (a *App) runForensicsPostProcess(outputDir string, result *recovery.RecoveryResult) {
-	_ = result // 预留参数：未来 forensics 可以用 records 列表精确算 SHA256，避免 walk outputDir
 	custody := forensics.Custody{
 		ToolName:     "DataRecovery",
 		ToolVersion:  updater.Version,
 		StartedAt:    time.Now().UTC(),
 		SourceDevice: a.currentDrive.Path,
 	}
-	mp, err := forensics.BuildAndWrite(outputDir, custody)
-	if err != nil {
-		appLogger.Warn("保管链生成失败（不影响恢复结果）", "err", err)
-		return
-	}
-	appLogger.Info("保管链已自动生成", "path", mp)
 
-	sp, err := forensics.BuildSignAndWrite(outputDir, custody)
+	// 收集本次实际写盘的文件 —— 只 hash 这些（毫秒级），不 walk outputDir。
+	var recoveredPaths []string
+	if result != nil {
+		for _, r := range result.Records {
+			if r == nil || r.OutputPath == "" {
+				continue
+			}
+			// 只 hash 真正写盘的：State==success 或 partial
+			if r.State == recovery.RecoveryStateSuccess || r.State == recovery.RecoveryStatePartial {
+				recoveredPaths = append(recoveredPaths, r.OutputPath)
+			}
+		}
+	}
+
+	// v2.8.30: 用 path-based 接口，只 hash 实际恢复的文件，不 walk outputDir。
+	// 之前 BuildSignAndWrite 内部又走一遍 walk，所以走 path-based sign 变种。
+	sp, err := forensics.BuildSignAndWriteFromPaths(outputDir, custody, recoveredPaths)
 	if err != nil {
 		appLogger.Warn("签名保管链生成失败（不影响恢复结果）", "err", err)
 		return
 	}
-	appLogger.Info("签名保管链已生成", "path", sp)
+	appLogger.Info("签名保管链已生成", "path", sp, "files", len(recoveredPaths))
 
 	if rp, err := forensics.GenerateHTMLReport(outputDir); err == nil {
 		appLogger.Info("HTML 取证报告已生成", "path", rp)
