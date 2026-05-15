@@ -146,14 +146,14 @@ func buildKeybagTLV(tag string, value []byte) []byte {
 
 func TestParseKeybag_Minimal(t *testing.T) {
 	var blob []byte
-	blob = append(blob, buildKeybagTLV("VERS", []byte{0, 0, 0, 4})...)          // v4
-	blob = append(blob, buildKeybagTLV("TYPE", []byte{0, 0, 0, 1})...)          // Backup
+	blob = append(blob, buildKeybagTLV("VERS", []byte{0, 0, 0, 4})...) // v4
+	blob = append(blob, buildKeybagTLV("TYPE", []byte{0, 0, 0, 1})...) // Backup
 	blob = append(blob, buildKeybagTLV("UUID", bytes.Repeat([]byte{0xAA}, 16))...)
 	blob = append(blob, buildKeybagTLV("SALT", bytes.Repeat([]byte{0xBB}, 20))...)
-	blob = append(blob, buildKeybagTLV("ITER", []byte{0, 0, 0x27, 0x10})...)    // 10000
+	blob = append(blob, buildKeybagTLV("ITER", []byte{0, 0, 0x27, 0x10})...) // 10000
 	// 一个 class
-	blob = append(blob, buildKeybagTLV("CLAS", []byte{0, 0, 0, 3})...)          // class 3
-	blob = append(blob, buildKeybagTLV("KTYP", []byte{0, 0, 0, 0})...)          // AES
+	blob = append(blob, buildKeybagTLV("CLAS", []byte{0, 0, 0, 3})...) // class 3
+	blob = append(blob, buildKeybagTLV("KTYP", []byte{0, 0, 0, 0})...) // AES
 	blob = append(blob, buildKeybagTLV("WPKY", bytes.Repeat([]byte{0xCC}, 40))...)
 
 	kb, err := ParseKeybag(blob)

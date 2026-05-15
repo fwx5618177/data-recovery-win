@@ -13,9 +13,9 @@ func TestZIPStitcher_LocalHeaderFallback(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	files := map[string][]byte{
-		"hello.txt":     []byte("hello world\n"),
-		"sub/data.bin":  bytes.Repeat([]byte{0x42}, 1024),
-		"empty.txt":     []byte(""),
+		"hello.txt":    []byte("hello world\n"),
+		"sub/data.bin": bytes.Repeat([]byte{0x42}, 1024),
+		"empty.txt":    []byte(""),
 	}
 	for name, content := range files {
 		w, err := zw.Create(name)

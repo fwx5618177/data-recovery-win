@@ -55,10 +55,10 @@ func TestParseValueAsTLV_Truncated(t *testing.T) {
 
 func TestExtractFileNameFromTLV(t *testing.T) {
 	// 构造 $FILE_NAME field：parent=42, ..., name="hello"
-	payload := make([]byte, 0x40+5*2) // 0x40 头 + 5 UTF-16 chars
+	payload := make([]byte, 0x40+5*2)               // 0x40 头 + 5 UTF-16 chars
 	binary.LittleEndian.PutUint64(payload[0:8], 42) // parent
-	payload[0x3C] = 5 // name_length
-	payload[0x3D] = 1 // Win32 type
+	payload[0x3C] = 5                               // name_length
+	payload[0x3D] = 1                               // Win32 type
 	for i, c := range "hello" {
 		binary.LittleEndian.PutUint16(payload[0x3E+i*2:], uint16(c))
 	}

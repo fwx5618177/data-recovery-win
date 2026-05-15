@@ -41,10 +41,10 @@ import (
 
 // AFmerge 把分散后的 keyslot 数据合并回 master_key。
 //
-//   in:        AFsplit 输出（长度 = mkLen * stripes）
-//   mkLen:     master key 字节数
-//   stripes:   分散块数（典型 4000）
-//   newHash:   hash.Hash 构造器，匹配 LUKS1 的 hash_spec
+//	in:        AFsplit 输出（长度 = mkLen * stripes）
+//	mkLen:     master key 字节数
+//	stripes:   分散块数（典型 4000）
+//	newHash:   hash.Hash 构造器，匹配 LUKS1 的 hash_spec
 func AFmerge(in []byte, mkLen, stripes int, newHash func() hash.Hash) ([]byte, error) {
 	if mkLen <= 0 || stripes <= 0 {
 		return nil, fmt.Errorf("AF 参数非法: mkLen=%d stripes=%d", mkLen, stripes)

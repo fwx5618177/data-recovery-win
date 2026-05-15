@@ -30,9 +30,9 @@ func NewScanner(reader disk.DiskReader) *Scanner {
 
 // Partition 表示发现的一个 ext 分区
 type Partition struct {
-	Offset      int64
-	SuperBlock  *SuperBlock
-	GroupDescs  []GroupDesc
+	Offset     int64
+	SuperBlock *SuperBlock
+	GroupDescs []GroupDesc
 }
 
 // FoundFile 一条文件发现
@@ -48,8 +48,8 @@ type FoundFile struct {
 // FindPartitions 定位 ext 分区。
 //
 // 策略（v2.8.11 修订，对齐 v2.8.8 的 exfat/fat/ntfs 行为）：
-//   1. 偏移 0 试解超块（整盘即一个 ext 分区，fast path 微秒级）
-//   2. 全盘 magic（0xEF 53 在偏移 0x438）扫描 —— **仅 opts.BruteForce=true 时启用**
+//  1. 偏移 0 试解超块（整盘即一个 ext 分区，fast path 微秒级）
+//  2. 全盘 magic（0xEF 53 在偏移 0x438）扫描 —— **仅 opts.BruteForce=true 时启用**
 //
 // **关键修复**：之前 bruteForce 永远跑，导致 128GB U 盘上 ext 阶段卡 12 小时
 // （即使盘是 exFAT 没 ext 分区也要扫全盘）。现在跟其他 FS scanner 一致 opt-in。
@@ -148,8 +148,9 @@ func (s *Scanner) bruteForce(ctx context.Context, onProgress ProgressFn) ([]*Par
 // 即使目录条目被覆盖，inode 表里的 i_block 字段仍可能保留指向原数据块。
 //
 // 走两遍：
-//   pass1：从 root 走目录树（含 deleted dentries）
-//   pass2：扫所有 inode，找 dtime != 0 但还没被 pass1 看到的孤立条目
+//
+//	pass1：从 root 走目录树（含 deleted dentries）
+//	pass2：扫所有 inode，找 dtime != 0 但还没被 pass1 看到的孤立条目
 func (s *Scanner) ScanFiles(
 	ctx context.Context,
 	p *Partition,

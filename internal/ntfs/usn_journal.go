@@ -34,29 +34,29 @@ import (
 
 // USN_REASON_* 位标志 — 我们关注的几个
 const (
-	UsnReasonDataOverwrite     uint32 = 0x00000001
-	UsnReasonDataExtend        uint32 = 0x00000002
-	UsnReasonDataTruncation    uint32 = 0x00000004
+	UsnReasonDataOverwrite      uint32 = 0x00000001
+	UsnReasonDataExtend         uint32 = 0x00000002
+	UsnReasonDataTruncation     uint32 = 0x00000004
 	UsnReasonNamedDataOverwrite uint32 = 0x00000010
-	UsnReasonFileCreate        uint32 = 0x00000100
-	UsnReasonFileDelete        uint32 = 0x00000200
-	UsnReasonRenameOldName     uint32 = 0x00001000
-	UsnReasonRenameNewName     uint32 = 0x00002000
-	UsnReasonClose             uint32 = 0x80000000
+	UsnReasonFileCreate         uint32 = 0x00000100
+	UsnReasonFileDelete         uint32 = 0x00000200
+	UsnReasonRenameOldName      uint32 = 0x00001000
+	UsnReasonRenameNewName      uint32 = 0x00002000
+	UsnReasonClose              uint32 = 0x80000000
 )
 
 // USNRecord 是解析后的单条 journal 记录。
 type USNRecord struct {
-	RecordLength      uint32
-	MajorVersion      uint16
-	MinorVersion      uint16
-	FileReference     uint64 // MFT 编号 + sequence（低 48 位是编号，高 16 位 sequence）
+	RecordLength        uint32
+	MajorVersion        uint16
+	MinorVersion        uint16
+	FileReference       uint64 // MFT 编号 + sequence（低 48 位是编号，高 16 位 sequence）
 	ParentFileReference uint64
-	Usn               int64
-	TimeStamp         time.Time
-	Reason            uint32
-	FileAttributes    uint32
-	FileName          string // UTF-16 解码后的文件名
+	Usn                 int64
+	TimeStamp           time.Time
+	Reason              uint32
+	FileAttributes      uint32
+	FileName            string // UTF-16 解码后的文件名
 }
 
 // IsDeletion 该记录是否是"文件最终被删除"事件（CLOSE + DELETE 同时置位时是真删除）
@@ -150,11 +150,11 @@ func filetimeToTimeUSN(ft int64) time.Time {
 
 // DeletedFileEvent 是"找回的已删除文件名"事件，给上层友好展示。
 type DeletedFileEvent struct {
-	FileName       string    // 文件名（不含路径）
-	MFTEntry       int64     // 所在 MFT entry 编号（如果 entry 已被覆盖，提示给用户）
-	ParentMFT      int64     // 父目录 MFT entry
-	DeletedAt      time.Time // 删除时刻
-	WasRenamed     bool      // 在删除前是否被重命名过（重命名前的原名要看更早的 RENAME_OLD_NAME 记录）
+	FileName   string    // 文件名（不含路径）
+	MFTEntry   int64     // 所在 MFT entry 编号（如果 entry 已被覆盖，提示给用户）
+	ParentMFT  int64     // 父目录 MFT entry
+	DeletedAt  time.Time // 删除时刻
+	WasRenamed bool      // 在删除前是否被重命名过（重命名前的原名要看更早的 RENAME_OLD_NAME 记录）
 }
 
 // FindUSNJournalEntry 在已经枚举过的 MFT entries 里找 $UsnJrnl 文件的主 entry。
@@ -259,9 +259,9 @@ func ReadUSNJournalStream(reader disk.DiskReader, boot *BootSector, entry *MFTEn
 // ScanDeletedFileNames 是给上层用的"一键找删除文件名"快捷方法。
 //
 // 流程：
-//   1. 在 entries 里找 $UsnJrnl
-//   2. 读它的 $J 流（最多 maxBytes，避免巨大 journal 拖慢）
-//   3. ParseUSNJournal → ExtractDeletedFiles
+//  1. 在 entries 里找 $UsnJrnl
+//  2. 读它的 $J 流（最多 maxBytes，避免巨大 journal 拖慢）
+//  3. ParseUSNJournal → ExtractDeletedFiles
 func ScanDeletedFileNames(reader disk.DiskReader, boot *BootSector, entries []*MFTEntry, maxBytes int64) ([]DeletedFileEvent, error) {
 	jrnlEntry := FindUSNJournalEntry(entries)
 	if jrnlEntry == nil {

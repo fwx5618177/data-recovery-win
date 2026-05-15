@@ -90,7 +90,7 @@ func TestBuildFSETable_RejectsFreqMismatch(t *testing.T) {
 
 func TestLog2Funcs(t *testing.T) {
 	cases := []struct {
-		in               uint32
+		in                  uint32
 		wantFloor, wantCeil uint8
 	}{
 		{1, 0, 0},

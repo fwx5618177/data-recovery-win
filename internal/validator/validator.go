@@ -118,11 +118,13 @@ func (v *Validator) ValidateWithMode(file *types.RecoveredFile, mode Mode) Resul
 // validateJPEGMode 按 Mode 分支做 JPEG 校验。
 //
 // Fast 路径（扫描阶段批量跑）：SOI + EOI + 首 marker + size 合理性 + 熵流健康度。
-//   典型一张 2-5MB 的 JPEG 耗时 200-600us。5 万张 <= 30s。
-//   拒掉"碎片化/中段跑飞/尾部截断"的废文件；真能 Decode 的文件都能通过。
+//
+//	典型一张 2-5MB 的 JPEG 耗时 200-600us。5 万张 <= 30s。
+//	拒掉"碎片化/中段跑飞/尾部截断"的废文件；真能 Decode 的文件都能通过。
 //
 // Deep 路径（Recover 阶段跑）：Fast 的全部 + image/jpeg.Decode 真解码。
-//   10-50ms / 张。Decode 成功 = 用户能打开；失败时再给"尾部截断可挽救"档次。
+//
+//	10-50ms / 张。Decode 成功 = 用户能打开；失败时再给"尾部截断可挽救"档次。
 //
 // 两档都允许调用方后续触发 RepairJPEG 尝试边界修复。
 func (v *Validator) validateJPEGMode(offset, size int64, mode Mode) Result {
@@ -265,11 +267,11 @@ func (v *Validator) validateJPEG(offset, size int64) Result {
 // computeJPEGHealth 熵流非法 marker 比例评分（0..1）
 //
 // 算法：
-//   1. JPEG 结构：SOI | header segments (APP0/DQT/DHT/SOF) | SOS | entropy stream | EOI
-//   2. 合法 marker 只有 RST0-RST7 + FF00 stuffed + FFFF fill（允许在熵流里）
-//   3. 碎片化 JPEG 特征：熵流中间混入 APP/DQT/DHT/SOF 等 header marker
-//      —— 这些只应在 SOI..SOS 之间出现，出现在熵流里说明跨入其他文件数据
-//   4. **关键**：只扫 SOS 之后到 EOI 之前的区间，header 段不计入
+//  1. JPEG 结构：SOI | header segments (APP0/DQT/DHT/SOF) | SOS | entropy stream | EOI
+//  2. 合法 marker 只有 RST0-RST7 + FF00 stuffed + FFFF fill（允许在熵流里）
+//  3. 碎片化 JPEG 特征：熵流中间混入 APP/DQT/DHT/SOF 等 header marker
+//     —— 这些只应在 SOI..SOS 之间出现，出现在熵流里说明跨入其他文件数据
+//  4. **关键**：只扫 SOS 之后到 EOI 之前的区间，header 段不计入
 func computeJPEGHealth(data []byte) float32 {
 	if len(data) < 20 {
 		return 0
@@ -320,7 +322,7 @@ func computeJPEGHealth(data []byte) float32 {
 			legal++
 		case next >= 0xC0 && next <= 0xCF, // SOF/DHT/DAC
 			next >= 0xE0 && next <= 0xEF, // APPn
-			next == 0xD8, next == 0xDA, // SOI 再现 / 另一个 SOS
+			next == 0xD8, next == 0xDA,   // SOI 再现 / 另一个 SOS
 			next == 0xDB, next == 0xDC, next == 0xDD, next == 0xDE, next == 0xDF, next == 0xFE:
 			// 这些 marker 在熵流**中间**是非法的 → 碎片化嫌疑
 			illegal++

@@ -32,13 +32,13 @@ import (
 
 // MemoryImageCandidate 找到的候选 memory image
 type MemoryImageCandidate struct {
-	Name        string // 展示用："hiberfil.sys (C:)" 或 "Minidump/xxx.dmp"
-	Path        string // NTFS 内的相对路径（供展示）
-	VolumeOff   int64  // 所在分区 offset
-	MFTEntry    int64  // MFT entry 号（用于 recovery）
-	Size        int64  // 文件大小（字节）
-	Confidence  string // "high" / "medium" / "low"
-	Note        string // 使用建议
+	Name       string // 展示用："hiberfil.sys (C:)" 或 "Minidump/xxx.dmp"
+	Path       string // NTFS 内的相对路径（供展示）
+	VolumeOff  int64  // 所在分区 offset
+	MFTEntry   int64  // MFT entry 号（用于 recovery）
+	Size       int64  // 文件大小（字节）
+	Confidence string // "high" / "medium" / "low"
+	Note       string // 使用建议
 }
 
 // 候选文件的优先级规则（NTFS 路径前缀 → Confidence + Note）

@@ -82,7 +82,8 @@ type EncryptionParams struct {
 }
 
 // DeriveWrappingKey 从用户密码派生 Wrapping Key
-//   WK = PBKDF2-HMAC-SHA512(password, salt, 1M iter, 32 bytes)
+//
+//	WK = PBKDF2-HMAC-SHA512(password, salt, 1M iter, 32 bytes)
 func DeriveWrappingKey(password, salt []byte) []byte {
 	return pbkdf2.Key(password, salt, zfsPBKDF2Iterations, zfsMasterKeyLen, sha512.New)
 }
@@ -151,7 +152,8 @@ func UnwrapMasterKey(wk, wrapped []byte) ([]byte, error) {
 }
 
 // DeriveDEK 从 Master Key 派生某个 dataset/object 的 Data Encryption Key
-//   DEK = HKDF-SHA512(MK, salt, info, 32 bytes)
+//
+//	DEK = HKDF-SHA512(MK, salt, info, 32 bytes)
 func DeriveDEK(masterKey, salt, info []byte) ([]byte, error) {
 	if len(masterKey) != 32 {
 		return nil, fmt.Errorf("master key 必须 32 字节")
@@ -170,7 +172,8 @@ func DeriveDEK(masterKey, salt, info []byte) ([]byte, error) {
 // iv: 12 字节
 // tag: 16 字节
 // aad: Additional Authenticated Data（ZFS 用 BlockPointer 的部分字段作 AAD，
-//      具体是 BP header 不含 cksum 的部分；不同 ZFS 版本略有差异）
+//
+//	具体是 BP header 不含 cksum 的部分；不同 ZFS 版本略有差异）
 func DecryptDataBlockAESGCM(dek, ciphertext, iv, tag, aad []byte) ([]byte, error) {
 	if len(dek) != 32 {
 		return nil, fmt.Errorf("DEK 必须 32 字节")
@@ -215,11 +218,12 @@ func ExtractCryptoFromBP(bp *BlockPointer) (iv, tag []byte) {
 // DecryptZFSBlock 一站式：给 params + DEK + ciphertext → plaintext
 //
 // 典型调用顺序：
-//   wk = DeriveWrappingKey(userPassword, params.Salt)
-//   mk, _ = UnwrapMasterKey(wk, params.WrappedMasterKey)
-//   dek, _ = DeriveDEK(mk, params.DSLSalt, params.DSLInfo)
-//   iv, tag = ExtractCryptoFromBP(bp)
-//   plain = DecryptZFSBlock(dek, ciphertext, iv, tag, aad)
+//
+//	wk = DeriveWrappingKey(userPassword, params.Salt)
+//	mk, _ = UnwrapMasterKey(wk, params.WrappedMasterKey)
+//	dek, _ = DeriveDEK(mk, params.DSLSalt, params.DSLInfo)
+//	iv, tag = ExtractCryptoFromBP(bp)
+//	plain = DecryptZFSBlock(dek, ciphertext, iv, tag, aad)
 //
 // aad 在 openzfs 里是 BP 前部字段（不含 cksum）的 48 字节；简化场景传 nil 但会
 // MAC 校验失败（除非数据 AAD 也是空的）。真实使用要按 openzfs 格式组装 AAD。

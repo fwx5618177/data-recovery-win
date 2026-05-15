@@ -7,8 +7,8 @@ import (
 )
 
 // Password protector round-trip：
-//   1. 把 VMK 用"来自用户密码"派生的 stretched key AES-CCM 加密成 VMK datum
-//   2. 走 UnlockVMKWithPassword，验证能拿回原始 VMK
+//  1. 把 VMK 用"来自用户密码"派生的 stretched key AES-CCM 加密成 VMK datum
+//  2. 走 UnlockVMKWithPassword，验证能拿回原始 VMK
 func TestPasswordProtector_RoundTrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("跳过 1M 次 stretch key（-short 模式）")
@@ -109,9 +109,9 @@ func TestSummarizeProtectors_AllKinds(t *testing.T) {
 }
 
 // Startup key (BEK) 端到端：
-//   1. 手工合成一个最小 BEK metadata 块：EXTERNAL_KEY + 嵌套 KEY datum
-//   2. 用 ParseBEKBytes 解回来 → ExternalKey
-//   3. 用它 AES-CCM 加密一段 VMK，然后 UnlockVMKWithStartupKey 解回去比对
+//  1. 手工合成一个最小 BEK metadata 块：EXTERNAL_KEY + 嵌套 KEY datum
+//  2. 用 ParseBEKBytes 解回来 → ExternalKey
+//  3. 用它 AES-CCM 加密一段 VMK，然后 UnlockVMKWithStartupKey 解回去比对
 func TestStartupKey_BEKParse_And_Unlock(t *testing.T) {
 	externalKey := make([]byte, 32)
 	for i := range externalKey {
@@ -139,9 +139,9 @@ func TestStartupKey_BEKParse_And_Unlock(t *testing.T) {
 	bek := make([]byte, metaTotalSize)
 	copy(bek[0:8], []byte(fveOEMID))
 	binary.LittleEndian.PutUint16(bek[8:10], metaTotalSize)
-	binary.LittleEndian.PutUint16(bek[10:12], 2)                       // Version
-	binary.LittleEndian.PutUint16(bek[12:14], 64)                      // HeaderSize
-	binary.LittleEndian.PutUint16(bek[36:38], EncryptionAESXTS128)     // 任意值，BEK 其实不用
+	binary.LittleEndian.PutUint16(bek[10:12], 2)                   // Version
+	binary.LittleEndian.PutUint16(bek[12:14], 64)                  // HeaderSize
+	binary.LittleEndian.PutUint16(bek[36:38], EncryptionAESXTS128) // 任意值，BEK 其实不用
 	copy(bek[64:], extDatumBytes)
 
 	parsed, err := ParseBEKBytes(bek)

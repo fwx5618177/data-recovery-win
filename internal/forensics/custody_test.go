@@ -14,9 +14,9 @@ func TestCustody_BuildAndVerify(t *testing.T) {
 	os.WriteFile(filepath.Join(tmp, "b.bin"), []byte{1, 2, 3, 4}, 0o644)
 
 	c := Custody{
-		ToolName:    "DataRecovery",
-		ToolVersion: "1.0",
-		StartedAt:   time.Now().UTC(),
+		ToolName:     "DataRecovery",
+		ToolVersion:  "1.0",
+		StartedAt:    time.Now().UTC(),
 		SourceDevice: "/dev/null",
 	}
 	manifestPath, err := BuildAndWrite(tmp, c)

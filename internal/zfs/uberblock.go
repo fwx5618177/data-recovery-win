@@ -39,7 +39,7 @@ const (
 	zfsUberblockArrayOffset = 128 * 1024
 
 	// Uberblock 大小固定 1 KB；共 128 个（128 KB / 1 KB）
-	zfsUberblockSize    = 1024
+	zfsUberblockSize     = 1024
 	zfsUberblocksInLabel = 128
 
 	// Uberblock magic 0x00bab10c（little-endian "boobla" 之类约定）
@@ -64,11 +64,11 @@ type Uberblock struct {
 
 // BlockPointer ZFS 128 字节 block_pointer_t 的简化解析
 type BlockPointer struct {
-	DVAs    [3]DVA // 最多 3 份（ditto block）；大多数普通 BP 只用 [0]
-	Props   uint64 // compression / encryption / checksum type 等 bit-field
-	BirthTXG uint64
+	DVAs      [3]DVA // 最多 3 份（ditto block）；大多数普通 BP 只用 [0]
+	Props     uint64 // compression / encryption / checksum type 等 bit-field
+	BirthTXG  uint64
 	FillCount uint64
-	Cksum   [32]byte // 校验和 (256 bits)
+	Cksum     [32]byte // 校验和 (256 bits)
 
 	// 方便字段
 	LogicalSize  uint32 // 从 Props bit-field 抽出
@@ -152,10 +152,11 @@ func ParseUberblock(b []byte) (*Uberblock, error) {
 // LoadActiveUberblock 扫 4 个 vdev label 的 uberblock 数组，返回 txg 最大的 active 那个。
 //
 // vdev label 位置（相对 vdev 起点）：
-//   L0: 0 KB
-//   L1: 256 KB
-//   L2: vdev_size - 512 KB
-//   L3: vdev_size - 256 KB
+//
+//	L0: 0 KB
+//	L1: 256 KB
+//	L2: vdev_size - 512 KB
+//	L3: vdev_size - 256 KB
 func LoadActiveUberblock(reader disk.DiskReader, vdevStart, vdevSize int64) (*Uberblock, error) {
 	labelOffsets := []int64{
 		0,

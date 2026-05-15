@@ -61,7 +61,8 @@ var piTable = [256]uint8{
 var piInvTable [256]uint8
 
 // lConstants 是 L 变换里的 16 个 GF(2^8) 系数（GOST 多项式 x^8+x^7+x^6+x+1 = 0x1c3）
-//   148, 32, 133, 16, 194, 192, 1, 251, 1, 192, 194, 16, 133, 32, 148, 1
+//
+//	148, 32, 133, 16, 194, 192, 1, 251, 1, 192, 194, 16, 133, 32, 148, 1
 var lConstants = [16]uint8{
 	148, 32, 133, 16, 194, 192, 1, 251, 1, 192, 194, 16, 133, 32, 148, 1,
 }
@@ -213,12 +214,13 @@ func (k *kuznyechikCipher) Decrypt(dst, src []byte) {
 // expandKey 派生 10 个 128-bit round subkey
 //
 // Spec：
-//   K1 = key[0..16]
-//   K2 = key[16..32]
-//   for i = 1..4:
-//     (K_{2i+1}, K_{2i+2}) = F[C_{8(i-1)+1}] ... F[C_{8(i-1)+8}] (K_{2i-1}, K_{2i})
-//   其中 C_j = L(j 当作 16 字节小端 LE)
-//   F[C](a, b) = (LS(a ⊕ C) ⊕ b, a)  (Feistel 1 步)
+//
+//	K1 = key[0..16]
+//	K2 = key[16..32]
+//	for i = 1..4:
+//	  (K_{2i+1}, K_{2i+2}) = F[C_{8(i-1)+1}] ... F[C_{8(i-1)+8}] (K_{2i-1}, K_{2i})
+//	其中 C_j = L(j 当作 16 字节小端 LE)
+//	F[C](a, b) = (LS(a ⊕ C) ⊕ b, a)  (Feistel 1 步)
 func (k *kuznyechikCipher) expandKey(key []byte) {
 	var k1, k2 [16]uint8
 	copy(k1[:], key[:16])

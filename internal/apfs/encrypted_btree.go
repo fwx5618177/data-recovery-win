@@ -17,9 +17,9 @@ import (
 // 本实现是简化版：假设调用方按 4KB 对齐读 + 每次只读 1 个 block。完整版要支持任意
 // offset/size，类似 bitlocker.DecryptingReader 那样按块切分 + 切片返回。
 type EncryptedReader struct {
-	underlying disk.DiskReader
-	cipher     *FileVaultXTSCipher
-	blockSize  uint32
+	underlying      disk.DiskReader
+	cipher          *FileVaultXTSCipher
+	blockSize       uint32
 	containerOffset int64
 }
 
@@ -37,11 +37,11 @@ func NewEncryptedReader(underlying disk.DiskReader, vek []byte, blockSize uint32
 	}, nil
 }
 
-func (r *EncryptedReader) Open() error             { return r.underlying.Open() }
-func (r *EncryptedReader) Close() error            { return r.underlying.Close() }
-func (r *EncryptedReader) Size() (int64, error)    { return r.underlying.Size() }
-func (r *EncryptedReader) SectorSize() int         { return int(r.blockSize) }
-func (r *EncryptedReader) DevicePath() string      { return r.underlying.DevicePath() }
+func (r *EncryptedReader) Open() error          { return r.underlying.Open() }
+func (r *EncryptedReader) Close() error         { return r.underlying.Close() }
+func (r *EncryptedReader) Size() (int64, error) { return r.underlying.Size() }
+func (r *EncryptedReader) SectorSize() int      { return int(r.blockSize) }
+func (r *EncryptedReader) DevicePath() string   { return r.underlying.DevicePath() }
 
 // ReadAt 按 4KB 块对齐切，每个块单独 XTS 解密。
 //

@@ -11,13 +11,14 @@ import (
 // 造一个最小可用的 ext4 镜像：1 个块组、根目录里 1 个文件。
 //
 // 布局（block_size=1024，便于手工对齐）：
-//   block 0: padding（前 1024 字节，BIOS 引导扇区位置）
-//   block 1: superblock
-//   block 2: group descriptor table
-//   block 3: data block bitmap
-//   block 4: inode bitmap
-//   block 5..N: inode table（256 字节 inode × InodesPerGroup）
-//   block N+1...: 数据块
+//
+//	block 0: padding（前 1024 字节，BIOS 引导扇区位置）
+//	block 1: superblock
+//	block 2: group descriptor table
+//	block 3: data block bitmap
+//	block 4: inode bitmap
+//	block 5..N: inode table（256 字节 inode × InodesPerGroup）
+//	block N+1...: 数据块
 //
 // 我们重点造：超块 + GD + 几个 inode（root + 一个普通文件）+ root 目录数据 + 文件数据
 func buildMinimalExt4Image(t *testing.T) []byte {
@@ -40,8 +41,8 @@ func buildMinimalExt4Image(t *testing.T) []byte {
 	sb := img[1024:2048]
 	binary.LittleEndian.PutUint32(sb[sbInodesCount:], inodesPerGroup)
 	binary.LittleEndian.PutUint32(sb[sbBlocksCount:], uint32(totalBlocks))
-	binary.LittleEndian.PutUint32(sb[sbFirstDataBlock:], 1)        // block_size=1024 时是 1
-	binary.LittleEndian.PutUint32(sb[sbLogBlockSize:], 0)          // 1024 << 0 = 1024
+	binary.LittleEndian.PutUint32(sb[sbFirstDataBlock:], 1) // block_size=1024 时是 1
+	binary.LittleEndian.PutUint32(sb[sbLogBlockSize:], 0)   // 1024 << 0 = 1024
 	binary.LittleEndian.PutUint32(sb[sbBlocksPerGroup:], uint32(totalBlocks))
 	binary.LittleEndian.PutUint32(sb[sbInodesPerGroup:], inodesPerGroup)
 	binary.LittleEndian.PutUint16(sb[sbMagic:], ext2Magic)
@@ -54,17 +55,17 @@ func buildMinimalExt4Image(t *testing.T) []byte {
 
 	// === GROUP DESCRIPTOR at block 2 ===
 	gd := img[2*blockSize : 2*blockSize+32]
-	binary.LittleEndian.PutUint32(gd[0x08:], inodeTableBlock) // inode_table_lo
+	binary.LittleEndian.PutUint32(gd[0x08:], inodeTableBlock)  // inode_table_lo
 	binary.LittleEndian.PutUint16(gd[0x0E:], inodesPerGroup-2) // free_inodes_count_lo
 
 	// === ROOT INODE = inode #2，在 inode table 第 1 个位置（offset = 0）===
 	rootInodeOff := inodeTableBlock*blockSize + (2-1)*inodeSize
 	rootInode := img[rootInodeOff : rootInodeOff+inodeSize]
 	binary.LittleEndian.PutUint16(rootInode[0x00:], imodeDir|0o755) // mode
-	binary.LittleEndian.PutUint32(rootInode[0x04:], blockSize)       // size
-	binary.LittleEndian.PutUint16(rootInode[0x1A:], 2)               // links_count
-	binary.LittleEndian.PutUint32(rootInode[0x1C:], blockSize/512)   // blocks (512-byte sectors)
-	binary.LittleEndian.PutUint32(rootInode[0x20:], 0x80000)         // EXT4_EXTENTS_FL
+	binary.LittleEndian.PutUint32(rootInode[0x04:], blockSize)      // size
+	binary.LittleEndian.PutUint16(rootInode[0x1A:], 2)              // links_count
+	binary.LittleEndian.PutUint32(rootInode[0x1C:], blockSize/512)  // blocks (512-byte sectors)
+	binary.LittleEndian.PutUint32(rootInode[0x20:], 0x80000)        // EXT4_EXTENTS_FL
 
 	// 根目录用 extent tree：一个 leaf extent 指向 rootDirBlock
 	ext := rootInode[0x28 : 0x28+60]
@@ -107,10 +108,10 @@ func buildMinimalExt4Image(t *testing.T) []byte {
 	dir := img[rootDirBlock*blockSize : (rootDirBlock+1)*blockSize]
 	pos := 0
 	// "." entry: inode=2, rec_len=12, name_len=1, file_type=2 (dir), name="."
-	binary.LittleEndian.PutUint32(dir[pos:], 2)        // inode
-	binary.LittleEndian.PutUint16(dir[pos+4:], 12)     // rec_len
-	dir[pos+6] = 1                                     // name_len
-	dir[pos+7] = 2                                     // file_type
+	binary.LittleEndian.PutUint32(dir[pos:], 2)    // inode
+	binary.LittleEndian.PutUint16(dir[pos+4:], 12) // rec_len
+	dir[pos+6] = 1                                 // name_len
+	dir[pos+7] = 2                                 // file_type
 	dir[pos+8] = '.'
 	pos += 12
 	// ".." entry

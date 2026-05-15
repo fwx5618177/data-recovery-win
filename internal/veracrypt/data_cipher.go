@@ -84,11 +84,12 @@ func (s *serpentXTSCipher) SectorSize() int { return 512 }
 // 走本地 wrapper；cascade 走 cascadeXTSCipher 多层 wrapper。
 //
 // VeraCrypt 1.21+ 默认 cipher 集合（按使用率排序，覆盖 99%+ 用户）：
-//   单 cipher：AES / Twofish / Serpent / Kuznyechik / Camellia
-//   2-cipher cascade：AES-Twofish / Twofish-Serpent / Serpent-AES /
-//                     Kuznyechik-AES / Kuznyechik-Serpent / Camellia-Kuznyechik
-//   3-cipher cascade：AES-Twofish-Serpent / Serpent-Twofish-AES /
-//                     Kuznyechik-Serpent-Camellia
+//
+//	单 cipher：AES / Twofish / Serpent / Kuznyechik / Camellia
+//	2-cipher cascade：AES-Twofish / Twofish-Serpent / Serpent-AES /
+//	                  Kuznyechik-AES / Kuznyechik-Serpent / Camellia-Kuznyechik
+//	3-cipher cascade：AES-Twofish-Serpent / Serpent-Twofish-AES /
+//	                  Kuznyechik-Serpent-Camellia
 //
 // 本实现覆盖：AES, Twofish, Serpent, Kuznyechik 单 + 全部 cascade 组合
 // （Camellia 较少见，留作 future）

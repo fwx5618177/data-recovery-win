@@ -60,19 +60,20 @@ func (s *LocalEd25519Signer) Scheme() string { return "ed25519" }
 // 由 Format 字段决定），PublicKeyPath 是提前准备的公钥文件。
 //
 // 示例（用 openssl 做 Ed25519 签名）：
-//   signer := &ExternalCLISigner{
-//     Command: []string{"openssl", "pkeyutl", "-sign", "-inkey", "/path/to/priv.pem"},
-//     PublicKeyPath: "/path/to/pub.pem",
-//     SchemeName: "ed25519",
-//     Format: "raw",
-//   }
+//
+//	signer := &ExternalCLISigner{
+//	  Command: []string{"openssl", "pkeyutl", "-sign", "-inkey", "/path/to/priv.pem"},
+//	  PublicKeyPath: "/path/to/pub.pem",
+//	  SchemeName: "ed25519",
+//	  Format: "raw",
+//	}
 //
 // 这让客户可以接任何签名工具（公司内部 PKI / signtool / codesign 等），无需
 // 改 Go 代码；也方便切到 HSM（通过 pkcs11-tool）或云 KMS（通过 aws/gcloud CLI）。
 type ExternalCLISigner struct {
-	Command       []string // 命令 + 参数
-	PublicKeyPath string   // 公钥文件路径（raw bytes 或 PEM，由调用方约定）
-	SchemeName    string   // "ed25519" / "rsa-pss" / ...
+	Command       []string                          // 命令 + 参数
+	PublicKeyPath string                            // 公钥文件路径（raw bytes 或 PEM，由调用方约定）
+	SchemeName    string                            // "ed25519" / "rsa-pss" / ...
 	PubKeyReader  func(path string) ([]byte, error) // 自定义读公钥函数；nil 时按 raw bytes 读
 }
 

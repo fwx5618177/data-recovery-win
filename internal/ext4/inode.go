@@ -41,21 +41,21 @@ const (
 //	+0x68  i_size_hi          uint32  ext4 文件大小高 32 位
 //	(后续字段省略)
 type Inode struct {
-	Number          uint64
-	Mode            uint16
-	IsDirectory     bool
-	IsRegularFile   bool
-	IsSymlink       bool
-	IsDeleted       bool   // dtime != 0
-	LinksCount      uint16
-	Size            int64
-	AccessTime      time.Time
-	ChangeTime      time.Time
-	ModifyTime      time.Time
-	DeleteTime      time.Time
-	BlockCount512   uint64 // 占用 512 字节扇区数
-	Flags           uint32
-	UseExtents      bool
+	Number        uint64
+	Mode          uint16
+	IsDirectory   bool
+	IsRegularFile bool
+	IsSymlink     bool
+	IsDeleted     bool // dtime != 0
+	LinksCount    uint16
+	Size          int64
+	AccessTime    time.Time
+	ChangeTime    time.Time
+	ModifyTime    time.Time
+	DeleteTime    time.Time
+	BlockCount512 uint64 // 占用 512 字节扇区数
+	Flags         uint32
+	UseExtents    bool
 
 	// 60 字节 i_block 区域的原始内容（extent tree header / indirect block 起点都在这）
 	BlockField [60]byte
@@ -63,9 +63,9 @@ type Inode struct {
 
 // InodeReader 把"按 inode 号读 inode"封装好（涉及块组定位 + inode 表偏移计算）
 type InodeReader struct {
-	reader      disk.DiskReader
-	sb          *SuperBlock
-	groupDescs  []GroupDesc
+	reader     disk.DiskReader
+	sb         *SuperBlock
+	groupDescs []GroupDesc
 }
 
 func NewInodeReader(reader disk.DiskReader, sb *SuperBlock, groupDescs []GroupDesc) *InodeReader {

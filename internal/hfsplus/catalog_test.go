@@ -13,8 +13,8 @@ func TestParseCatalogNode_LeafWithFolderAndFile(t *testing.T) {
 	// 节点头：kind = -1 (leaf)，存为 byte (0xFF)
 	kind := BTNodeKindLeaf
 	buf[8] = byte(kind)
-	buf[9] = 1                                          // height
-	binary.BigEndian.PutUint16(buf[10:12], 2)            // numRecords
+	buf[9] = 1                                // height
+	binary.BigEndian.PutUint16(buf[10:12], 2) // numRecords
 
 	// ---- 第一条：folder "Documents" ----
 	folderName := "Documents"
@@ -45,10 +45,10 @@ func TestParseCatalogNode_LeafWithFolderAndFile(t *testing.T) {
 	}
 	fileVal := make([]byte, 0xA8)
 	binary.BigEndian.PutUint16(fileVal[0:2], uint16(CatRecordFile))
-	binary.BigEndian.PutUint32(fileVal[8:12], 200)         // fileID
+	binary.BigEndian.PutUint32(fileVal[8:12], 200) // fileID
 	binary.BigEndian.PutUint32(fileVal[12:16], 1700000000)
-	binary.BigEndian.PutUint64(fileVal[0x58:0x58+8], 12345)        // logicalSize
-	binary.BigEndian.PutUint32(fileVal[0x58+12:0x58+16], 3)        // totalBlocks
+	binary.BigEndian.PutUint64(fileVal[0x58:0x58+8], 12345) // logicalSize
+	binary.BigEndian.PutUint32(fileVal[0x58+12:0x58+16], 3) // totalBlocks
 	// extent[0]: startBlock=10, blockCount=2
 	binary.BigEndian.PutUint32(fileVal[0x58+16:0x58+20], 10)
 	binary.BigEndian.PutUint32(fileVal[0x58+20:0x58+24], 2)

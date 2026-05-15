@@ -34,10 +34,10 @@ import (
 // PartialImage 是 PartialDecode 的输出
 type PartialImage struct {
 	Image           image.Image
-	TotalMCUs       int  // 总 MCU 数（按 SOF 算的）
-	DecodedMCUs     int  // 实际 decode 出来的 MCU 数
-	CorruptionMCU   int  // 损坏发生的 MCU 索引（-1 = 全部成功）
-	CorruptionByte  int  // entropy 流里损坏字节 offset (-1 = 全部成功)
+	TotalMCUs       int   // 总 MCU 数（按 SOF 算的）
+	DecodedMCUs     int   // 实际 decode 出来的 MCU 数
+	CorruptionMCU   int   // 损坏发生的 MCU 索引（-1 = 全部成功）
+	CorruptionByte  int   // entropy 流里损坏字节 offset (-1 = 全部成功)
 	CorruptionError error // 损坏的具体原因
 	Width, Height   int
 }
@@ -95,10 +95,10 @@ type partialDecoder struct {
 	dht []*jpegSegment
 
 	// from SOF
-	width, height                  int
-	componentCount                 int
-	components                     [4]component // index by Cs from SOS（对齐到 1..N）
-	maxHSamp, maxVSamp             int
+	width, height      int
+	componentCount     int
+	components         [4]component // index by Cs from SOS（对齐到 1..N）
+	maxHSamp, maxVSamp int
 
 	// quant tables (4 张)
 	qTables [4][64]int32
@@ -112,9 +112,9 @@ type partialDecoder struct {
 }
 
 type component struct {
-	id     uint8 // SOF 里给的 component id
-	hSamp  int   // horizontal sampling factor
-	vSamp  int   // vertical sampling factor
+	id      uint8 // SOF 里给的 component id
+	hSamp   int   // horizontal sampling factor
+	vSamp   int   // vertical sampling factor
 	qSelect uint8 // 用哪张 quant table
 
 	// SOS 选 Huffman table
@@ -319,7 +319,7 @@ func (d *partialDecoder) parseDHTs() error {
 type huffTable struct {
 	// 简化版：lookup 表 + slow path
 	// fast: 9-bit 索引（多数 code 长 ≤ 9 bit），值 = (symbol<<8 | nbits)
-	fast    [512]uint16
+	fast [512]uint16
 	// slow path：长 code 走完整解码（用 minCode/maxCode/valptr 三表）
 	minCode [16]int32
 	maxCode [16]int32

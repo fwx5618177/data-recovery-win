@@ -41,7 +41,7 @@ func Detect(reader disk.DiskReader, volStart int64) (*Vdev, error) {
 		[]byte("zpool"),
 		[]byte("vdev_tree"),
 		[]byte("ZFS_BOOT"),
-		[]byte("name"),     // nvlist 字段名
+		[]byte("name"), // nvlist 字段名
 		[]byte("pool_guid"),
 	}
 	hits := 0

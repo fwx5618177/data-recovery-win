@@ -25,9 +25,10 @@ import (
 // RST0-RST7 (D0-D7) 和 FF00/FFFF 属于熵流合法字节，不算非法。
 //
 // 其他 FFxx 中：
-//   D8 (SOI)、D9 (EOI) 本身不应在熵流里重复出现
-//   C0-CF (SOF)、C4 (DHT)、DB (DQT)、DD (DRI)、DA (SOS)、E0-EF (APP)、FE (COM)
-//   都是 header-stage marker，熵流中遇到 = 文件已跨入别的数据
+//
+//	D8 (SOI)、D9 (EOI) 本身不应在熵流里重复出现
+//	C0-CF (SOF)、C4 (DHT)、DB (DQT)、DD (DRI)、DA (SOS)、E0-EF (APP)、FE (COM)
+//	都是 header-stage marker，熵流中遇到 = 文件已跨入别的数据
 func isIllegalMarkerInEntropyStream(b byte) bool {
 	// RST0..RST7 允许
 	if b >= 0xD0 && b <= 0xD7 {

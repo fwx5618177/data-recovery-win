@@ -45,8 +45,8 @@ var _ disk.Canceller = (*modeAliasMockReader)(nil)
 // 规范化逻辑：mode ∈ {"", "auto", "default"} 都映射成 ScanFull。
 //
 // 这个测试启动一个扫描（mode=auto），立刻 Cancel，确认：
-//   1. 不返回 "未知扫描模式" 错误（说明 auto 被接受）
-//   2. 返回的错误是 cancel-related（扫描确实启动了）
+//  1. 不返回 "未知扫描模式" 错误（说明 auto 被接受）
+//  2. 返回的错误是 cancel-related（扫描确实启动了）
 func TestScanWithReaderOptions_AutoModeAccepted(t *testing.T) {
 	cases := []string{"auto", "", "default"}
 

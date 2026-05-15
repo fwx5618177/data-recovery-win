@@ -6,19 +6,19 @@
 //
 // 实用路径（业界主流恢复工具同款做法）：
 //
-//   1. **Android `adb pull` 路径**（推荐）
-//      用户开启 USB 调试 → 接 USB → 我们调 adb 命令拉文件。
-//      adb 是 Google 官方工具，跨平台，单文件二进制；用户已经装了 Android Studio
-//      或 platform-tools 的 90% 都有。我们检测它的存在，命令找不到时引导用户去装。
+//  1. **Android `adb pull` 路径**（推荐）
+//     用户开启 USB 调试 → 接 USB → 我们调 adb 命令拉文件。
+//     adb 是 Google 官方工具，跨平台，单文件二进制；用户已经装了 Android Studio
+//     或 platform-tools 的 90% 都有。我们检测它的存在，命令找不到时引导用户去装。
 //
-//   2. **MTP 文件系统挂载路径**（备用）
-//      用户用 OS 自带工具挂载手机（gvfs / Android File Transfer / File Explorer），
-//      我们把挂载点当成普通目录扫描。这种路径下我们就是一个普通 file scanner，
-//      不需要懂 MTP 协议。
+//  2. **MTP 文件系统挂载路径**（备用）
+//     用户用 OS 自带工具挂载手机（gvfs / Android File Transfer / File Explorer），
+//     我们把挂载点当成普通目录扫描。这种路径下我们就是一个普通 file scanner，
+//     不需要懂 MTP 协议。
 //
-//   3. **直接 libmtp 路径**（未实现）
-//      未来若加 build tag 子集（含 CGO 的 build），可以接 github.com/hanwen/usb +
-//      libmtp。当前主路线不带 CGO，留接口位等以后扩。
+//  3. **直接 libmtp 路径**（未实现）
+//     未来若加 build tag 子集（含 CGO 的 build），可以接 github.com/hanwen/usb +
+//     libmtp。当前主路线不带 CGO，留接口位等以后扩。
 //
 // 这个包只做路径 1：检测 adb，列设备，复制文件目录。 直连扫描的"数据流变成
 // 普通文件目录"后，上层 recovery.Engine.ScanDirectory（或 ios/android 备份扫描器）
@@ -35,10 +35,10 @@ import (
 
 // Device 是 adb 列出来的一个 Android 设备
 type Device struct {
-	Serial    string // adb 用的 serial（USB serial 或 IP:port）
-	State     string // "device" / "unauthorized" / "offline" / "no permissions"
-	Product   string // 设备型号（adb -l 输出里的 product:）
-	Model     string // 设备 model
+	Serial      string // adb 用的 serial（USB serial 或 IP:port）
+	State       string // "device" / "unauthorized" / "offline" / "no permissions"
+	Product     string // 设备型号（adb -l 输出里的 product:）
+	Model       string // 设备 model
 	TransportID string
 }
 
@@ -142,5 +142,6 @@ func PullDirectory(ctx context.Context, serial, srcPath, destDir string) error {
 
 // ErrAdbNotInstalled 是 adb 不在 PATH 时所有 MTP 操作的标准错误。
 // UI 应据此提示用户：
-//   "请安装 Android Platform Tools (包含 adb)：https://developer.android.com/tools/releases/platform-tools"
+//
+//	"请安装 Android Platform Tools (包含 adb)：https://developer.android.com/tools/releases/platform-tools"
 var ErrAdbNotInstalled = errors.New("adb 未安装：MTP 直连依赖 Android Platform Tools (adb) ")

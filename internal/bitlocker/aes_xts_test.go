@@ -112,7 +112,7 @@ func TestXTS_512ByteSectorRoundTrip(t *testing.T) {
 
 // 不同扇区号产生不同密文（确认 tweak 起作用）
 func TestXTS_DifferentSectorsDifferentCT(t *testing.T) {
-	key := mustHex(t, "00000000000000000000000000000000" +
+	key := mustHex(t, "00000000000000000000000000000000"+
 		"00000000000000000000000000000000")
 	pt := make([]byte, 512)
 	xts, _ := NewXTSCipher(key, 512)

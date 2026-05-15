@@ -120,4 +120,3 @@ func rotateIfLarge(path string) error {
 	_, _ = nf.Write(tail)
 	return nil
 }
-

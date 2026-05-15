@@ -344,11 +344,11 @@ func (r *windowsReader) DevicePath() string {
 // Cancel 把 reader 标为"毒化" + 取消所有 pending IO + 关闭 handle。
 //
 // v2.8.23 修订（v2.8.22 的 cancelled flag 仍保留作为快路径，但加了"强制关 handle"）：
-//   1. atomic.Store cancelled=true → 后续 ReadAt 第一句就 fail，不再触达内核
-//   2. CancelIoEx → 让卡在内核 ReadFile 上的当前那个 goroutine 立刻醒来
-//   3. **CloseHandle** → 即使有 race 让某次 ReadAt 跳过了 flag 检查、走到 ReadFile，
-//      关掉的 handle 让 ReadFile 立刻返回 ERROR_INVALID_HANDLE。这是 unixReader.Cancel
-//      已经在用的模式（f.Close 让所有现存+未来的 ReadAt 都 fail），现在 Windows 跟齐。
+//  1. atomic.Store cancelled=true → 后续 ReadAt 第一句就 fail，不再触达内核
+//  2. CancelIoEx → 让卡在内核 ReadFile 上的当前那个 goroutine 立刻醒来
+//  3. **CloseHandle** → 即使有 race 让某次 ReadAt 跳过了 flag 检查、走到 ReadFile，
+//     关掉的 handle 让 ReadFile 立刻返回 ERROR_INVALID_HANDLE。这是 unixReader.Cancel
+//     已经在用的模式（f.Close 让所有现存+未来的 ReadAt 都 fail），现在 Windows 跟齐。
 //
 // 之前 v2.8.22 只 set flag + CancelIoEx，不关 handle。但 CancelIoEx 是一次性的，
 // 而 flag 检查在 mu.Lock 外面 —— 极小但真实存在的 race window 里，某个 goroutine

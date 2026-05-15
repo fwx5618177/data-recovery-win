@@ -187,12 +187,13 @@ func TestKAT_AESXTS_IEEE1619_v2(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // RFC 9106 §B.1 Argon2id test vector：
-//   t=3 m=32 (KB) p=4 tagLen=32
-//   P = 32 bytes of 0x01
-//   S = 16 bytes of 0x02
-//   K = 8 bytes of 0x03 (secret), X = 12 bytes of 0x04 (associated data)
-//   tag = 0d 64 0d f5 8d 78 76 6c 08 c0 37 a3 4a 8b 53 c9
-//         d0 1e f0 45 2d 75 b6 5e b5 25 20 e9 6b 01 e6 59
+//
+//	t=3 m=32 (KB) p=4 tagLen=32
+//	P = 32 bytes of 0x01
+//	S = 16 bytes of 0x02
+//	K = 8 bytes of 0x03 (secret), X = 12 bytes of 0x04 (associated data)
+//	tag = 0d 64 0d f5 8d 78 76 6c 08 c0 37 a3 4a 8b 53 c9
+//	      d0 1e f0 45 2d 75 b6 5e b5 25 20 e9 6b 01 e6 59
 //
 // 注意：golang.org/x/crypto/argon2 的 IDKey 函数没有 secret/associatedData 参数，
 // 等价于 K = "" / X = ""，所以我们用 k=x=空 的官方参考向量。

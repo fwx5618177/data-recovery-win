@@ -57,12 +57,12 @@ func TestIsVersionNewer_RollbackProtection(t *testing.T) {
 		current, target string
 		want            bool
 	}{
-		{"v1.0.0", "v1.0.1", true},  // 正常升级
-		{"v1.0.0", "v1.1.0", true},  // minor bump
-		{"v1.0.0", "v2.0.0", true},  // major bump
-		{"v1.5.3", "v1.5.3", false}, // 相等不新
-		{"v1.5.3", "v1.5.2", false}, // 显式 downgrade —— 必须拒绝
-		{"v2.0.0", "v1.9.9", false}, // 跨 major downgrade
+		{"v1.0.0", "v1.0.1", true},   // 正常升级
+		{"v1.0.0", "v1.1.0", true},   // minor bump
+		{"v1.0.0", "v2.0.0", true},   // major bump
+		{"v1.5.3", "v1.5.3", false},  // 相等不新
+		{"v1.5.3", "v1.5.2", false},  // 显式 downgrade —— 必须拒绝
+		{"v2.0.0", "v1.9.9", false},  // 跨 major downgrade
 		{"v1.0.0", "garbage", false}, // 非法版本号
 		{"garbage", "v1.0.0", false}, // 当前版本号非法
 	}

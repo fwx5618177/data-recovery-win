@@ -19,10 +19,10 @@ import (
 // v2.8.30: BuildAndWriteFromPaths 只 hash 显式提供的文件列表，不 walk 任何目录。
 //
 // 测试做法：
-//   1. 在临时目录里造 2 个"恢复出来的文件" + 1 个"无关大文件"（模拟 outputDir 里
-//      恰好有用户其它的 100GB 视频之类）
-//   2. 调 BuildAndWriteFromPaths 只传 2 个恢复文件的路径
-//   3. 断言 custody.json 里 outputFiles 只有 2 条，不含那个"无关大文件"
+//  1. 在临时目录里造 2 个"恢复出来的文件" + 1 个"无关大文件"（模拟 outputDir 里
+//     恰好有用户其它的 100GB 视频之类）
+//  2. 调 BuildAndWriteFromPaths 只传 2 个恢复文件的路径
+//  3. 断言 custody.json 里 outputFiles 只有 2 条，不含那个"无关大文件"
 //
 // 如果将来谁不小心把 post-recovery 切回 walk 模式，"无关大文件"会出现在 manifest 里
 // 让这个测试 fail，磁盘 IO 噩梦的回归就被钉死了。

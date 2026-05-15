@@ -78,7 +78,7 @@ func TestBuildWindowsRegisterTaskPS_QuoteSafety(t *testing.T) {
 }
 
 // TestBuildWindowsRegisterTaskPS_PathWithSingleQuote 用户路径带单引号
-// （macOS 文件常见，Windows 罕见但可能）—— PowerShell 单引号字符串里 ' 必须双写成 ''。
+// （macOS 文件常见，Windows 罕见但可能）—— PowerShell 单引号字符串里 ' 必须双写成 ”。
 func TestBuildWindowsRegisterTaskPS_PathWithSingleQuote(t *testing.T) {
 	script := buildWindowsRegisterTaskPS(`C:\It's Mine`, `D:\Backup`, 2)
 	// PowerShell 单引号字符串里 ' → ''

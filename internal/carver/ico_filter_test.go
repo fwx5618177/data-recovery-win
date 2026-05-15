@@ -17,7 +17,7 @@ import (
 func forgeICOLike(colorPlanes, bitCount uint16, dataOff, dataSize uint32) []byte {
 	var buf bytes.Buffer
 	// ICONDIR
-	buf.Write([]byte{0x00, 0x00, 0x01, 0x00}) // reserved + type=1
+	buf.Write([]byte{0x00, 0x00, 0x01, 0x00})          // reserved + type=1
 	binary.Write(&buf, binary.LittleEndian, uint16(1)) // count
 	// ICONDIRENTRY (16 bytes)
 	buf.WriteByte(16) // width

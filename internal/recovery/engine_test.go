@@ -185,11 +185,11 @@ type hangingReader struct {
 	path string
 }
 
-func (r *hangingReader) Open() error                    { return nil }
-func (r *hangingReader) Close() error                   { return nil }
-func (r *hangingReader) Size() (int64, error)           { return 1 << 30, nil }
-func (r *hangingReader) SectorSize() int                { return 512 }
-func (r *hangingReader) DevicePath() string             { return r.path }
+func (r *hangingReader) Open() error          { return nil }
+func (r *hangingReader) Close() error         { return nil }
+func (r *hangingReader) Size() (int64, error) { return 1 << 30, nil }
+func (r *hangingReader) SectorSize() int      { return 512 }
+func (r *hangingReader) DevicePath() string   { return r.path }
 func (r *hangingReader) ReadAt(p []byte, _ int64) (int, error) {
 	// 故意永远阻塞，模拟 Windows 驱动层卡死
 	select {}

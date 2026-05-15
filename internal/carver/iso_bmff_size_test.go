@@ -140,7 +140,7 @@ func TestDetectISOBMFFSize_SingleTrack_DefaultSampleSize(t *testing.T) {
 	// 算文件 layout
 	var ftyp bytes.Buffer
 	ftyp.Write([]byte{0, 0, 0, 0x20, 'f', 't', 'y', 'p'}) // 32 字节 ftyp
-	ftyp.Write(make([]byte, 32-8))                       // 填充
+	ftyp.Write(make([]byte, 32-8))                        // 填充
 
 	moovSize := uint32(8 + moov.Len())
 	mdatDataStart := uint32(ftyp.Len()) + moovSize + 8 // ftyp + moov + mdat_header
@@ -350,8 +350,8 @@ func TestDetectISOBMFFSize_MissingMoov(t *testing.T) {
 func TestDetectISOBMFFSize_CorruptedSTSZ(t *testing.T) {
 	// 故意造 sample_count = 0xFFFFFFFF 的 stsz（损坏）
 	var corruptStsz bytes.Buffer
-	corruptStsz.Write([]byte{0, 0, 0, 0})              // version+flags
-	binary.Write(&corruptStsz, binary.BigEndian, uint32(0)) // default size
+	corruptStsz.Write([]byte{0, 0, 0, 0})                            // version+flags
+	binary.Write(&corruptStsz, binary.BigEndian, uint32(0))          // default size
 	binary.Write(&corruptStsz, binary.BigEndian, uint32(0xFFFFFFFF)) // 损坏的 count
 
 	stsc := buildSTSC([][3]uint32{{1, 1, 1}})
@@ -439,8 +439,8 @@ func TestDetectMP4Size_Integration_Size0Mdat(t *testing.T) {
 	img.Write(make([]byte, 32-8))
 	writeBoxTo(&img, "moov", moov.Bytes())
 	img.Write([]byte{0, 0, 0, 0, 'm', 'd', 'a', 't'}) // size=0 mdat
-	img.Write(make([]byte, 1000))                      // 真实 mdat data
-	img.Write(make([]byte, 4*1024*1024))               // 4MB 垃圾数据（模拟磁盘后续区）
+	img.Write(make([]byte, 1000))                     // 真实 mdat data
+	img.Write(make([]byte, 4*1024*1024))              // 4MB 垃圾数据（模拟磁盘后续区）
 
 	expectedSize := int64(ftypSize) + int64(moovSize) + 8 + 1000
 

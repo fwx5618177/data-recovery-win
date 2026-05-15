@@ -28,11 +28,11 @@ import (
 //   - val_offset 是从 entries area 末尾**反向**算起（向左走 val_offset 字节才是值首字节）
 
 const (
-	BTNodeFlagRoot         uint16 = 0x0001
-	BTNodeFlagLeaf         uint16 = 0x0002
-	BTNodeFlagFixedKVSize  uint16 = 0x0004
-	BTNodeFlagHashed       uint16 = 0x0008
-	BTNodeFlagNoHeader     uint16 = 0x0010
+	BTNodeFlagRoot        uint16 = 0x0001
+	BTNodeFlagLeaf        uint16 = 0x0002
+	BTNodeFlagFixedKVSize uint16 = 0x0004
+	BTNodeFlagHashed      uint16 = 0x0008
+	BTNodeFlagNoHeader    uint16 = 0x0010
 )
 
 // BTreeEntry 是节点里一条 (key, value) 记录的原始字节。
@@ -44,17 +44,17 @@ type BTreeEntry struct {
 
 // BTreeNode 是单个节点的解析结果。Entries 已经按节点内顺序排好。
 type BTreeNode struct {
-	Flags      uint16
-	Level      uint16 // 0=leaf
-	NumKeys    uint32
-	IsLeaf     bool
-	IsRoot     bool
-	IsFixedKV  bool
-	Entries    []BTreeEntry
+	Flags     uint16
+	Level     uint16 // 0=leaf
+	NumKeys   uint32
+	IsLeaf    bool
+	IsRoot    bool
+	IsFixedKV bool
+	Entries   []BTreeEntry
 	// 当 IsRoot=true 时这两段才有意义（footer 在节点尾部 40 字节）
-	NodeSize       uint32 // 节点字节数（一般 = block_size）
-	KeySize        uint32 // FixedKV 才填写
-	ValSize        uint32 // FixedKV 才填写
+	NodeSize uint32 // 节点字节数（一般 = block_size）
+	KeySize  uint32 // FixedKV 才填写
+	ValSize  uint32 // FixedKV 才填写
 }
 
 // ParseBTreeNode 给定一个节点的字节切片解出来；调用方负责按 nx_block_size 整段读入。

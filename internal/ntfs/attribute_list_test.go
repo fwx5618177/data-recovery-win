@@ -8,8 +8,9 @@ import (
 // 验证 parseAttributeListContent 能解出嵌入式 list entry 序列。
 //
 // 每条 list entry 24 字节最小（无 name），关键字段：
-//   +4  recordLen (uint16)
-//   +16 mftRef    (uint64) — 低 48 bit = entry number
+//
+//	+4  recordLen (uint16)
+//	+16 mftRef    (uint64) — 低 48 bit = entry number
 func TestParseAttributeListContent_BasicRefs(t *testing.T) {
 	// 造 3 条 list entry，引用 entry #50, #100, #200
 	want := []int64{50, 100, 200}

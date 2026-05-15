@@ -47,7 +47,7 @@ func makeMinimalJPEGWithRST(restartInterval int, rstCount int) []byte {
 
 // 健康（连续）JPEG：Carve 应直接返回 EOI 边界，不做 stitching
 func TestJPEGCarver_HealthyContinuous(t *testing.T) {
-	jpeg := makeMinimalJPEGWithRST(1, 3) // RSTn 序号 0,1,2
+	jpeg := makeMinimalJPEGWithRST(1, 3)        // RSTn 序号 0,1,2
 	disk := append([]byte{0xAA, 0xBB}, jpeg...) // 前面有 2 字节噪声
 	r := testutil.NewMemReader(disk)
 
@@ -71,7 +71,9 @@ func TestJPEGCarver_HealthyContinuous(t *testing.T) {
 }
 
 // 碎片场景：JPEG 中段被另一个文件覆盖，但后段还在
-//   [JPEG_head with RST0,RST1] + [垃圾 256 字节] + [JPEG_tail starting RST2 ... EOI]
+//
+//	[JPEG_head with RST0,RST1] + [垃圾 256 字节] + [JPEG_tail starting RST2 ... EOI]
+//
 // Carver 应识别 RST 序号断（到 RST2 时跳到了别处）→ stitching → 找回完整文件
 func TestJPEGCarver_StitchesAcrossGarbage(t *testing.T) {
 	full := makeMinimalJPEGWithRST(1, 4) // RST 0,1,2,3
@@ -88,7 +90,7 @@ func TestJPEGCarver_StitchesAcrossGarbage(t *testing.T) {
 	}
 
 	// 切掉 RST2 之后到 EOI 之间一段 → 制造碎片
-	head := full[:rst2Pos]      // 含到 RST1 之后部分
+	head := full[:rst2Pos]       // 含到 RST1 之后部分
 	tail := full[rst2Pos:]       // 从 RST2 开始
 	garbage := make([]byte, 256) // 中间夹 256 字节"别的文件"
 	for i := range garbage {
@@ -100,7 +102,7 @@ func TestJPEGCarver_StitchesAcrossGarbage(t *testing.T) {
 	// 我们故意在 RST1 之后插入一段非 RST/非 EOI 字节（假装下一个 marker 不再是 RST2）
 	// 正确的"另一种文件" 字节模拟是放一个 SOI 0xFF 0xD8 触发碎片识别：
 	headWithFakeMarker := append([]byte{}, head...)
-	headWithFakeMarker = append(headWithFakeMarker, 0xFF, jpegSOI) // 触发"中段又出现 SOI"
+	headWithFakeMarker = append(headWithFakeMarker, 0xFF, jpegSOI)    // 触发"中段又出现 SOI"
 	headWithFakeMarker = append(headWithFakeMarker, 0x00, 0x01, 0x02) // 一些 jam
 
 	disk := append(headWithFakeMarker, garbage...)

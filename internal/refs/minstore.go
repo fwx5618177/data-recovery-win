@@ -36,9 +36,9 @@ const (
 
 // MinstorePage 是单个识别到的 ReFS 元数据 page。
 type MinstorePage struct {
-	Offset    int64  // 在卷里的字节偏移
-	Magic     string // "MSB+" / "CHKP" / ...
-	LSN       uint64 // log sequence number（写入序列；越大越新）
+	Offset int64  // 在卷里的字节偏移
+	Magic  string // "MSB+" / "CHKP" / ...
+	LSN    uint64 // log sequence number（写入序列；越大越新）
 }
 
 // IndexMinstorePages 在给定卷范围内扫所有 16KB page，识别 Minstore signature。

@@ -29,8 +29,9 @@ import (
 )
 
 // ManifestKey 描述 Manifest.plist 里 ManifestKey 字段解开后的 key。
-//  ManifestKey = class_id(4B LE) + wrapped(40B)
-//  → 用 class_keys[class_id] 做 KEK → AES-KW unwrap → 32B Manifest.db AES key
+//
+//	ManifestKey = class_id(4B LE) + wrapped(40B)
+//	→ 用 class_keys[class_id] 做 KEK → AES-KW unwrap → 32B Manifest.db AES key
 type ManifestKey struct {
 	Class uint32
 	Key   []byte // 32 字节明文，AES-CBC 用

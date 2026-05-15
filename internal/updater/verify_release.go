@@ -29,7 +29,8 @@ import (
 // EmbeddedPublicKey 是编译时通过 -ldflags 注入的 **代码内 pin** 的 Ed25519 公钥（PEM）。
 // 空值 → 走 release 附带的 release_pubkey.pem 兜底（开发期）。
 // 生产发布前 build 命令：
-//   go build -ldflags "-X data-recovery/internal/updater.EmbeddedPublicKey=$(base64 < pubkey.pem)"
+//
+//	go build -ldflags "-X data-recovery/internal/updater.EmbeddedPublicKey=$(base64 < pubkey.pem)"
 //
 // 或直接把 PEM 文本 embedded 进来（不用 -ldflags）。
 var EmbeddedPublicKey = ""

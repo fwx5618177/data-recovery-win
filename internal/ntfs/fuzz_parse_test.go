@@ -20,7 +20,7 @@ func FuzzParseMFTEntry(f *testing.F) {
 
 	// seed 2：短于 header 的数据
 	f.Add([]byte{0x46, 0x49, 0x4C, 0x45}) // "FILE" 但后面没内容
-	f.Add([]byte{}) // 空
+	f.Add([]byte{})                       // 空
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s := &Scanner{}
@@ -50,4 +50,3 @@ func FuzzApplyFixup(f *testing.F) {
 		_ = applyFixup(buf)
 	})
 }
-

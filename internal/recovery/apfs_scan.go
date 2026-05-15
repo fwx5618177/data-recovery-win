@@ -23,10 +23,10 @@ type apfsRecoverySource struct {
 
 // runAPFSScan 执行 APFS 卷的文件枚举：
 //
-//	1. 全盘找 APFS 容器
-//	2. 每个容器 LoadOmap → 拿到 (vOID → pAddr) 映射
-//	3. 对每个未加密卷：用 omap 解出 root tree 物理位置 → FSTreeCrawler.Crawl
-//	4. EnumerateFiles 拍平成 (path, inode, extents) 列表 → RecoveredFile
+//  1. 全盘找 APFS 容器
+//  2. 每个容器 LoadOmap → 拿到 (vOID → pAddr) 映射
+//  3. 对每个未加密卷：用 omap 解出 root tree 物理位置 → FSTreeCrawler.Crawl
+//  4. EnumerateFiles 拍平成 (path, inode, extents) 列表 → RecoveredFile
 //
 // 加密卷（FileVault）跳过：需要 keybag 解出 VEK 才能读 fs tree（fs tree 节点本身也加密）。
 //
@@ -273,8 +273,9 @@ func (e *Engine) cacheAPFSSource(id string, src apfsRecoverySource) {
 // recoverAPFSFile 把 APFS 文件按 extent 拼出来写到 outputPath。
 //
 // 每个 extent: (LogicalOffset, Length, PhysicalBlock)
-//   PhysicalBlock = 0 表示稀疏洞（写 0）
-//   否则从容器内物理位置 (containerOffset + PhysicalBlock * blockSize + extent_internal_off) 读
+//
+//	PhysicalBlock = 0 表示稀疏洞（写 0）
+//	否则从容器内物理位置 (containerOffset + PhysicalBlock * blockSize + extent_internal_off) 读
 func (e *Engine) recoverAPFSFile(file *types.RecoveredFile, outputPath string) error {
 	e.mu.RLock()
 	src, ok := e.apfsSources[file.ID]

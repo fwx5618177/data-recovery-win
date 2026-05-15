@@ -14,12 +14,12 @@ func makeReFSBootSector(buf []byte) {
 	buf[0], buf[1], buf[2] = 0xEB, 0x76, 0x90
 	copy(buf[3:11], []byte(refsOEMID))
 	copy(buf[16:20], []byte(refsFSSignature))
-	binary.LittleEndian.PutUint16(buf[24:26], 4096)        // bytes/sector（ReFS 默认 4K）
-	buf[26] = 1                                            // sectors/cluster
-	binary.LittleEndian.PutUint64(buf[32:40], 1<<24)       // total sectors
-	binary.LittleEndian.PutUint64(buf[40:48], 0xCAFE)      // container number
-	buf[48] = 3                                            // major version
-	buf[49] = 5                                            // minor version
+	binary.LittleEndian.PutUint16(buf[24:26], 4096)   // bytes/sector（ReFS 默认 4K）
+	buf[26] = 1                                       // sectors/cluster
+	binary.LittleEndian.PutUint64(buf[32:40], 1<<24)  // total sectors
+	binary.LittleEndian.PutUint64(buf[40:48], 0xCAFE) // container number
+	buf[48] = 3                                       // major version
+	buf[49] = 5                                       // minor version
 	buf[510], buf[511] = 0x55, 0xAA
 }
 
@@ -77,11 +77,11 @@ type countingReader struct {
 	reads atomic.Int64
 }
 
-func (c *countingReader) Open() error                              { return c.inner.Open() }
-func (c *countingReader) Close() error                             { return c.inner.Close() }
-func (c *countingReader) Size() (int64, error)                     { return c.inner.Size() }
-func (c *countingReader) SectorSize() int                          { return c.inner.SectorSize() }
-func (c *countingReader) DevicePath() string                       { return c.inner.DevicePath() }
+func (c *countingReader) Open() error          { return c.inner.Open() }
+func (c *countingReader) Close() error         { return c.inner.Close() }
+func (c *countingReader) Size() (int64, error) { return c.inner.Size() }
+func (c *countingReader) SectorSize() int      { return c.inner.SectorSize() }
+func (c *countingReader) DevicePath() string   { return c.inner.DevicePath() }
 func (c *countingReader) ReadAt(buf []byte, off int64) (int, error) {
 	c.reads.Add(1)
 	return c.inner.ReadAt(buf, off)

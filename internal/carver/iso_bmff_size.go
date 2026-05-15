@@ -57,12 +57,12 @@ type box struct {
 // 返回 0 = 解析失败（caller 应回退到 atom-walk）。
 //
 // 算法：
-//   1. 遍历 top-level atoms 找 moov
-//   2. moov 内遍历找所有 trak
-//   3. 每个 trak 走到 mdia/minf/stbl
-//   4. stbl 下读 stsc + stsz + stco|co64
-//   5. 算每个 chunk 的 (chunk_offset + chunk_size)
-//   6. 全部 trak 的 max chunk_end - file_offset = 文件大小
+//  1. 遍历 top-level atoms 找 moov
+//  2. moov 内遍历找所有 trak
+//  3. 每个 trak 走到 mdia/minf/stbl
+//  4. stbl 下读 stsc + stsz + stco|co64
+//  5. 算每个 chunk 的 (chunk_offset + chunk_size)
+//  6. 全部 trak 的 max chunk_end - file_offset = 文件大小
 func detectISOBMFFSizeFromSampleTable(reader disk.DiskReader, offset int64, maxSize int64) int64 {
 	// ---- 1. 顶层找 moov ----
 	moov, ok := findTopLevelBox(reader, offset, offset+maxSize, "moov")
@@ -223,11 +223,11 @@ func readBoxHeader(reader disk.DiskReader, offset int64) (box, bool) {
 // computeTrackEndByte 从一个 stbl box 算出这个 track 数据的最后一个字节（文件绝对偏移）。
 //
 // 算法：
-//   1. 读 stsz：得到每个 sample 的字节数
-//   2. 读 stsc：得到 "chunk i 包含多少 samples" 的映射
-//   3. 读 stco/co64：得到每个 chunk 的文件起始偏移
-//   4. 对每个 chunk：累加它包含的 samples 大小 = chunk_size
-//   5. chunk_end = chunk_offset + chunk_size，max chunk_end = track 结束位置
+//  1. 读 stsz：得到每个 sample 的字节数
+//  2. 读 stsc：得到 "chunk i 包含多少 samples" 的映射
+//  3. 读 stco/co64：得到每个 chunk 的文件起始偏移
+//  4. 对每个 chunk：累加它包含的 samples 大小 = chunk_size
+//  5. chunk_end = chunk_offset + chunk_size，max chunk_end = track 结束位置
 func computeTrackEndByte(reader disk.DiskReader, stbl box) (int64, bool) {
 	stsz, defaultSampleSize, sampleCount, ok := readSTSZ(reader, stbl)
 	if !ok {
@@ -322,12 +322,13 @@ func samplesInChunk(chunkIdx uint32, runs []stscRun) uint32 {
 //   - ok: false = 解析失败 / 损坏 / 不是 stsz
 //
 // stsz body 布局（per ISO/IEC 14496-12 §8.7.3.2）：
-//   [0]   1 byte  version (must be 0)
-//   [1-3] 3 bytes flags
-//   [4-7] 4 bytes default_sample_size (0 = 各 sample 大小不同)
-//   [8-11] 4 bytes sample_count
-//   if default_sample_size == 0:
-//     [12...] sample_count × 4 bytes per-sample size
+//
+//	[0]   1 byte  version (must be 0)
+//	[1-3] 3 bytes flags
+//	[4-7] 4 bytes default_sample_size (0 = 各 sample 大小不同)
+//	[8-11] 4 bytes sample_count
+//	if default_sample_size == 0:
+//	  [12...] sample_count × 4 bytes per-sample size
 func readSTSZ(reader disk.DiskReader, stbl box) ([]uint32, uint32, uint32, bool) {
 	stsz, ok := findFirstChildBox(reader, stbl, "stsz")
 	if !ok {
@@ -375,13 +376,14 @@ func readSTSZ(reader disk.DiskReader, stbl box) ([]uint32, uint32, uint32, bool)
 // readSTSC 解析 stsc (Sample-to-Chunk) full box。
 //
 // stsc body 布局（per ISO/IEC 14496-12 §8.7.4.2）：
-//   [0]   1 byte version
-//   [1-3] 3 bytes flags
-//   [4-7] 4 bytes entry_count
-//   [8...] entry_count × 12 bytes:
-//     4 bytes first_chunk (1-indexed)
-//     4 bytes samples_per_chunk
-//     4 bytes sample_description_index
+//
+//	[0]   1 byte version
+//	[1-3] 3 bytes flags
+//	[4-7] 4 bytes entry_count
+//	[8...] entry_count × 12 bytes:
+//	  4 bytes first_chunk (1-indexed)
+//	  4 bytes samples_per_chunk
+//	  4 bytes sample_description_index
 func readSTSC(reader disk.DiskReader, stbl box) ([]stscRun, bool) {
 	stsc, ok := findFirstChildBox(reader, stbl, "stsc")
 	if !ok {

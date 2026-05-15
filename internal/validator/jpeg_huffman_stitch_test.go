@@ -87,9 +87,9 @@ func TestRangeContainsFF(t *testing.T) {
 
 func TestFormatBytes(t *testing.T) {
 	cases := map[int]string{
-		512:               "512 B",
-		2048:              "2 KB",
-		3 * 1024 * 1024:   "3 MB",
+		512:             "512 B",
+		2048:            "2 KB",
+		3 * 1024 * 1024: "3 MB",
 	}
 	for n, want := range cases {
 		got := formatBytes(n)

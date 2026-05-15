@@ -12,16 +12,16 @@ func TestEncodePlist_RoundTrip_AllTypes(t *testing.T) {
 	root := &Value{
 		Kind: KindDict,
 		Dict: map[string]*Value{
-			"BackupName":   {Kind: KindString, String: "iPhone of Alice"},
-			"IsEncrypted":  {Kind: KindBool, Bool: true},
-			"FailedCount":  {Kind: KindBool, Bool: false},
-			"Iterations":   {Kind: KindInt, Int: 10000000},
-			"NegativeNum":  {Kind: KindInt, Int: -42},
-			"BigInt":       {Kind: KindInt, Int: 1<<40 + 1234},
-			"Quality":      {Kind: KindReal, Real: 3.14159},
-			"BackupDate":   {Kind: KindDate, Time: tm},
-			"Salt":         {Kind: KindData, Data: []byte("rawSaltBytes")},
-			"Empty":        {Kind: KindNull},
+			"BackupName":  {Kind: KindString, String: "iPhone of Alice"},
+			"IsEncrypted": {Kind: KindBool, Bool: true},
+			"FailedCount": {Kind: KindBool, Bool: false},
+			"Iterations":  {Kind: KindInt, Int: 10000000},
+			"NegativeNum": {Kind: KindInt, Int: -42},
+			"BigInt":      {Kind: KindInt, Int: 1<<40 + 1234},
+			"Quality":     {Kind: KindReal, Real: 3.14159},
+			"BackupDate":  {Kind: KindDate, Time: tm},
+			"Salt":        {Kind: KindData, Data: []byte("rawSaltBytes")},
+			"Empty":       {Kind: KindNull},
 			"Tags": {
 				Kind: KindArray,
 				Array: []*Value{
@@ -146,7 +146,7 @@ func TestEncodePlist_ExtendedLength(t *testing.T) {
 	root := &Value{
 		Kind: KindDict,
 		Dict: map[string]*Value{
-			"Big": {Kind: KindString, String: string(bigStr)},
+			"Big":     {Kind: KindString, String: string(bigStr)},
 			"BigData": {Kind: KindData, Data: bytes.Repeat([]byte{0xAB}, 500)},
 			"BigArray": func() *Value {
 				items := make([]*Value, 100)

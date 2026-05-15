@@ -93,9 +93,9 @@ func writeFixtureAB(t *testing.T, dir string, password string, files map[string]
 func TestSession_EndToEnd_EncryptedBackup(t *testing.T) {
 	const password = "MyPhonePin0000"
 	files := map[string][]byte{
-		"apps/com.example/files/note.txt":       []byte("从 Android 备份里恢复出来的笔记"),
-		"apps/com.example/databases/main.db":    bytes.Repeat([]byte{0x42}, 4096),
-		"shared/0/Pictures/IMG_001.jpg":         bytes.Repeat([]byte{0xCC}, 1024),
+		"apps/com.example/files/note.txt":    []byte("从 Android 备份里恢复出来的笔记"),
+		"apps/com.example/databases/main.db": bytes.Repeat([]byte{0x42}, 4096),
+		"shared/0/Pictures/IMG_001.jpg":      bytes.Repeat([]byte{0xCC}, 1024),
 	}
 
 	tmpDir := t.TempDir()

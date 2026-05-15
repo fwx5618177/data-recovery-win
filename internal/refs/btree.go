@@ -61,17 +61,17 @@ var _ = [...]int{
 
 // ReFSFileEntry 结构化解析出的文件条目
 type ReFSFileEntry struct {
-	ObjectID     uint64    // Minstore object id（类似 MFT entry number）
-	FileName     string    // UTF-16 → UTF-8
-	ParentID     uint64    // 父目录 object id (0 = 根)
-	FileSize     uint64
-	AllocatedSize uint64
-	CreatedTime  time.Time // Windows FILETIME
-	ModifiedTime time.Time
-	AccessedTime time.Time
+	ObjectID       uint64 // Minstore object id（类似 MFT entry number）
+	FileName       string // UTF-16 → UTF-8
+	ParentID       uint64 // 父目录 object id (0 = 根)
+	FileSize       uint64
+	AllocatedSize  uint64
+	CreatedTime    time.Time // Windows FILETIME
+	ModifiedTime   time.Time
+	AccessedTime   time.Time
 	MFTChangedTime time.Time
 	FileAttributes uint32 // FILE_ATTRIBUTE_* (hidden / readonly / directory / ...)
-	IsDirectory  bool
+	IsDirectory    bool
 
 	// Data extents：LCN → length
 	Extents []ReFSExtent
@@ -89,12 +89,13 @@ type ReFSExtent struct {
 // ParseFileEntriesFromPage 从一个 16KB MSB+ page 结构化解析 File Entry。
 //
 // 典型 page 布局（社区观察；不同 ReFS 版本略变）：
-//   offset 0..64: page header (已有 MinstorePage 解析)
-//   offset 64..: index table
-//     每 8 字节 uint32 offset + uint32 size 指向 page 内的 entry
-//   entry 自描述：
-//     key length (u16) + key (var) + value length (u32) + value (var) + type (u16)
-//     value 内含嵌套 field table （TLV）
+//
+//	offset 0..64: page header (已有 MinstorePage 解析)
+//	offset 64..: index table
+//	  每 8 字节 uint32 offset + uint32 size 指向 page 内的 entry
+//	entry 自描述：
+//	  key length (u16) + key (var) + value length (u32) + value (var) + type (u16)
+//	  value 内含嵌套 field table （TLV）
 //
 // 本函数遍历 index table，对每个 entry 尝试识别 $FILE_ENTRY 并抽 metadata。
 func ParseFileEntriesFromPage(reader disk.DiskReader, pageOffset int64) ([]ReFSFileEntry, error) {
@@ -202,8 +203,10 @@ func tryExtractUTF16Near(buf []byte, start, windowSize int) string {
 }
 
 // findNearbyFiletime 找合法 Windows FILETIME uint64（2005-2040 范围）
-//   2005-01-01 UTC = 127,771,804,800,000,000 00ns
-//   2040-01-01 UTC = 139,840,000,000,000,000
+//
+//	2005-01-01 UTC = 127,771,804,800,000,000 00ns
+//	2040-01-01 UTC = 139,840,000,000,000,000
+//
 // 简化：找 uint64 在 [127e15, 140e15] 区间
 func findNearbyFiletime(buf []byte, start, windowSize int) (time.Time, int) {
 	end := start + windowSize
@@ -241,7 +244,7 @@ func findNearbyFileSize(buf []byte, start, windowSize int) (uint64, bool) {
 		end = len(buf)
 	}
 	const maxFileSize uint64 = 64 * 1024 * 1024 * 1024 // 64GB 启发上限；排除 FILETIME
-	scanStart := start + 8 // 跳 ObjectID
+	scanStart := start + 8                             // 跳 ObjectID
 	if scanStart >= end {
 		return 0, false
 	}

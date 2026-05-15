@@ -32,36 +32,36 @@ import (
 )
 
 const (
-	GPTSignature      = "EFI PART"
-	PrimaryHeaderLBA  int64 = 1
+	GPTSignature                       = "EFI PART"
+	PrimaryHeaderLBA             int64 = 1
 	BackupHeaderLBAOffsetFromEnd int64 = -1 // 盘倒数第 1 个 LBA
 )
 
 // Header 是解析后的 GPT 头
 type Header struct {
-	Revision         uint32
-	HeaderSize       uint32
-	HeaderCRC32      uint32
-	MyLBA            uint64
-	AlternateLBA     uint64
-	FirstUsableLBA   uint64
-	LastUsableLBA    uint64
-	DiskGUID         [16]byte
-	PartEntryLBA     uint64
-	NumPartEntries   uint32
-	SizeOfPartEntry  uint32
-	PartArrayCRC32   uint32
-	IsValidCRC       bool // header CRC 自校验通过
+	Revision        uint32
+	HeaderSize      uint32
+	HeaderCRC32     uint32
+	MyLBA           uint64
+	AlternateLBA    uint64
+	FirstUsableLBA  uint64
+	LastUsableLBA   uint64
+	DiskGUID        [16]byte
+	PartEntryLBA    uint64
+	NumPartEntries  uint32
+	SizeOfPartEntry uint32
+	PartArrayCRC32  uint32
+	IsValidCRC      bool // header CRC 自校验通过
 }
 
 // Partition 单个 GPT 分区
 type Partition struct {
-	TypeGUID  [16]byte
+	TypeGUID   [16]byte
 	UniqueGUID [16]byte
-	StartLBA  uint64
-	EndLBA    uint64
+	StartLBA   uint64
+	EndLBA     uint64
 	Attributes uint64
-	Name      string // UTF-16 LE
+	Name       string // UTF-16 LE
 }
 
 // IsEmpty 分区类型 GUID 全 0 = 空槽

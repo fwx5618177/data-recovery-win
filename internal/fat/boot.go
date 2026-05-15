@@ -60,15 +60,15 @@ type BootSector struct {
 	RootCluster       uint32 // BPB_RootClus (FAT32 专用，根目录起始 cluster)
 
 	// 计算字段
-	FSType           Type
-	TotalSectors     uint32 // 实际使用的那个
-	FATSize          uint32 // 实际使用的那个（FAT 表大小，单位扇区）
-	FirstFATSector   uint32 // 第一个 FAT 表的起始扇区
-	RootDirSector    uint32 // FAT12/16：固定根目录区的起始扇区；FAT32：0（看 RootCluster）
-	RootDirSectors   uint32 // FAT12/16：固定根目录占用的扇区数；FAT32：0
-	FirstDataSector  uint32 // cluster 2 所在的扇区
-	ClusterCount     uint32 // 有效 cluster 数量（用于判定 FAT 类型）
-	ClusterSize      uint32 // BytesPerSector * SectorsPerCluster（计算得到，字节）
+	FSType          Type
+	TotalSectors    uint32 // 实际使用的那个
+	FATSize         uint32 // 实际使用的那个（FAT 表大小，单位扇区）
+	FirstFATSector  uint32 // 第一个 FAT 表的起始扇区
+	RootDirSector   uint32 // FAT12/16：固定根目录区的起始扇区；FAT32：0（看 RootCluster）
+	RootDirSectors  uint32 // FAT12/16：固定根目录占用的扇区数；FAT32：0
+	FirstDataSector uint32 // cluster 2 所在的扇区
+	ClusterCount    uint32 // 有效 cluster 数量（用于判定 FAT 类型）
+	ClusterSize     uint32 // BytesPerSector * SectorsPerCluster（计算得到，字节）
 }
 
 // ParseBootSector 读并解析 FAT boot sector。offset 是分区起始字节偏移。

@@ -34,12 +34,12 @@ import (
 //
 // 算法：
 //
-//	1. 在 SOS 段前插入 DRI（Define Restart Interval）段，restartInterval=N
-//	2. 把 SOS 之后的 entropy 流按"假定每 N 个 MCU 一个 RST"重新组织：
-//	   实际上我们不知道 MCU 边界（要解 Huffman 才知道），所以走简化版：
-//	   在 entropy 流中**每 K 字节**找一个候选位置插 RST。
-//	   候选位置启发：必须不是 0xFF byte（避免破坏 byte stuffing）
-//	3. 插入的 RST 序列：FF D0/D1/.../D7（按 0..7 循环）
+//  1. 在 SOS 段前插入 DRI（Define Restart Interval）段，restartInterval=N
+//  2. 把 SOS 之后的 entropy 流按"假定每 N 个 MCU 一个 RST"重新组织：
+//     实际上我们不知道 MCU 边界（要解 Huffman 才知道），所以走简化版：
+//     在 entropy 流中**每 K 字节**找一个候选位置插 RST。
+//     候选位置启发：必须不是 0xFF byte（避免破坏 byte stuffing）
+//  3. 插入的 RST 序列：FF D0/D1/.../D7（按 0..7 循环）
 //
 // 这种"机械 RST 注入"对**完整**文件用处不大（reasoning：原 entropy 流的 MCU
 // 边界跟我们机械插入的 RST 位置不对齐 → decoder 在 RST 处看到 garbage
@@ -217,11 +217,11 @@ func FindEntropyCorruption(data []byte) int {
 // StitchHuffmanState 终极策略：组合 RST 注入 + 损坏点截断。
 //
 // 算法：
-//   1. 找 entropy 损坏点 (FindEntropyCorruption)
-//   2. 在损坏点之后**保留**几 KB 数据（让合成 RST 给 decoder 一个"重新同步"
-//      的机会，不全截掉）
-//   3. 注入合成 RST 让前半段 + 同步成功的后半段都能解
-//   4. jpeg.Decode 验证；不行的话 fall back 到截到损坏点 + 补 EOI
+//  1. 找 entropy 损坏点 (FindEntropyCorruption)
+//  2. 在损坏点之后**保留**几 KB 数据（让合成 RST 给 decoder 一个"重新同步"
+//     的机会，不全截掉）
+//  3. 注入合成 RST 让前半段 + 同步成功的后半段都能解
+//  4. jpeg.Decode 验证；不行的话 fall back 到截到损坏点 + 补 EOI
 //
 // 与 R-Studio 真 Huffman state save/restore 的差距：
 //   - 我们不解 entropy 流（不知 MCU 边界），合成 RST 位置对 MCU 来说是错的

@@ -25,6 +25,7 @@ import (
 //	+0x30  ... 偏移 0x40 之后是 datum 序列
 //
 // EncryptionMethod 取值：
+//
 //	0x8000 AES-CBC-128 with diffuser    (Vista)
 //	0x8001 AES-CBC-256 with diffuser    (Vista)
 //	0x8002 AES-CBC-128 no diffuser

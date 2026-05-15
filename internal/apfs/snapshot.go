@@ -28,7 +28,7 @@ type Snapshot struct {
 	XID        uint64 `json:"xid"`        // 快照创建时的 transaction id
 	CreateTime uint64 `json:"createTime"` // ns 单位（Unix epoch + 0）
 	ChangeTime uint64 `json:"changeTime"`
-	Name       string `json:"name"` // 快照名（"com.apple.TimeMachine.2026-04-21-..." 或用户自定义）
+	Name       string `json:"name"`     // 快照名（"com.apple.TimeMachine.2026-04-21-..." 或用户自定义）
 	InodeNum   uint64 `json:"inodeNum"` // SnapMetadata 的关联 inode
 	Flags      uint32 `json:"flags"`
 }
@@ -42,22 +42,24 @@ type Snapshot struct {
 //	snapshots := EnumerateSnapshotsFromCrawler(crawler)
 //
 // SnapMetadata key (j_key + xid)：
-//   +0x00 obj_id_and_type  uint64  type=JTypeSnapMetadata
-//   value:
-//     +0x00 extentref_tree_oid uint64
-//     +0x08 sblock_oid         uint64
-//     +0x10 create_time        uint64
-//     +0x18 change_time        uint64
-//     +0x20 inode_num          uint64
-//     +0x28 extentref_tree_type uint32
-//     +0x2C flags              uint32
-//     +0x30 name_len           uint16
-//     +0x32 name               UTF-8（NUL-terminated）
+//
+//	+0x00 obj_id_and_type  uint64  type=JTypeSnapMetadata
+//	value:
+//	  +0x00 extentref_tree_oid uint64
+//	  +0x08 sblock_oid         uint64
+//	  +0x10 create_time        uint64
+//	  +0x18 change_time        uint64
+//	  +0x20 inode_num          uint64
+//	  +0x28 extentref_tree_type uint32
+//	  +0x2C flags              uint32
+//	  +0x30 name_len           uint16
+//	  +0x32 name               UTF-8（NUL-terminated）
 //
 // SnapName key (j_key + name)：
-//   +0x00 obj_id_and_type  uint64  type=JTypeSnapName，obj_id 即 xid
-//   +0x08 name_len         uint16
-//   +0x0A name             UTF-8
+//
+//	+0x00 obj_id_and_type  uint64  type=JTypeSnapName，obj_id 即 xid
+//	+0x08 name_len         uint16
+//	+0x0A name             UTF-8
 type snapshotMetaRecord struct {
 	xid        uint64
 	createTime uint64

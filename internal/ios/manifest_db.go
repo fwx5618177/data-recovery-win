@@ -32,21 +32,21 @@ import (
 
 // FileRecord 一条 Manifest.db 的 Files 行
 type FileRecord struct {
-	FileID       string  // sha1(domain-relativePath) hex
-	Domain       string  // "CameraRollDomain" 等
-	RelativePath string  // 域内相对路径
-	Flags        int64   // 1/2/4
-	FileBlob     []byte  // bplist 原始字节（按需再解）
+	FileID       string // sha1(domain-relativePath) hex
+	Domain       string // "CameraRollDomain" 等
+	RelativePath string // 域内相对路径
+	Flags        int64  // 1/2/4
+	FileBlob     []byte // bplist 原始字节（按需再解）
 
 	// 解完 bplist 之后回填的字段（Enumerate 内部会做一次）
-	Size           int64
-	Mode           uint32
-	UID            uint32
-	GID            uint32
-	MTime          int64
-	BTime          int64
+	Size            int64
+	Mode            uint32
+	UID             uint32
+	GID             uint32
+	MTime           int64
+	BTime           int64
 	ProtectionClass uint32 // 加密备份才有；非 0 表示该文件被加密
-	EncryptionKey  []byte // 原始 wrapped key blob（class_id(4B LE) + wrapped_key(40B)）
+	EncryptionKey   []byte // 原始 wrapped key blob（class_id(4B LE) + wrapped_key(40B)）
 }
 
 // IsFile 根据 flags 判断是否普通文件（非目录、非符号链接）
@@ -57,12 +57,13 @@ func (r FileRecord) IsFile() bool { return r.Flags == 1 }
 // 只追求"用户一眼看懂是啥"。
 //
 // 例：
-//   CameraRollDomain + "Media/DCIM/100APPLE/IMG_0001.JPG"
-//     → "照片/DCIM/100APPLE/IMG_0001.JPG"
-//   AppDomain-com.whatsapp + "Documents/ChatStorage.sqlite"
-//     → "应用/WhatsApp/Documents/ChatStorage.sqlite"
-//   HomeDomain + "Library/Mail/Mailboxes/INBOX.mbox/123.emlx"
-//     → "Home/Library/Mail/Mailboxes/INBOX.mbox/123.emlx"
+//
+//	CameraRollDomain + "Media/DCIM/100APPLE/IMG_0001.JPG"
+//	  → "照片/DCIM/100APPLE/IMG_0001.JPG"
+//	AppDomain-com.whatsapp + "Documents/ChatStorage.sqlite"
+//	  → "应用/WhatsApp/Documents/ChatStorage.sqlite"
+//	HomeDomain + "Library/Mail/Mailboxes/INBOX.mbox/123.emlx"
+//	  → "Home/Library/Mail/Mailboxes/INBOX.mbox/123.emlx"
 func DomainDisplayPath(domain, relativePath string) string {
 	switch {
 	case domain == "CameraRollDomain":
@@ -157,14 +158,15 @@ func EnumerateFiles(ctx context.Context, db *sql.DB, onRecord func(FileRecord)) 
 // extractFileAttrs 从一条 Files.file BLOB 里提取关键字段。
 //
 // file BLOB 的内容是一棵 NSKeyedArchiver 的 bplist：
-//   $archiver = NSKeyedArchiver
-//   $version  = 100000
-//   $objects  = [
-//     "$null",                                                // idx=0
-//     { NS.keys: [...], NS.objects: [...], $class: {CF$UID->n} }, // idx=1 = 根 dict
-//     ...UID→引用...
-//   ]
-//   $top      = { root: UID(1) }
+//
+//	$archiver = NSKeyedArchiver
+//	$version  = 100000
+//	$objects  = [
+//	  "$null",                                                // idx=0
+//	  { NS.keys: [...], NS.objects: [...], $class: {CF$UID->n} }, // idx=1 = 根 dict
+//	  ...UID→引用...
+//	]
+//	$top      = { root: UID(1) }
 //
 // 我们并不做完整反序列化。策略：扫 $objects 数组里每个 dict，遇到 "Size" 这种
 // 键就记下对应 NS.objects[i]；最后按 NS.keys 顺序凑出属性表。

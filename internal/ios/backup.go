@@ -31,13 +31,13 @@ import (
 
 // Backup 描述本地一份已发现的 iOS 备份
 type Backup struct {
-	UDID         string    // 设备 UDID（目录名），通常是 40 个十六进制字符
-	Root         string    // 绝对路径
-	DeviceName   string    // 如 "Alice 的 iPhone"
-	ProductType  string    // 如 "iPhone14,5"
-	ProductVersion string  // 如 "17.3.1"
-	IsEncrypted  bool      // Manifest.plist 里的 IsEncrypted
-	LastBackup   time.Time // Info.plist 里的 Last Backup Date
+	UDID           string    // 设备 UDID（目录名），通常是 40 个十六进制字符
+	Root           string    // 绝对路径
+	DeviceName     string    // 如 "Alice 的 iPhone"
+	ProductType    string    // 如 "iPhone14,5"
+	ProductVersion string    // 如 "17.3.1"
+	IsEncrypted    bool      // Manifest.plist 里的 IsEncrypted
+	LastBackup     time.Time // Info.plist 里的 Last Backup Date
 
 	// 底层文件路径，方便下游复用
 	InfoPlistPath     string
@@ -89,8 +89,8 @@ func BackupSearchRoots() []string {
 // DiscoverBackups 扫描所有已知根目录，返回所有看起来是 iOS 备份的子目录。
 //
 // "看起来是 iOS 备份"的判定：
-//   1. 目录名是 UDID 格式（40 位 hex；也接受 iOS 16+ 的 25-char UUID 变体）
-//   2. 存在 Manifest.plist（最可靠的指纹）
+//  1. 目录名是 UDID 格式（40 位 hex；也接受 iOS 16+ 的 25-char UUID 变体）
+//  2. 存在 Manifest.plist（最可靠的指纹）
 //
 // 解析失败的备份也返回 —— UI 里让用户看到"有个备份但损坏"，好过隐藏。
 func DiscoverBackups() ([]*Backup, error) {

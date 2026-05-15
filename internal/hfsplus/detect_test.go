@@ -19,14 +19,14 @@ func TestDetect_HFSPlus_Roundtrip(t *testing.T) {
 	hdr := disk[1024:]
 	binary.BigEndian.PutUint16(hdr[0:2], sigHFSPlus)
 	binary.BigEndian.PutUint16(hdr[2:4], 4) // version
-	binary.BigEndian.PutUint32(hdr[4:8], (1<<13))
-	binary.BigEndian.PutUint32(hdr[32:36], 12)    // FolderCount
-	binary.BigEndian.PutUint32(hdr[36:40], 345)   // FileCount
-	binary.BigEndian.PutUint32(hdr[40:44], 4096)  // BlockSize
-	binary.BigEndian.PutUint32(hdr[44:48], 100000)// TotalBlocks
-	binary.BigEndian.PutUint32(hdr[48:52], 50000) // FreeBlocks
-	binary.BigEndian.PutUint32(hdr[64:68], 16)    // NextCNID
-	binary.BigEndian.PutUint32(hdr[68:72], 7)     // WriteCount
+	binary.BigEndian.PutUint32(hdr[4:8], (1 << 13))
+	binary.BigEndian.PutUint32(hdr[32:36], 12)     // FolderCount
+	binary.BigEndian.PutUint32(hdr[36:40], 345)    // FileCount
+	binary.BigEndian.PutUint32(hdr[40:44], 4096)   // BlockSize
+	binary.BigEndian.PutUint32(hdr[44:48], 100000) // TotalBlocks
+	binary.BigEndian.PutUint32(hdr[48:52], 50000)  // FreeBlocks
+	binary.BigEndian.PutUint32(hdr[64:68], 16)     // NextCNID
+	binary.BigEndian.PutUint32(hdr[68:72], 7)      // WriteCount
 
 	r := testutil.NewMemReader(disk)
 	v, err := Detect(r, 0)
@@ -82,7 +82,7 @@ func TestDetect_NotHFS_ReturnsNil(t *testing.T) {
 
 func TestFindVolumes_FindsTwo(t *testing.T) {
 	const (
-		volSize = int64(8 * 1024 * 1024) // 每个卷 8MB
+		volSize     = int64(8 * 1024 * 1024) // 每个卷 8MB
 		junkBetween = int64(2 * 1024 * 1024)
 	)
 	totalSize := volSize + junkBetween + volSize

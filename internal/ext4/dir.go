@@ -32,18 +32,18 @@ type DirEntry struct {
 
 // 文件类型常量
 const (
-	ftRegular  uint8 = 1
-	ftDir      uint8 = 2
-	ftSymlink  uint8 = 7
+	ftRegular uint8 = 1
+	ftDir     uint8 = 2
+	ftSymlink uint8 = 7
 )
 
 // parseDirBlock 解析一段目录数据（一个或多个块拼起来）
 //
 // 已删除条目的判定：
-//   1. inode == 0 → 该位置被显式标记为空
-//   2. rec_len 比 ceil(8 + name_len, 4) 大很多 → 前一条 unlink 时 rec_len 被合并扩张，
-//      把"被删除条目"的字节范围吃掉了。这种情况下，"被吃掉"的旧条目仍然能在数据里读到，
-//      只要扫描把 rec_len 当作"逻辑跳跃距离"而不是"上次的物理大小"。
+//  1. inode == 0 → 该位置被显式标记为空
+//  2. rec_len 比 ceil(8 + name_len, 4) 大很多 → 前一条 unlink 时 rec_len 被合并扩张，
+//     把"被删除条目"的字节范围吃掉了。这种情况下，"被吃掉"的旧条目仍然能在数据里读到，
+//     只要扫描把 rec_len 当作"逻辑跳跃距离"而不是"上次的物理大小"。
 //
 // 这个函数会同时返回 in-use 和 partially-overwritten deleted entries（用 IsDeleted 区分），
 // 给恢复层最大灵活度。

@@ -146,7 +146,7 @@ func TestScan_PhaseBudgetsRespected(t *testing.T) {
 	engine := NewEngine()
 
 	var (
-		mu       sync.Mutex
+		mu         sync.Mutex
 		maxByPhase = make(map[string]float64)
 	)
 
@@ -167,14 +167,14 @@ func TestScan_PhaseBudgetsRespected(t *testing.T) {
 
 	// 默认 fast budget 表的硬上限（含 0.5% 浮点容忍）
 	limits := map[string]float64{
-		"ntfs":     2.5,
-		"exfat":    4.5,
-		"fat":      5.5,
-		"ext":      6.5,
-		"apfs":     7.5,
-		"hfsplus":  8.5,
-		"btrfs":    9.5,
-		"carving":  95.5, // carver 上限是 95
+		"ntfs":    2.5,
+		"exfat":   4.5,
+		"fat":     5.5,
+		"ext":     6.5,
+		"apfs":    7.5,
+		"hfsplus": 8.5,
+		"btrfs":   9.5,
+		"carving": 95.5, // carver 上限是 95
 	}
 	for phase, limit := range limits {
 		if got, ok := maxByPhase[phase]; ok {

@@ -1,10 +1,10 @@
 // Package diag 把"用户遇到问题时能帮开发定位"的一切打包成 zip：
 //
-//	- 最近 N 天的日志
-//	- 应用版本、OS、arch
-//	- pending update 状态
-//	- 最近会话快照（文件名 / 大小 / 状态，不含文件内容）
-//	- 最近一次恢复的失败清单
+//   - 最近 N 天的日志
+//   - 应用版本、OS、arch
+//   - pending update 状态
+//   - 最近会话快照（文件名 / 大小 / 状态，不含文件内容）
+//   - 最近一次恢复的失败清单
 //
 // 不包含任何磁盘扇区 / 文件内容 / 恢复密钥 —— 只含"能帮排障的元数据"。
 // 用户可以把生成的 zip 直接贴到 GitHub issue。
@@ -53,16 +53,16 @@ func ResolveDefaultExportDir() string {
 
 // Metadata 是写到 zip 里 metadata.json 的内容。
 type Metadata struct {
-	ExportedAt   time.Time `json:"exportedAt"`
-	AppVersion   string    `json:"appVersion"`
-	OS           string    `json:"os"`
-	Arch         string    `json:"arch"`
-	NumCPU       int       `json:"numCPU"`
-	GoVersion    string    `json:"goVersion"`
-	LogFiles     []string  `json:"logFiles"`
-	SessionFile  string    `json:"sessionFile,omitempty"`
-	PendingFile  string    `json:"pendingFile,omitempty"`
-	ExtraNotes   string    `json:"extraNotes,omitempty"`
+	ExportedAt  time.Time `json:"exportedAt"`
+	AppVersion  string    `json:"appVersion"`
+	OS          string    `json:"os"`
+	Arch        string    `json:"arch"`
+	NumCPU      int       `json:"numCPU"`
+	GoVersion   string    `json:"goVersion"`
+	LogFiles    []string  `json:"logFiles"`
+	SessionFile string    `json:"sessionFile,omitempty"`
+	PendingFile string    `json:"pendingFile,omitempty"`
+	ExtraNotes  string    `json:"extraNotes,omitempty"`
 }
 
 // Options 控制导出什么。

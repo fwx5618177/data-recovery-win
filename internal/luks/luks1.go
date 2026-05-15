@@ -83,11 +83,11 @@ type LUKS1Header struct {
 
 // LUKS1Keyslot 一个 keyslot 的元数据
 type LUKS1Keyslot struct {
-	Active             bool
-	Iterations         uint32
-	Salt               [32]byte
-	KeyMaterialOffset  uint32 // 扇区
-	Stripes            uint32
+	Active            bool
+	Iterations        uint32
+	Salt              [32]byte
+	KeyMaterialOffset uint32 // 扇区
+	Stripes           uint32
 }
 
 // ParseLUKS1Header 把 LUKS1 phdr 字节解析成结构化数据。

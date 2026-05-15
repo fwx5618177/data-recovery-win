@@ -10,9 +10,10 @@ import (
 // buildImageWithFAT 造一个带可控 FAT 表的最小 exFAT 镜像。
 //
 // 布局（sector 512B，cluster 1 sector）：
-//   sector  0 : boot sector
-//   sector  8..15 : FAT (8 sectors = 4096 bytes = 1024 entries)
-//   sector 32..  : cluster heap（从 cluster 2 开始）
+//
+//	sector  0 : boot sector
+//	sector  8..15 : FAT (8 sectors = 4096 bytes = 1024 entries)
+//	sector 32..  : cluster heap（从 cluster 2 开始）
 //
 // fat 参数是直接要写到 FAT 表里的条目（从 entry 0 开始）。
 // 比如 fat[5]=6 表示 cluster 5 的下一跳是 cluster 6。

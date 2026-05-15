@@ -25,15 +25,15 @@ const appDirName = "DataRecoveryMaster"
 
 // Snapshot 存盘结构。字段尽量扁平以便 JSON 往返。
 type Snapshot struct {
-	Version     int                     `json:"version"`
-	SavedAt     time.Time               `json:"savedAt"`
-	DrivePath   string                  `json:"drivePath"`
-	DriveLabel  string                  `json:"driveLabel"`
-	Mode        string                  `json:"mode"`
-	Progress    types.ScanProgress      `json:"progress"`
-	Files       []*types.RecoveredFile  `json:"files"`
-	OutputDir   string                  `json:"outputDir,omitempty"`
-	Completed   bool                    `json:"completed"`
+	Version    int                    `json:"version"`
+	SavedAt    time.Time              `json:"savedAt"`
+	DrivePath  string                 `json:"drivePath"`
+	DriveLabel string                 `json:"driveLabel"`
+	Mode       string                 `json:"mode"`
+	Progress   types.ScanProgress     `json:"progress"`
+	Files      []*types.RecoveredFile `json:"files"`
+	OutputDir  string                 `json:"outputDir,omitempty"`
+	Completed  bool                   `json:"completed"`
 
 	// CarverResumeOffset 深度扫描断点续扫锚点（字节位移，绝对磁盘地址）。
 	// persistLoop 每 5s 写入当前 carver 扫描点；用户在 WelcomePage 点"从断点

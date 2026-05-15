@@ -249,13 +249,13 @@ func commonInstallPaths() []string {
 
 // Status 是 UI 拿来显示"OCR 健康度"的快照。
 type Status struct {
-	BinaryPath       string   `json:"binaryPath"`       // 用的 tesseract 路径
-	BinaryFound      bool     `json:"binaryFound"`      // 找到 binary 了吗
-	BinaryVersion    string   `json:"binaryVersion"`    // tesseract --version 输出第一行
-	TessdataDir      string   `json:"tessdataDir"`      // 我们 manage 的 tessdata 目录
-	InstalledLangs   []string `json:"installedLangs"`   // 已安装语言
-	BuiltinLangs     []string `json:"builtinLangs"`     // app 内嵌语言（不可删）
-	NotFoundHint     string   `json:"notFoundHint"`     // binary 缺失时给用户的指引
+	BinaryPath     string   `json:"binaryPath"`     // 用的 tesseract 路径
+	BinaryFound    bool     `json:"binaryFound"`    // 找到 binary 了吗
+	BinaryVersion  string   `json:"binaryVersion"`  // tesseract --version 输出第一行
+	TessdataDir    string   `json:"tessdataDir"`    // 我们 manage 的 tessdata 目录
+	InstalledLangs []string `json:"installedLangs"` // 已安装语言
+	BuiltinLangs   []string `json:"builtinLangs"`   // app 内嵌语言（不可删）
+	NotFoundHint   string   `json:"notFoundHint"`   // binary 缺失时给用户的指引
 }
 
 // QueryStatus 给前端的"OCR 现在能不能用 + 装了哪些语言"摘要

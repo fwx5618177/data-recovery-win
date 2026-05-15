@@ -39,12 +39,12 @@ import (
 // 上层用 PBKDF2 + AESKeyUnwrap 完成解密链。
 
 const (
-	KeyBagTagReserved        uint16 = 0
-	KeyBagTagWrappedVEK      uint16 = 2
-	KeyBagTagPasswordHint    uint16 = 3
-	KeyBagTagWrappedKEK      uint16 = 4
-	KeyBagTagPolicy          uint16 = 5
-	KeyBagTagInfo            uint16 = 0xFFFE
+	KeyBagTagReserved     uint16 = 0
+	KeyBagTagWrappedVEK   uint16 = 2
+	KeyBagTagPasswordHint uint16 = 3
+	KeyBagTagWrappedKEK   uint16 = 4
+	KeyBagTagPolicy       uint16 = 5
+	KeyBagTagInfo         uint16 = 0xFFFE
 )
 
 // KeyBagEntry 是 keybag 里一条 (UUID, tag) 记录。

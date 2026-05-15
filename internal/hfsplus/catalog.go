@@ -31,10 +31,10 @@ const (
 
 // Catalog record types
 const (
-	CatRecordFolder         int16 = 0x0001
-	CatRecordFile           int16 = 0x0002
-	CatRecordFolderThread   int16 = 0x0003
-	CatRecordFileThread     int16 = 0x0004
+	CatRecordFolder       int16 = 0x0001
+	CatRecordFile         int16 = 0x0002
+	CatRecordFolderThread int16 = 0x0003
+	CatRecordFileThread   int16 = 0x0004
 )
 
 // CatalogKey 是 catalog tree 的 key：
@@ -81,22 +81,22 @@ func ParseCatalogKey(buf []byte) (CatalogKey, int, error) {
 
 // CatalogFolder 是 kHFSPlusFolderRecord 的关键字段。
 type CatalogFolder struct {
-	ParentID    uint32 // 来自 key
-	Name        string
-	FolderID    uint32 // CNID
-	Valence     uint32 // 子项数
-	CreateDate  uint32 // Mac 1904 epoch
-	ModifyDate  uint32
-	AccessDate  uint32
+	ParentID   uint32 // 来自 key
+	Name       string
+	FolderID   uint32 // CNID
+	Valence    uint32 // 子项数
+	CreateDate uint32 // Mac 1904 epoch
+	ModifyDate uint32
+	AccessDate uint32
 }
 
 // CatalogFile 是 kHFSPlusFileRecord 的关键字段。
 type CatalogFile struct {
-	ParentID   uint32
-	Name       string
-	FileID     uint32
-	CreateDate uint32
-	ModifyDate uint32
+	ParentID    uint32
+	Name        string
+	FileID      uint32
+	CreateDate  uint32
+	ModifyDate  uint32
 	LogicalSize uint64 // data fork 字节数
 	TotalBlocks uint32
 	// data fork extents（最多 8 个；超过的在 extents overflow tree 里）
@@ -175,16 +175,16 @@ func ParseCatalogFile(key CatalogKey, val []byte) *CatalogFile {
 
 // CatalogNode 是解析后的 catalog B-tree node。
 type CatalogNode struct {
-	Kind        int8
-	Height      uint8
-	NumRecords  uint16
-	Records     []CatalogRecord // 已按 record 索引顺序排好
+	Kind       int8
+	Height     uint8
+	NumRecords uint16
+	Records    []CatalogRecord // 已按 record 索引顺序排好
 }
 
 // CatalogRecord 是节点内的一条 (key, value) 记录。
 // kind=Leaf 时 Folder/File 会被填上对应字段；index/header/map 节点的 Folder/File 都为 nil。
 type CatalogRecord struct {
-	Key    CatalogKey
+	Key CatalogKey
 	// RawKey 是 key 区域原始字节（含 2 byte keyLength 头）；
 	// 给 extents overflow / attributes B-tree 等**非** catalog 用途的 key 解析用。
 	RawKey []byte

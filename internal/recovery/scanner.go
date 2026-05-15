@@ -122,4 +122,3 @@ var (
 	_ FilesystemScanner = (*apfsScannerAdapter)(nil)
 	_ FilesystemScanner = (*hfsplusScannerAdapter)(nil)
 )
-

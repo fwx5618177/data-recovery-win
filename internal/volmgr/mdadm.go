@@ -29,26 +29,26 @@ import (
 // MDADMSuperblockV1 从 v1.x superblock 抽出的关键字段。
 // 字节序全部 little-endian（Linux md 格式）。
 type MDADMSuperblockV1 struct {
-	Magic        uint32   // 0xA92B4EFC
-	MajorVersion uint32   // 1
+	Magic        uint32 // 0xA92B4EFC
+	MajorVersion uint32 // 1
 	FeatureMap   uint32
 	SetUUID      [16]byte // 阵列 UUID（所有成员盘一致）
 	SetName      string   // 阵列名（hostname:arrayname）
 	CTime        uint64   // 创建时间（unix 秒）
 
-	Level      int32 // 0/1/4/5/6/10 / -1=linear
-	Layout     uint32
-	Size       uint64 // 单盘数据大小（扇区数 × 512）
+	Level  int32 // 0/1/4/5/6/10 / -1=linear
+	Layout uint32
+	Size   uint64 // 单盘数据大小（扇区数 × 512）
 
 	ChunkSectors uint32 // chunk 大小（扇区）—— 字节数 = ChunkSectors*512
 	RaidDisks    uint32 // 阵列成员盘总数
 
-	DataOffset    uint64 // 本盘 data 从哪个扇区开始（mdadm 保留前若干 KiB 给 superblock）
-	DataSize      uint64
-	SuperOffset   uint64
-	DevNumber     uint32 // 本盘在 dev_roles 表里的索引
-	DeviceUUID    [16]byte
-	DevRoles      []uint16 // dev_roles[dev_number] = 本盘在阵列里的 role（0..raid_disks-1）
+	DataOffset  uint64 // 本盘 data 从哪个扇区开始（mdadm 保留前若干 KiB 给 superblock）
+	DataSize    uint64
+	SuperOffset uint64
+	DevNumber   uint32 // 本盘在 dev_roles 表里的索引
+	DeviceUUID  [16]byte
+	DevRoles    []uint16 // dev_roles[dev_number] = 本盘在阵列里的 role（0..raid_disks-1）
 
 	// Role 在阵列里的位置。-1 = 无效 / spare / faulty
 	Role int

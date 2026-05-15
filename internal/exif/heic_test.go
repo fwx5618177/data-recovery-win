@@ -26,8 +26,8 @@ func TestExtractDateTimeHEIC_FindsDate(t *testing.T) {
 	tiff = append(tiff, 0x08, 0x00, 0x00, 0x00) // IFD0 @ 8
 	// IFD0: 1 entry + next IFD = 0
 	tiff = append(tiff, 0x01, 0x00)
-	tiff = append(tiff, 0x32, 0x01) // tag DateTime
-	tiff = append(tiff, 0x02, 0x00) // type ASCII
+	tiff = append(tiff, 0x32, 0x01)             // tag DateTime
+	tiff = append(tiff, 0x02, 0x00)             // type ASCII
 	tiff = append(tiff, 0x14, 0x00, 0x00, 0x00) // count = 20
 	dvOffset := uint32(8 + 2 + 12 + 4)
 	tb := make([]byte, 4)

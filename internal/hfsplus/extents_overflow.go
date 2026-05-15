@@ -45,10 +45,10 @@ const (
 // 简化前提：本实现假设 extents overflow file 自身的 fork 不会超过 8 extent —— 真实卷
 // 这个文件本身一般很小（几 MB 到几十 MB），不会越界。
 type ExtentsOverflowReader struct {
-	reader        disk.DiskReader
-	vol           *VolumeHeader
-	fileExtents   [8]ForkExtent // extents overflow file 自己的 fork extents
-	nodeSize      uint32        // 默认 4096
+	reader      disk.DiskReader
+	vol         *VolumeHeader
+	fileExtents [8]ForkExtent // extents overflow file 自己的 fork extents
+	nodeSize    uint32        // 默认 4096
 }
 
 // NewExtentsOverflowReader 从卷头解出 extents overflow file 的位置。

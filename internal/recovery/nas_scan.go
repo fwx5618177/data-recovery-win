@@ -36,9 +36,9 @@ type (
 //   - SMB：smbSession + share + path
 //   - NFS：nfsSession + file handle + size
 type NASRecoverySource struct {
-	Kind   string // "smb" | "nfs"
-	SMB    *nasSMBRef
-	NFS    *nasNFSRef
+	Kind string // "smb" | "nfs"
+	SMB  *nasSMBRef
+	NFS  *nasNFSRef
 }
 
 type nasSMBRef struct {

@@ -10,8 +10,9 @@ import (
 )
 
 // 端到端正向链测试：
-//   recovery key → stretched key → encrypt fake VMK with AES-CCM
-//   → 用我们的 UnlockVMKWithRecoveryKey 反向解锁，结果必须等于原始 VMK
+//
+//	recovery key → stretched key → encrypt fake VMK with AES-CCM
+//	→ 用我们的 UnlockVMKWithRecoveryKey 反向解锁，结果必须等于原始 VMK
 //
 // 这是 BitLocker 解锁链最关键的"密钥派生 + AES-CCM"组合的端到端正确性证明。
 func TestEndToEnd_VMKUnlock_RoundTrip(t *testing.T) {

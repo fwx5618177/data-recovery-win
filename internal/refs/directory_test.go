@@ -8,8 +8,8 @@ import (
 // buildFullPath 单测：给定 parent 映射构建 path
 func TestBuildFullPath_Linear(t *testing.T) {
 	parentOf := map[uint64]uint64{
-		3: 2, // file3 under dir2
-		2: 1, // dir2 under dir1
+		3: 2,     // file3 under dir2
+		2: 1,     // dir2 under dir1
 		1: 0x600, // dir1 under root
 	}
 	nameByID := map[uint64]string{

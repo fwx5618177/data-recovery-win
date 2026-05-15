@@ -72,8 +72,8 @@ func NewResilientReader(underlying DiskReader, sectorSize int64, maxRetry int) *
 	}
 }
 
-func (r *ResilientReader) Open() error  { return r.underlying.Open() }
-func (r *ResilientReader) Close() error { return r.underlying.Close() }
+func (r *ResilientReader) Open() error          { return r.underlying.Open() }
+func (r *ResilientReader) Close() error         { return r.underlying.Close() }
 func (r *ResilientReader) Size() (int64, error) { return r.underlying.Size() }
 func (r *ResilientReader) SectorSize() int      { return int(r.sectorSize) }
 func (r *ResilientReader) DevicePath() string   { return r.underlying.DevicePath() }

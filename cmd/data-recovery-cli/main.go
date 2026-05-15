@@ -90,9 +90,10 @@ func main() {
 // flagsAfter 把"位置参数 + flag"的简单解析合并：返回 (positional, kvFlags)。
 //
 // 支持三种形式：
-//   --key=value    显式赋值
-//   --key value    下一个 token 作为值（要求 token 不以 -- 开头）
-//   --key          独立 flag → kvFlags[key] = "true"，bool flag 走这条
+//
+//	--key=value    显式赋值
+//	--key value    下一个 token 作为值（要求 token 不以 -- 开头）
+//	--key          独立 flag → kvFlags[key] = "true"，bool flag 走这条
 //
 // 不支持 -k 短 flag（保持简单；CLI 入口本来就只暴露少数命令）。
 func flagsAfter(args []string) ([]string, map[string]string) {
@@ -386,10 +387,10 @@ func cmdUSNList(args []string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(map[string]any{
-		"drivePath":     drive,
-		"deletedCount":  len(events),
-		"deletedFiles":  events,
-		"scannedBytes":  maxBytes,
+		"drivePath":    drive,
+		"deletedCount": len(events),
+		"deletedFiles": events,
+		"scannedBytes": maxBytes,
 	}); err != nil {
 		dieIf(err, "encode")
 	}

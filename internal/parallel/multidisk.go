@@ -29,17 +29,17 @@ type DiskJob struct {
 // r.drivePath / r.result 全 undefined。`Err` 字段是 error 接口（不能序列化），
 // 改用 ErrMessage 字符串 + json:"-" 让上层显式转。
 type JobResult struct {
-	DrivePath string             `json:"drivePath"`
-	Result    *types.ScanResult  `json:"result"`
-	Err       error              `json:"-"`
+	DrivePath string            `json:"drivePath"`
+	Result    *types.ScanResult `json:"result"`
+	Err       error             `json:"-"`
 }
 
 // ScanCallback 多盘并行模式下的 progress + file events
 type ScanCallback struct {
-	OnDiskStart   func(DiskJob)
+	OnDiskStart    func(DiskJob)
 	OnDiskProgress func(DiskJob, types.ScanProgress)
-	OnFileFound   func(DiskJob, *types.RecoveredFile)
-	OnDiskDone    func(JobResult)
+	OnFileFound    func(DiskJob, *types.RecoveredFile)
+	OnDiskDone     func(JobResult)
 }
 
 // ScanMultiple 把 jobs 列表里的盘并行扫，最多 maxParallel 个同时跑（默认 = len(jobs)）。

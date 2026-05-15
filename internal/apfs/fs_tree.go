@@ -19,12 +19,13 @@ import (
 //   - 上层再决定要恢复哪些
 //
 // 当前实现的边界：
-//   ✅ 走完整 B-tree（含分支节点）
-//   ✅ 处理多版本 (xid)：取最大 xid 的记录
-//   ✅ 普通文件 + 目录 + 软链
-//   ❌ snapshot 卷
-//   ❌ extended attributes
-//   ❌ 压缩文件（decmpfs）—— 需要解 LZFSE/LZVN
+//
+//	✅ 走完整 B-tree（含分支节点）
+//	✅ 处理多版本 (xid)：取最大 xid 的记录
+//	✅ 普通文件 + 目录 + 软链
+//	❌ snapshot 卷
+//	❌ extended attributes
+//	❌ 压缩文件（decmpfs）—— 需要解 LZFSE/LZVN
 type FSTreeCrawler struct {
 	reader          disk.DiskReader
 	containerOffset int64
@@ -129,7 +130,7 @@ func (c *FSTreeCrawler) consumeLeafEntry(ent BTreeEntry) {
 
 // FileEntry 是 EnumerateFiles 返回的一行：
 type FileEntry struct {
-	Path    string             // 完整路径（含文件名）
+	Path    string // 完整路径（含文件名）
 	Inode   *InodeRecord
 	IsDir   bool
 	Extents []FileExtentRecord // 已按 LogicalOffset 排序

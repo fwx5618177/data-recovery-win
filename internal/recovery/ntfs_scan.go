@@ -339,17 +339,17 @@ func (e *Engine) scanNTFSPartition(
 
 	// 速度用 1s 滚动窗口而非 since-start，避免开扫前几秒 elapsed 太小→speed 看起来 0
 	var (
-		speedWindowStart    = startTime
-		speedWindowBytes    int64
-		lastEmittedBytes    int64
-		lastEmittedSpeed    int64 // 缓存最近一次有效 speed，让 UI 即便处于"窗口刷新缝隙"也有数显示
+		speedWindowStart = startTime
+		speedWindowBytes int64
+		lastEmittedBytes int64
+		lastEmittedSpeed int64 // 缓存最近一次有效 speed，让 UI 即便处于"窗口刷新缝隙"也有数显示
 	)
 
 	onProgress(types.ScanProgress{
-		Phase:        "ntfs",
-		Percent:      0.5, // 非 0 占位，让前端跳出 indeterminate 模式
-		CurrentFile:  fmt.Sprintf("%s: 扫描 MFT 记录...", partitionLabel),
-		Elapsed:      "0s",
+		Phase:       "ntfs",
+		Percent:     0.5, // 非 0 占位，让前端跳出 indeterminate 模式
+		CurrentFile: fmt.Sprintf("%s: 扫描 MFT 记录...", partitionLabel),
+		Elapsed:     "0s",
 	})
 
 	err := scanner.ScanMFT(ctx, boot, partition.Offset,

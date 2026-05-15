@@ -67,10 +67,10 @@ func TestDecodeName_PointerLoopProtection(t *testing.T) {
 func TestPtrKindOf(t *testing.T) {
 	// 真实 mDNS reply 里 PTR target 总是完整形式 "_<svc>._tcp.local"
 	cases := map[string]ServiceKind{
-		"_smb._tcp.local":        ServiceSMB,
-		"_nfs._tcp.local":        ServiceNFS,
-		"_afpovertcp._tcp.local": ServiceAFP,
-		"_random._tcp.local":     "",
+		"_smb._tcp.local":               ServiceSMB,
+		"_nfs._tcp.local":               ServiceNFS,
+		"_afpovertcp._tcp.local":        ServiceAFP,
+		"_random._tcp.local":            "",
 		"instance-name._smb._tcp.local": ServiceSMB, // SRV 实例名包含服务类型
 	}
 	for in, want := range cases {

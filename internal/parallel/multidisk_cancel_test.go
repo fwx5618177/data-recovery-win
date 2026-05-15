@@ -16,9 +16,9 @@ import (
 // 调 engine.Stop()，scan 收到 reader cancel 信号后毫秒级退出。
 //
 // 测试用 mock job 不去真正扫盘（只验证 ctx cancel → ScanMultiple 在合理时间内返回）：
-// 1. 启动多盘扫描，立刻 cancel
-// 2. ScanMultiple 必须在 2 秒内 wg.Wait() 完成 —— 之前的代码可能要等扫描自然结束
-//    （在真盘上是几分钟到几小时）
+//  1. 启动多盘扫描，立刻 cancel
+//  2. ScanMultiple 必须在 2 秒内 wg.Wait() 完成 —— 之前的代码可能要等扫描自然结束
+//     （在真盘上是几分钟到几小时）
 func TestScanMultiple_CtxCancelDuringScan(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 

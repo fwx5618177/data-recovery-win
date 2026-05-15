@@ -43,9 +43,10 @@ func querySmartNative(ctx context.Context, devicePath string) *SmartHealth {
 
 // parseDiskutilInfo 解 `diskutil info <device>` 的人类可读输出。
 // 关键字段：
-//   Device / Media Name:    Apple SSD AP1024Z
-//   Device Identifier:      disk0
-//   SMART Status:           Verified | Failing | Not Supported | Unknown
+//
+//	Device / Media Name:    Apple SSD AP1024Z
+//	Device Identifier:      disk0
+//	SMART Status:           Verified | Failing | Not Supported | Unknown
 func parseDiskutilInfo(text string) *SmartHealth {
 	h := &SmartHealth{Available: false}
 	for _, line := range strings.Split(text, "\n") {
@@ -86,10 +87,11 @@ func splitDiskutilLine(l string) (string, string) {
 // 等细节。失败不致命，只是 H 里这几个字段保持 0。
 //
 // system_profiler SPSerialATADataType 文本输出里关键行：
-//   Power On Hours:                       12345
-//   Temperature:                          35
-//   Reallocated Sector Count:             0
-//   Pending Sector Count:                 0
+//
+//	Power On Hours:                       12345
+//	Temperature:                          35
+//	Reallocated Sector Count:             0
+//	Pending Sector Count:                 0
 func enrichDarwinSP(ctx context.Context, h *SmartHealth) {
 	out, err := exec.CommandContext(ctx, "/usr/sbin/system_profiler", "SPSerialATADataType").Output()
 	if err != nil || len(out) == 0 {

@@ -42,9 +42,9 @@ func TestRAID0_TwoDisksReadBack(t *testing.T) {
 		ln  int
 	}{
 		{0, 256},
-		{0, 64},     // 单 stripe 内
-		{32, 64},    // 跨 stripe（disk0 → disk1）
-		{100, 80},   // 跨 stripe 中间
+		{0, 64},   // 单 stripe 内
+		{32, 64},  // 跨 stripe（disk0 → disk1）
+		{100, 80}, // 跨 stripe 中间
 		{200, 56},
 	} {
 		got := make([]byte, c.ln)
@@ -83,7 +83,7 @@ func TestRAID1_ReadFromMirror(t *testing.T) {
 func TestRAID5_ThreeDisksLeftSymmetric_RebuildMissing(t *testing.T) {
 	const stripe = int64(64)
 	const rows = int64(4)
-	const dataPerRow = int64(2)            // 3 盘 - 1 校验
+	const dataPerRow = int64(2)               // 3 盘 - 1 校验
 	logicalSize := stripe * rows * dataPerRow // 64 * 4 * 2 = 512
 
 	// 准备原始 logical 数据

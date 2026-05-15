@@ -15,17 +15,19 @@
 // 参考：MS-PATCH + [MS-WIM] 2.10 LZX Data Format
 //
 // **本包实现完整度**：
-//   ✅ bitreader（LSB-first，按 16-bit little-endian 从字节流读）
-//   ✅ Huffman 表构造（canonical huffman from code lengths）
-//   ✅ pretree 解码（huffman tree 自身的 code length 表）
-//   ✅ verbatim block decode（最常见，95% 的 WIM）
-//   ✅ aligned-offset block decode（残余偏移专用 huffman）
-//   ✅ uncompressed block（直接透传）
-//   ✅ 32 KB 滑动窗口 + LZ77 match expansion
-//   ✅ E8 x86 call-preprocessing 反向
+//
+//	✅ bitreader（LSB-first，按 16-bit little-endian 从字节流读）
+//	✅ Huffman 表构造（canonical huffman from code lengths）
+//	✅ pretree 解码（huffman tree 自身的 code length 表）
+//	✅ verbatim block decode（最常见，95% 的 WIM）
+//	✅ aligned-offset block decode（残余偏移专用 huffman）
+//	✅ uncompressed block（直接透传）
+//	✅ 32 KB 滑动窗口 + LZ77 match expansion
+//	✅ E8 x86 call-preprocessing 反向
 //
 // 未做 / 未测：
-//   ❌ 跨 chunk 的 reset 边界（WIM 每 32KB chunk 重置 huffman tree）— 我们单 chunk 内完整
+//
+//	❌ 跨 chunk 的 reset 边界（WIM 每 32KB chunk 重置 huffman tree）— 我们单 chunk 内完整
 package lzx
 
 import "fmt"

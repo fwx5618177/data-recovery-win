@@ -17,8 +17,8 @@ import (
 // NFSDirEntryReport 一条 NFS 扫描结果（和 SMBDirEntry 对齐）
 type NFSDirEntryReport struct {
 	Host     string
-	Export   string    // 比如 "/volume1/photos"
-	Path     string    // export 内的相对路径（"/" 分隔）
+	Export   string // 比如 "/volume1/photos"
+	Path     string // export 内的相对路径（"/" 分隔）
 	Name     string
 	Size     int64
 	IsDir    bool
@@ -29,14 +29,14 @@ type NFSDirEntryReport struct {
 
 // NFSScanConfig NFS 扫描配置
 type NFSScanConfig struct {
-	Host     string
-	NFSPort  uint32 // 默认 2049；为 0 时尝试 portmap 查
+	Host      string
+	NFSPort   uint32 // 默认 2049；为 0 时尝试 portmap 查
 	MountPort uint32 // 默认 0 = portmap 查动态端口
-	UID      uint32 // AUTH_UNIX 的 UID；0 = root（许多 NAS 会 squash 成 nobody）
-	GID      uint32
-	Exports  []string // 过滤：只扫这些 export 路径；为空扫全部
-	MaxDepth int      // 默认 50
-	MaxFiles int      // 默认 1_000_000
+	UID       uint32 // AUTH_UNIX 的 UID；0 = root（许多 NAS 会 squash 成 nobody）
+	GID       uint32
+	Exports   []string // 过滤：只扫这些 export 路径；为空扫全部
+	MaxDepth  int      // 默认 50
+	MaxFiles  int      // 默认 1_000_000
 }
 
 // NFSSession 持有 mountd 和 nfsd 两个连接 + 每个已挂载 export 的 root fh。
@@ -173,8 +173,8 @@ func (s *NFSSession) WalkExport(
 		var cookieverf []byte
 		for {
 			entries, eof, newCV, err := s.nfs.Readdirplus(ctx, top.fh, cookie, cookieverf,
-				8192,   // dircount（仅索引大小的启发）
-				65535,  // maxcount（整个应答上限；32-64KB 是业界 sweet spot）
+				8192,  // dircount（仅索引大小的启发）
+				65535, // maxcount（整个应答上限；32-64KB 是业界 sweet spot）
 			)
 			if err != nil {
 				// 权限拒绝 / stale handle：跳过这个子目录而不是整体失败

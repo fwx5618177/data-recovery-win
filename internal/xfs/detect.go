@@ -1,10 +1,11 @@
 // Package xfs 检测 XFS 卷 — Red Hat / CentOS / RHEL 默认。
 //
 // XFS superblock 在卷起点 (offset 0)：
-//   +0x00 magic "XFSB" (0x58465342)
-//   +0x04 blocksize  (uint32, 通常 4096)
-//   +0x08 dblocks    (uint64, 总块数)
-//   +0x20 fname[12]  (UTF-8 NUL-terminated label)
+//
+//	+0x00 magic "XFSB" (0x58465342)
+//	+0x04 blocksize  (uint32, 通常 4096)
+//	+0x08 dblocks    (uint64, 总块数)
+//	+0x20 fname[12]  (UTF-8 NUL-terminated label)
 //
 // **本包仅做检测**：完整 XFS B+tree / AG (allocation group) 解析另外几千行工作量。
 package xfs

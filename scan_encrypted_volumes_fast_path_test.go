@@ -76,8 +76,9 @@ const fakeTwoTB = int64(2) * 1024 * 1024 * 1024 * 1024 // 2 TB
 // 慢一分钟用户就会以为程序卡死/挂了。
 //
 // 历史 FAIL 案例：
-//   v2.8.25- 之前：refs.FindVolumes 无脑全盘扫 → ReadAt 几十万次 → 11 分钟，FAIL
-//   v2.8.26+ 起：所有 scanner 都默认 fast path → < 50 次 ReadAt → 毫秒级，PASS
+//
+//	v2.8.25- 之前：refs.FindVolumes 无脑全盘扫 → ReadAt 几十万次 → 11 分钟，FAIL
+//	v2.8.26+ 起：所有 scanner 都默认 fast path → < 50 次 ReadAt → 毫秒级，PASS
 //
 // 任何新引入"默认就全盘扫"的 scanner（比如 future ZFS / NTFS volume-discovery /
 // 等等被加进 ScanEncryptedVolumes 的）会让这个测试立刻 FAIL，保证 bug 不复活。

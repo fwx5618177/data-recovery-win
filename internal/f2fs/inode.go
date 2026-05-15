@@ -143,17 +143,17 @@ func ParseExtendedSuperblock(reader disk.DiskReader, volStart int64) (*ExtendedS
 
 // Inode F2FS 文件 inode（简化版，仅含枚举所需字段）
 type Inode struct {
-	Ino         uint32
-	Mode        uint16 // file type + permissions
-	Size        uint64
-	Blocks      uint64  // block 数（而非 512-byte sectors）
-	FileName    string  // 需要通过父目录 dentry 解析得到
+	Ino          uint32
+	Mode         uint16 // file type + permissions
+	Size         uint64
+	Blocks       uint64   // block 数（而非 512-byte sectors）
+	FileName     string   // 需要通过父目录 dentry 解析得到
 	DirectBlocks []uint32 // direct data block 地址列表（前 923 个）
-	IsDir       bool
-	IsSymlink   bool
-	Encrypted   bool   // fscrypt 标记
-	Compressed  bool   // F2FS_INODE_COMPRESSED
-	ModTime     int64  // Unix epoch seconds
+	IsDir        bool
+	IsSymlink    bool
+	Encrypted    bool  // fscrypt 标记
+	Compressed   bool  // F2FS_INODE_COMPRESSED
+	ModTime      int64 // Unix epoch seconds
 }
 
 // parseInodeBlock 从一个 4K inode block 解出 Inode 元数据

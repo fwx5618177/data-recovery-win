@@ -38,36 +38,36 @@ import (
 
 // FSTreeFile 一个从 FS tree 枚举出的文件
 type FSTreeFile struct {
-	InoID      uint64
-	ParentID   uint64 // 0 = 根 (objectid 256 是 FS root inode)
-	Name       string
-	FullPath   string // 完整路径（如 "/Documents/photo.jpg"），EnumerateFSTreeFiles 末尾回溯填充
-	Size       uint64
-	IsDir      bool
-	IsSymlink  bool
-	ModTime    int64    // Unix epoch seconds
+	InoID     uint64
+	ParentID  uint64 // 0 = 根 (objectid 256 是 FS root inode)
+	Name      string
+	FullPath  string // 完整路径（如 "/Documents/photo.jpg"），EnumerateFSTreeFiles 末尾回溯填充
+	Size      uint64
+	IsDir     bool
+	IsSymlink bool
+	ModTime   int64 // Unix epoch seconds
 	// Data extents (可能多段)；每段记录 logical 地址 + 长度
-	Extents    []FSExtent
-	Compression uint8   // 0=none, 1=zlib, 2=LZO, 3=ZSTD
+	Extents     []FSExtent
+	Compression uint8 // 0=none, 1=zlib, 2=LZO, 3=ZSTD
 }
 
 // FSExtent 文件的一段 data extent
 type FSExtent struct {
-	FileOffset    uint64 // 在文件内 offset
-	Length        uint64 // 该 extent 在文件里覆盖的解压后字节数 (num_bytes)
-	DiskLogical   uint64 // Btrfs logical 地址（需 chunk tree 翻译）
-	DiskNumBytes  uint64 // 该 extent 在盘上占的字节数（压缩后大小，未压缩时 = Length）
-	ExtentOffset  uint64 // 在 extent 里的偏移（用于稀疏 / 反向 reflink）
-	IsInline      bool
-	InlineData    []byte // IsInline=true 时 inline content
-	IsPrealloc    bool   // preallocated（未写入实际数据）
-	Compression   uint8  // 0=none, 1=zlib, 2=LZO, 3=ZSTD（per-extent；同一文件可能混用）
+	FileOffset   uint64 // 在文件内 offset
+	Length       uint64 // 该 extent 在文件里覆盖的解压后字节数 (num_bytes)
+	DiskLogical  uint64 // Btrfs logical 地址（需 chunk tree 翻译）
+	DiskNumBytes uint64 // 该 extent 在盘上占的字节数（压缩后大小，未压缩时 = Length）
+	ExtentOffset uint64 // 在 extent 里的偏移（用于稀疏 / 反向 reflink）
+	IsInline     bool
+	InlineData   []byte // IsInline=true 时 inline content
+	IsPrealloc   bool   // preallocated（未写入实际数据）
+	Compression  uint8  // 0=none, 1=zlib, 2=LZO, 3=ZSTD（per-extent；同一文件可能混用）
 }
 
 // ChunkCatalog chunk tree 完整遍历后得到的全量 logical→physical 映射
 // 优先查 catalog，cache miss 时 fallback 到 sysChunks
 type ChunkCatalog struct {
-	mappings []ChunkMapping // 按 LogicalStart 排序
+	mappings    []ChunkMapping // 按 LogicalStart 排序
 	sysFallback []ChunkMapping
 }
 
@@ -261,10 +261,10 @@ func (w *treeWalker) walkNode(logical uint64, visit func(LeafItem, []byte) error
 // EnumerateFSTreeFiles 完整枚举一个 Btrfs 卷的所有 subvolume 下的文件。
 //
 // 流程：
-//   1. 用 sysChunks 读 chunk tree → 建完整 ChunkCatalog
-//   2. 读 root tree → 找所有 FS_TREE root（objectid 5 + ROOT_ITEM keys）
-//   3. 对每个 FS tree root，walk → 收集 INODE_ITEM + INODE_REF + EXTENT_DATA
-//   4. 合并到 FSTreeFile
+//  1. 用 sysChunks 读 chunk tree → 建完整 ChunkCatalog
+//  2. 读 root tree → 找所有 FS_TREE root（objectid 5 + ROOT_ITEM keys）
+//  3. 对每个 FS tree root，walk → 收集 INODE_ITEM + INODE_REF + EXTENT_DATA
+//  4. 合并到 FSTreeFile
 func EnumerateFSTreeFiles(reader disk.DiskReader, volStart int64, sb *ExtendedSuperblock) ([]*FSTreeFile, error) {
 	// 1. chunk catalog
 	catalog, err := NewChunkCatalog(reader, volStart, sb)
@@ -303,9 +303,9 @@ func EnumerateFSTreeFiles(reader disk.DiskReader, volStart int64, sb *ExtendedSu
 	}
 
 	// 3. 遍历每个 FS tree
-	files := map[uint64]*FSTreeFile{}      // inoID → file
-	parentOf := map[uint64]uint64{}         // inoID → parent inoID
-	nameOf := map[uint64]string{}           // inoID → name（从 INODE_REF）
+	files := map[uint64]*FSTreeFile{} // inoID → file
+	parentOf := map[uint64]uint64{}   // inoID → parent inoID
+	nameOf := map[uint64]string{}     // inoID → name（从 INODE_REF）
 	extentsOf := map[uint64][]FSExtent{}
 
 	for _, fsRoot := range fsTreeRoots {
@@ -441,9 +441,10 @@ func parseInodeRefName(v []byte) string {
 }
 
 // parseDirItemNameAndTarget DIR_ITEM / DIR_INDEX value:
-//   btrfs_dir_item header (30 字节):
-//     location (key 17) + transid (8) + data_len (2) + name_len (2) + type (1)
-//   然后是 name 字节 + data 字节
+//
+//	btrfs_dir_item header (30 字节):
+//	  location (key 17) + transid (8) + data_len (2) + name_len (2) + type (1)
+//	然后是 name 字节 + data 字节
 func parseDirItemNameAndTarget(v []byte) (uint64, string) {
 	if len(v) < 30 {
 		return 0, ""
@@ -457,9 +458,10 @@ func parseDirItemNameAndTarget(v []byte) (uint64, string) {
 }
 
 // parseExtentData EXTENT_DATA value (struct btrfs_file_extent_item)
-//   generation:8 + ram_bytes:8 + compression:1 + encryption:1 + encoding:2 + type:1
-//   type == 0 (INLINE): 之后是 inline data (到 item 末尾)
-//   type == 1/2 (REGULAR/PREALLOC): disk_bytenr:8 + disk_num_bytes:8 + offset:8 + num_bytes:8
+//
+//	generation:8 + ram_bytes:8 + compression:1 + encryption:1 + encoding:2 + type:1
+//	type == 0 (INLINE): 之后是 inline data (到 item 末尾)
+//	type == 1/2 (REGULAR/PREALLOC): disk_bytenr:8 + disk_num_bytes:8 + offset:8 + num_bytes:8
 func parseExtentData(fileOffset uint64, v []byte) *FSExtent {
 	if len(v) < 21 {
 		return nil

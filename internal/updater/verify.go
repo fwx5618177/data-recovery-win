@@ -30,9 +30,10 @@ import (
 // VerifySHA256SUMSSignature 用 Ed25519 公钥验证 SHA256SUMS.txt 签名。
 //
 // 参数:
-//   sumsContent: SHA256SUMS.txt 的原字节内容
-//   signature:   SHA256SUMS.txt.sig 的原字节（Ed25519 raw 64-byte signature）
-//   publicKey:   Ed25519 公钥（PEM 编码或 raw 32 字节）
+//
+//	sumsContent: SHA256SUMS.txt 的原字节内容
+//	signature:   SHA256SUMS.txt.sig 的原字节（Ed25519 raw 64-byte signature）
+//	publicKey:   Ed25519 公钥（PEM 编码或 raw 32 字节）
 //
 // 返回: 签名合法 nil；不合法 error。
 func VerifySHA256SUMSSignature(sumsContent, signature, publicKey []byte) error {

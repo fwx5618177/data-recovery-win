@@ -58,9 +58,9 @@ type Partition struct {
 // FindPartitions 扫描磁盘查找 NTFS 分区（包括已被删除的旧分区）
 //
 // 搜索策略：**三条通路都跑**，因为被盗笔记本重装 Windows 后常见的情形是：
-//   1. 分区表是新装 Windows 创建的 → MBR/GPT 里只有当前系统分区
-//   2. 旧系统的 NTFS 分区引导扇区**仍然在磁盘上**（只是分区表条目没了）
-//   3. 暴力扫能找到这些旧 NTFS 残骸，里面的 MFT 仍可能指向原主人的用户数据
+//  1. 分区表是新装 Windows 创建的 → MBR/GPT 里只有当前系统分区
+//  2. 旧系统的 NTFS 分区引导扇区**仍然在磁盘上**（只是分区表条目没了）
+//  3. 暴力扫能找到这些旧 NTFS 残骸，里面的 MFT 仍可能指向原主人的用户数据
 //
 // R-Studio / DMDE 的 "deleted partition scan" 就是这个思路；dedupePartitions 负责把
 // MBR/GPT 已登记的分区去掉重复，留下孤立的旧 NTFS 残骸。

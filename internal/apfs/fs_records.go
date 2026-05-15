@@ -13,19 +13,19 @@ import (
 //	  bits[0..59]  = object ID
 //	  bits[60..63] = record type
 const (
-	JTypeAny         uint8 = 0
+	JTypeAny          uint8 = 0
 	JTypeSnapMetadata uint8 = 1
-	JTypeExtent      uint8 = 2
-	JTypeInode       uint8 = 3
-	JTypeXAttr       uint8 = 4
-	JTypeSiblingLink uint8 = 5
-	JTypeDStreamID   uint8 = 6
-	JTypeCryptoState uint8 = 7
-	JTypeFileExtent  uint8 = 8
-	JTypeDirRec      uint8 = 9
-	JTypeDirStats    uint8 = 10
-	JTypeSnapName    uint8 = 11
-	JTypeSiblingMap  uint8 = 12
+	JTypeExtent       uint8 = 2
+	JTypeInode        uint8 = 3
+	JTypeXAttr        uint8 = 4
+	JTypeSiblingLink  uint8 = 5
+	JTypeDStreamID    uint8 = 6
+	JTypeCryptoState  uint8 = 7
+	JTypeFileExtent   uint8 = 8
+	JTypeDirRec       uint8 = 9
+	JTypeDirStats     uint8 = 10
+	JTypeSnapName     uint8 = 11
+	JTypeSiblingMap   uint8 = 12
 )
 
 // JKey 是所有 fs-tree key 的公共头。
@@ -51,15 +51,15 @@ func ParseJKey(b []byte) (JKey, error) {
 // 完整字段含 owner / group / mode / nlink / 各种时间戳 / extended fields；
 // 我们只取最常用的几个供文件枚举用。
 type InodeRecord struct {
-	ObjID         uint64
-	ParentID      uint64
-	PrivateID     uint64 // 文件数据流的 obj_id（用来查 file extent records）
-	CreateTime    uint64 // ns 单位
-	ModTime       uint64
-	ChangeTime    uint64
-	AccessTime    uint64
-	Mode          uint16 // POSIX mode；高位含文件类型
-	NumChildren   uint32 // 目录有效；普通文件 = 0
+	ObjID       uint64
+	ParentID    uint64
+	PrivateID   uint64 // 文件数据流的 obj_id（用来查 file extent records）
+	CreateTime  uint64 // ns 单位
+	ModTime     uint64
+	ChangeTime  uint64
+	AccessTime  uint64
+	Mode        uint16 // POSIX mode；高位含文件类型
+	NumChildren uint32 // 目录有效；普通文件 = 0
 }
 
 // ParseInodeRecord 在 leaf entry 的 (key, val) 上把 inode 信息抽出来。
@@ -73,28 +73,28 @@ func ParseInodeRecord(key, val []byte) *InodeRecord {
 		return nil
 	}
 	return &InodeRecord{
-		ObjID:       jk.ObjID,
-		ParentID:    binary.LittleEndian.Uint64(val[0:8]),
-		PrivateID:   binary.LittleEndian.Uint64(val[8:16]),
-		CreateTime:  binary.LittleEndian.Uint64(val[16:24]),
-		ModTime:     binary.LittleEndian.Uint64(val[24:32]),
-		ChangeTime:  binary.LittleEndian.Uint64(val[32:40]),
-		AccessTime:  binary.LittleEndian.Uint64(val[40:48]),
+		ObjID:      jk.ObjID,
+		ParentID:   binary.LittleEndian.Uint64(val[0:8]),
+		PrivateID:  binary.LittleEndian.Uint64(val[8:16]),
+		CreateTime: binary.LittleEndian.Uint64(val[16:24]),
+		ModTime:    binary.LittleEndian.Uint64(val[24:32]),
+		ChangeTime: binary.LittleEndian.Uint64(val[32:40]),
+		AccessTime: binary.LittleEndian.Uint64(val[40:48]),
 		// 48..56  internal_flags
 		// 56..60  nchildren | nlink
 		NumChildren: binary.LittleEndian.Uint32(val[56:60]),
 		// 60..76  default_protection_class / write_generation / bsd_flags / owner / group
-		Mode:        binary.LittleEndian.Uint16(val[88:90]),
+		Mode: binary.LittleEndian.Uint16(val[88:90]),
 	}
 }
 
 // DirEntry 是 j_drec_val_t 解析结果（目录项）。
 type DirEntry struct {
-	ParentID uint64 // = key 中的 obj_id
-	Name     string
-	FileID   uint64 // 子节点的 obj_id（即 inode 的 ObjID）
+	ParentID  uint64 // = key 中的 obj_id
+	Name      string
+	FileID    uint64 // 子节点的 obj_id（即 inode 的 ObjID）
 	DateAdded uint64 // ns
-	Type     uint16 // DT_REG / DT_DIR / ...
+	Type      uint16 // DT_REG / DT_DIR / ...
 }
 
 // ParseDirEntry 解析目录项 record。
@@ -103,9 +103,10 @@ type DirEntry struct {
 // 注意：APFS 还有 hashed dir record (j_drec_hashed_key_t) 多 4 字节 hash —— 这里两种都尽量识别。
 //
 // 目录项 value（j_drec_val_t）：
-//   uint64 file_id
-//   uint64 date_added
-//   uint16 flags  (低 4 bit = file type / DT_*)
+//
+//	uint64 file_id
+//	uint64 date_added
+//	uint16 flags  (低 4 bit = file type / DT_*)
 func ParseDirEntry(key, val []byte) *DirEntry {
 	jk, err := ParseJKey(key)
 	if err != nil || jk.Type != JTypeDirRec {
@@ -144,9 +145,10 @@ func ParseDirEntry(key, val []byte) *DirEntry {
 // FileExtentRecord 是 file_extent record（描述文件数据如何映射到容器物理块）。
 //
 // j_file_extent_val_t:
-//   uint64 len_and_flags  ( low 56 bits = byte length, high 8 bits = flags )
-//   uint64 phys_block_num
-//   uint64 crypto_id
+//
+//	uint64 len_and_flags  ( low 56 bits = byte length, high 8 bits = flags )
+//	uint64 phys_block_num
+//	uint64 crypto_id
 type FileExtentRecord struct {
 	OwnerObjID    uint64
 	LogicalOffset uint64 // 文件内字节偏移（来自 key）
@@ -157,7 +159,8 @@ type FileExtentRecord struct {
 // ParseFileExtentRecord 解 j_file_extent_*。
 //
 // j_file_extent_key_t:
-//   j_key (8) + logical_addr (uint64 LE)
+//
+//	j_key (8) + logical_addr (uint64 LE)
 func ParseFileExtentRecord(key, val []byte) *FileExtentRecord {
 	jk, err := ParseJKey(key)
 	if err != nil || jk.Type != JTypeFileExtent {

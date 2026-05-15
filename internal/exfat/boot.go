@@ -7,13 +7,14 @@
 //   - exFAT 规范公开、结构简洁，比 FAT32 更现代（64 位 cluster / 元数据更规整）
 //
 // 本实现的边界（诚实列出，避免误导）：
-//   ✅ 读 boot sector、根目录、子目录（含已删除条目）
-//   ✅ 按 UTF-16 拼接多段 FileName 条目得到完整文件名
-//   ✅ 连续存储文件（NoFatChain=1）的恢复
-//   ⚠️ 碎片文件（NoFatChain=0，需要走 FAT 链）仅识别，不恢复 —— 建议用 R-Studio
-//   ⚠️ Allocation Bitmap 没做；已删除簇是否被覆写靠"从 cluster 读到什么就是什么"
-//   ⚠️ UP-case table 没做；文件名大小写匹配不区分（但显示原样保留）
-//   ❌ 文件系统检查 / 修复 / VBR 备份回滚（非本项目范围）
+//
+//	✅ 读 boot sector、根目录、子目录（含已删除条目）
+//	✅ 按 UTF-16 拼接多段 FileName 条目得到完整文件名
+//	✅ 连续存储文件（NoFatChain=1）的恢复
+//	⚠️ 碎片文件（NoFatChain=0，需要走 FAT 链）仅识别，不恢复 —— 建议用 R-Studio
+//	⚠️ Allocation Bitmap 没做；已删除簇是否被覆写靠"从 cluster 读到什么就是什么"
+//	⚠️ UP-case table 没做；文件名大小写匹配不区分（但显示原样保留）
+//	❌ 文件系统检查 / 修复 / VBR 备份回滚（非本项目范围）
 package exfat
 
 import (
@@ -33,19 +34,19 @@ const exFATSignature = "EXFAT   "
 // File System Specification）保持一致，便于查文档。
 type BootSector struct {
 	// 从磁盘直接读出的字段
-	PartitionOffset              int64  // 分区起始的绝对扇区号（512 字节扇区计）
-	VolumeLength                 int64  // 分区总扇区数
-	FatOffset                    uint32 // FAT 起始扇区（相对分区起点）
-	FatLength                    uint32 // 每个 FAT 的扇区数
-	ClusterHeapOffset            uint32 // 簇堆起始扇区（相对分区起点）
-	ClusterCount                 uint32 // 簇总数
-	FirstClusterOfRootDirectory  uint32 // 根目录起始簇号（通常 ≥ 2）
-	BytesPerSectorShift          uint8  // 2^N 字节/扇区，N 在 [9, 12]（512-4096）
-	SectorsPerClusterShift       uint8  // 2^N 扇区/簇
-	NumberOfFats                 uint8  // FAT 数（1 或 2）
+	PartitionOffset             int64  // 分区起始的绝对扇区号（512 字节扇区计）
+	VolumeLength                int64  // 分区总扇区数
+	FatOffset                   uint32 // FAT 起始扇区（相对分区起点）
+	FatLength                   uint32 // 每个 FAT 的扇区数
+	ClusterHeapOffset           uint32 // 簇堆起始扇区（相对分区起点）
+	ClusterCount                uint32 // 簇总数
+	FirstClusterOfRootDirectory uint32 // 根目录起始簇号（通常 ≥ 2）
+	BytesPerSectorShift         uint8  // 2^N 字节/扇区，N 在 [9, 12]（512-4096）
+	SectorsPerClusterShift      uint8  // 2^N 扇区/簇
+	NumberOfFats                uint8  // FAT 数（1 或 2）
 
 	// 计算字段
-	BytesPerSector   int64 // = 1 << BytesPerSectorShift
+	BytesPerSector    int64 // = 1 << BytesPerSectorShift
 	SectorsPerCluster int64 // = 1 << SectorsPerClusterShift
 	ClusterSize       int64 // = BytesPerSector * SectorsPerCluster
 }

@@ -34,11 +34,12 @@ import (
 //	D_sym ∈ [0, 64) → D = d_base_value[sym] + pull(d_extra_bits[sym])
 //
 // **早期 bug**：L sym 16-19 / M sym 16-19 的 base/extra 与 Apple 不符：
-//   L sym 19 早期：base 30, extra 5 → 范围 30..61（错）
-//                 Apple：base 60, extra 8 → 范围 60..315
-//   M sym 19 早期：base 30, extra 8 → 范围 30..285（错）
-//                 Apple：base 312, extra 11 → 范围 312..2359  ← 关键！
-//                 9000 字节高度重复输入用 6 个长 match 才合理（每 ~1500 byte）
+//
+//	L sym 19 早期：base 30, extra 5 → 范围 30..61（错）
+//	              Apple：base 60, extra 8 → 范围 60..315
+//	M sym 19 早期：base 30, extra 8 → 范围 30..285（错）
+//	              Apple：base 312, extra 11 → 范围 312..2359  ← 关键！
+//	              9000 字节高度重复输入用 6 个长 match 才合理（每 ~1500 byte）
 var lzfseLExtraBits = [20]uint8{
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 8,
 }
@@ -196,13 +197,13 @@ func decodeLiterals(block []byte, payloadEnd int, padBits int, initialStates [4]
 //	    emit M bytes back-ref at distance D
 //
 // 关键修正（vs 旧实现）：
-//   1. 正向迭代 i = 0..nMatches-1（旧版反向 → match 顺序颠倒，output 错位）
-//   2. 三元组 pull 顺序：(L state + L extra) (M state + M extra) (D state + D extra)
-//      —— Apple 把每对 state+extra 放一个 fse_value_decode 调用里。我们拆成两个 pull
-//      但顺序必须匹配。旧版 L state → M state → D state → L extra → M extra → D extra
-//      错乱了 bit 流。
-//   3. D=0 → 复用 prev D（rep-distance optimization）。Apple 在编码端把高频出现的
-//      "重复上一次距离" 编码为单 symbol D=0 节省 bits。
+//  1. 正向迭代 i = 0..nMatches-1（旧版反向 → match 顺序颠倒，output 错位）
+//  2. 三元组 pull 顺序：(L state + L extra) (M state + M extra) (D state + D extra)
+//     —— Apple 把每对 state+extra 放一个 fse_value_decode 调用里。我们拆成两个 pull
+//     但顺序必须匹配。旧版 L state → M state → D state → L extra → M extra → D extra
+//     错乱了 bit 流。
+//  3. D=0 → 复用 prev D（rep-distance optimization）。Apple 在编码端把高频出现的
+//     "重复上一次距离" 编码为单 symbol D=0 节省 bits。
 func decodeLMD(block []byte, payloadEnd int, padBits int,
 	lStateIn, mStateIn, dStateIn uint16,
 	lTable, mTable, dTable []fseEntry,

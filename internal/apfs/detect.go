@@ -1,11 +1,12 @@
 // Package apfs 实现 APFS（Apple File System）容器层的只读检测和卷元数据列举。
 //
 // **当前实现的边界**：
-//   ✅ 检测 APFS 容器（NXSB 签名 + 容器超块字段）
-//   ✅ 列出容器内所有卷的名字、UUID、加密标志、文件数（来自卷超块）
-//   ❌ B-tree 遍历（object map / 文件系统树）—— 文件枚举 / 内容读取需要这个，工作量 3-6 周
-//   ❌ APFS 加密卷解密（FileVault）—— 需要先做 B-tree，且涉及 KeyBag / 用户密码派生
-//   ❌ APFS 快照 / 克隆 / Compression（LZFSE / LZVN / LZBitmap）
+//
+//	✅ 检测 APFS 容器（NXSB 签名 + 容器超块字段）
+//	✅ 列出容器内所有卷的名字、UUID、加密标志、文件数（来自卷超块）
+//	❌ B-tree 遍历（object map / 文件系统树）—— 文件枚举 / 内容读取需要这个，工作量 3-6 周
+//	❌ APFS 加密卷解密（FileVault）—— 需要先做 B-tree，且涉及 KeyBag / 用户密码派生
+//	❌ APFS 快照 / 克隆 / Compression（LZFSE / LZVN / LZBitmap）
 //
 // 合理定位：让用户**看见** macOS 盘上的 APFS 卷与加密状态。后续要读文件再做 B-tree。
 //
@@ -54,13 +55,13 @@ const (
 
 // Container 是 APFS 容器（一个磁盘上可以有多个 APFS 容器，每个容器内多个卷）
 type Container struct {
-	Offset       int64    // 容器在磁盘上的起始字节偏移
-	BlockSize    uint32   // 每块字节数（通常 4096）
-	BlockCount   uint64   // 容器总块数
-	UUID         [16]byte // 容器 UUID
-	OmapOID      uint64   // nx_omap_oid（容器级 object map 物理块号）
-	KeyLocker    PRange   // nx_keylocker — 容器级 keybag 在物理盘上的连续区间
-	Volumes      []Volume // 容器内的卷
+	Offset     int64    // 容器在磁盘上的起始字节偏移
+	BlockSize  uint32   // 每块字节数（通常 4096）
+	BlockCount uint64   // 容器总块数
+	UUID       [16]byte // 容器 UUID
+	OmapOID    uint64   // nx_omap_oid（容器级 object map 物理块号）
+	KeyLocker  PRange   // nx_keylocker — 容器级 keybag 在物理盘上的连续区间
+	Volumes    []Volume // 容器内的卷
 }
 
 // PRange 是 APFS 里的"物理范围"：起始物理块号 + 块数。
@@ -77,38 +78,38 @@ func (p PRange) IsZero() bool {
 
 // Volume 是 APFS 容器里的一个卷
 type Volume struct {
-	Index       int      // 在容器中的顺序号
-	Name        string   // 卷名（如 "Macintosh HD"）
+	Index       int    // 在容器中的顺序号
+	Name        string // 卷名（如 "Macintosh HD"）
 	UUID        [16]byte
-	Role        uint16   // 卷角色（系统 / 数据 / 预启动 / 恢复 等）
-	IsEncrypted bool     // FileVault 加密标志
-	Capacity    uint64   // 该卷已用块数 × 块大小
+	Role        uint16 // 卷角色（系统 / 数据 / 预启动 / 恢复 等）
+	IsEncrypted bool   // FileVault 加密标志
+	Capacity    uint64 // 该卷已用块数 × 块大小
 	FileCount   uint64
 	FolderCount uint64
-	OmapOID     uint64   // apfs_omap_oid（卷级 object map）
-	RootTreeOID uint64   // apfs_root_tree_oid（fs root B-tree 的虚拟 OID）
-	KeybagLoc   PRange   // apfs_keybag_loc — 卷级 keybag 物理位置（FileVault 卷才非零）
+	OmapOID     uint64 // apfs_omap_oid（卷级 object map）
+	RootTreeOID uint64 // apfs_root_tree_oid（fs root B-tree 的虚拟 OID）
+	KeybagLoc   PRange // apfs_keybag_loc — 卷级 keybag 物理位置（FileVault 卷才非零）
 }
 
 // 容器超块字段偏移（基于 Apple File System Reference）
 //
-//   nx_o (obj_phys):     offsets 0..31  (cksum/oid/xid/type/subtype)
-//   nx_magic:            32..35
-//   nx_block_size:       36..39
-//   nx_block_count:      40..47
-//   nx_features:         48..55
-//   nx_readonly_compat_features: 56..63
-//   nx_incompat_features: 64..71
-//   nx_uuid:             72..87
-//   nx_next_oid:         88..95
-//   nx_next_xid:         96..103
-//   nx_xp_desc_blocks:   104..107  ...
-//   nx_omap_oid:         160..167
-//   nx_spaceman_oid:     168..175
-//   nx_reaper_oid:       176..183
-//   nx_test_type:        184..187
-//   nx_max_file_systems: 188..191
-//   nx_fs_oid (uint64[100]): 192..991
+//	nx_o (obj_phys):     offsets 0..31  (cksum/oid/xid/type/subtype)
+//	nx_magic:            32..35
+//	nx_block_size:       36..39
+//	nx_block_count:      40..47
+//	nx_features:         48..55
+//	nx_readonly_compat_features: 56..63
+//	nx_incompat_features: 64..71
+//	nx_uuid:             72..87
+//	nx_next_oid:         88..95
+//	nx_next_xid:         96..103
+//	nx_xp_desc_blocks:   104..107  ...
+//	nx_omap_oid:         160..167
+//	nx_spaceman_oid:     168..175
+//	nx_reaper_oid:       176..183
+//	nx_test_type:        184..187
+//	nx_max_file_systems: 188..191
+//	nx_fs_oid (uint64[100]): 192..991
 //
 // 我们只取到 nx_fs_oid 那一段就够列出所有卷的入口对象 ID。
 const (
@@ -122,7 +123,7 @@ const (
 	// nx_keylocker (prange_t = 16 bytes) 在 nx_test_oid (8) + nx_test_type (8) 之后；
 	// Apple File System Reference 给出的字段顺序里在 nx_blocked_out_prange 后第 16+24*8 字节。
 	// 实际经验偏移：0xC8 (200) — 这是社区公认的 FileVault keybag 位置。
-	nxKeylockerOffset  = 0xC8
+	nxKeylockerOffset = 0xC8
 )
 
 // Detect 在给定 offset 处尝试识别 APFS 容器。
@@ -297,8 +298,8 @@ func NewScanner(reader disk.DiskReader) *Scanner {
 // FindContainers 定位 APFS 容器。
 //
 // 策略（v2.8.11 修订，对齐 v2.8.8 的 exfat/fat/ntfs 行为）：
-//   1. 偏移 0 试 Detect（fast path）
-//   2. 全盘按 4MB 块扫 NXSB 签名 —— **仅 opts.BruteForce=true 启用**
+//  1. 偏移 0 试 Detect（fast path）
+//  2. 全盘按 4MB 块扫 NXSB 签名 —— **仅 opts.BruteForce=true 启用**
 //
 // **关键修复**：之前全盘扫永远跑，导致 128GB U 盘 APFS 阶段卡几小时（即便盘上根本
 // 没有 APFS）。现在跟其他 FS scanner 一致 opt-in。

@@ -30,10 +30,10 @@ func buildFAT32Boot() []byte {
 func buildFAT16Boot() []byte {
 	bs := make([]byte, 512)
 	binary.LittleEndian.PutUint16(bs[11:13], 512) // BytesPerSector
-	bs[13] = 1                                     // SectorsPerCluster=1
-	binary.LittleEndian.PutUint16(bs[14:16], 1)    // ReservedSectors=1
-	bs[16] = 2                                     // NumFATs=2
-	binary.LittleEndian.PutUint16(bs[17:19], 512)  // RootEntryCount=512（非 FAT32）
+	bs[13] = 1                                    // SectorsPerCluster=1
+	binary.LittleEndian.PutUint16(bs[14:16], 1)   // ReservedSectors=1
+	bs[16] = 2                                    // NumFATs=2
+	binary.LittleEndian.PutUint16(bs[17:19], 512) // RootEntryCount=512（非 FAT32）
 	// TotalSectors: 用 16-bit 字段，填 10000
 	binary.LittleEndian.PutUint16(bs[19:21], 10000)
 	binary.LittleEndian.PutUint16(bs[22:24], 20) // FATSize16=20
@@ -189,11 +189,11 @@ func TestParseFATDate(t *testing.T) {
 func TestParseDirEntries_DeletedFile(t *testing.T) {
 	buf := make([]byte, 32)
 	buf[0] = deletedMarker
-	copy(buf[1:11], []byte("ELETETXT")) // 8 bytes name (pretend-delete of "DELETE.TXT")
+	copy(buf[1:11], []byte("ELETETXT"))             // 8 bytes name (pretend-delete of "DELETE.TXT")
 	binary.LittleEndian.PutUint32(buf[28:32], 1234) // FileSize
 	buf[20] = 0                                     // cluster high = 0
 	buf[21] = 0
-	buf[26] = 5                                     // cluster low = 5
+	buf[26] = 5 // cluster low = 5
 	buf[27] = 0
 
 	entries := parseDirEntries(buf)

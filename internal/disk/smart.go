@@ -22,8 +22,8 @@ import (
 
 // SmartHealth 是用户视角的健康摘要，避免暴露原始 SMART 属性 ID（用户看不懂）。
 type SmartHealth struct {
-	Available           bool   `json:"available"`           // 数据是否成功拿到
-	Healthy             bool   `json:"healthy"`             // 总体 PASS / FAIL
+	Available           bool   `json:"available"` // 数据是否成功拿到
+	Healthy             bool   `json:"healthy"`   // 总体 PASS / FAIL
 	Model               string `json:"model"`
 	Serial              string `json:"serial"`
 	PowerOnHours        uint64 `json:"powerOnHours"`        // 累计通电小时数
@@ -101,14 +101,15 @@ func writeNotes(h *SmartHealth) {
 // parseATASmartData 解析标准 ATA SMART READ DATA 返回的 512 字节数据。
 //
 // 结构（ATA8-ACS spec）：
-//   offset 0-1: SMART revision number
-//   offset 2-361: 30 个 vendor attribute（每个 12 字节）
-//     byte 0: attribute ID
-//     byte 1-2: status flags
-//     byte 3: current value (1-253，通常 100/200 起算)
-//     byte 4: worst value
-//     byte 5-10: raw value (6 字节小端，意义因 ID 而异)
-//     byte 11: reserved
+//
+//	offset 0-1: SMART revision number
+//	offset 2-361: 30 个 vendor attribute（每个 12 字节）
+//	  byte 0: attribute ID
+//	  byte 1-2: status flags
+//	  byte 3: current value (1-253，通常 100/200 起算)
+//	  byte 4: worst value
+//	  byte 5-10: raw value (6 字节小端，意义因 ID 而异)
+//	  byte 11: reserved
 //
 // 本函数只挑用户最关心的几个 ID 出来。Linux / Windows 拿到 512 字节后都调这个。
 func parseATASmartData(data []byte) *SmartHealth {

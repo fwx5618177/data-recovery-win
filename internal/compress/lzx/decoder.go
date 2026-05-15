@@ -13,10 +13,10 @@ const (
 	blockUncompressed  = 3
 
 	// 符号表大小
-	mainTreeMaxSymbols  = 256 + 8*50 // literals + match headers (position-slot based)
-	lengthTreeSymbols   = 249        // secondary length tree
+	mainTreeMaxSymbols   = 256 + 8*50 // literals + match headers (position-slot based)
+	lengthTreeSymbols    = 249        // secondary length tree
 	alignedOffsetSymbols = 8
-	pretreeSymbols      = 20 // pretree 本身的 code length 码
+	pretreeSymbols       = 20 // pretree 本身的 code length 码
 )
 
 // positionSlotBase + positionSlotFootBits 是 LZX 的 position slot → offset 映射。
@@ -39,14 +39,14 @@ var positionSlotFootBits = []uint{
 // Decoder LZX 解压器，持有滑动窗口 + 历史 huffman tree（跨 block 继承 code length
 // "no change"语义时用）。
 type Decoder struct {
-	window     []byte
-	winPos     int
-	winSize    int
+	window  []byte
+	winPos  int
+	winSize int
 
 	// 历史 code lengths —— LZX 的 "pretree delta encoding" 允许下一个 block 继承上个的
 	// code length，只编码"哪些 symbol 变化了"
-	prevMainLens    [mainTreeMaxSymbols]byte
-	prevLengthLens  [lengthTreeSymbols]byte
+	prevMainLens   [mainTreeMaxSymbols]byte
+	prevLengthLens [lengthTreeSymbols]byte
 
 	// LRU repeated offsets（r0 r1 r2）— LZX 的"最近 3 个 match offset"缓存
 	r0, r1, r2 uint32
@@ -309,10 +309,11 @@ func (d *Decoder) decodeHuffmanBlock(r *bitReader, dst []byte, dstCap int, size 
 //   - 用 pretree 解 delta code，应用到 prev 码长上得到新码长
 //
 // delta symbol 含义：
-//   0..16: 新码长 = (prev - symbol + 17) mod 17
-//   17: 后续 4 位 + 4 = 连续 N 个 0 码长
-//   18: 后续 5 位 + 20 = 更长的 0 连续
-//   19: 后续 1 位 + 4 + (下一个 pretree symbol 0..16 + prev → 新码长) 连续 N 个相同
+//
+//	0..16: 新码长 = (prev - symbol + 17) mod 17
+//	17: 后续 4 位 + 4 = 连续 N 个 0 码长
+//	18: 后续 5 位 + 20 = 更长的 0 连续
+//	19: 后续 1 位 + 4 + (下一个 pretree symbol 0..16 + prev → 新码长) 连续 N 个相同
 func (d *Decoder) readDeltaCodeLengths(r *bitReader, prevLens []byte) error {
 	// 读 pretree 码长
 	preLens := make([]byte, pretreeSymbols)

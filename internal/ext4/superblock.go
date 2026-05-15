@@ -56,26 +56,26 @@ func (v Variant) String() string {
 
 // 超块字段偏移（按 ext4 spec；部分字段在 ext2 不存在）
 const (
-	sbInodesCount         = 0x00 // uint32
-	sbBlocksCount         = 0x04 // uint32 (低 32 位)
-	sbFreeBlocksCount     = 0x0C
-	sbFreeInodesCount     = 0x10
-	sbFirstDataBlock      = 0x14 // uint32
-	sbLogBlockSize        = 0x18 // uint32, block_size = 1024 << log_block_size
-	sbBlocksPerGroup      = 0x20 // uint32
-	sbInodesPerGroup      = 0x28 // uint32
-	sbMagic               = 0x38 // uint16
-	sbState               = 0x3A
-	sbRevLevel            = 0x4C // uint32 (0=ext2 original, 1=ext2 dynamic / ext3/4)
-	sbFirstInode          = 0x54 // uint32 (revs >= 1)
-	sbInodeSize           = 0x58 // uint16 (revs >= 1)
-	sbFeatureCompat       = 0x5C // uint32
-	sbFeatureIncompat     = 0x60 // uint32
-	sbFeatureROCompat     = 0x64 // uint32
-	sbUUID                = 0x68 // 16 bytes
-	sbVolumeName          = 0x78 // 16 bytes
-	sbBlocksCountHi       = 0x150 // uint32 (ext4 64bit feature)
-	sbDescSize            = 0xFE  // uint16 (group descriptor size; ext4 64bit feature)
+	sbInodesCount     = 0x00 // uint32
+	sbBlocksCount     = 0x04 // uint32 (低 32 位)
+	sbFreeBlocksCount = 0x0C
+	sbFreeInodesCount = 0x10
+	sbFirstDataBlock  = 0x14 // uint32
+	sbLogBlockSize    = 0x18 // uint32, block_size = 1024 << log_block_size
+	sbBlocksPerGroup  = 0x20 // uint32
+	sbInodesPerGroup  = 0x28 // uint32
+	sbMagic           = 0x38 // uint16
+	sbState           = 0x3A
+	sbRevLevel        = 0x4C  // uint32 (0=ext2 original, 1=ext2 dynamic / ext3/4)
+	sbFirstInode      = 0x54  // uint32 (revs >= 1)
+	sbInodeSize       = 0x58  // uint16 (revs >= 1)
+	sbFeatureCompat   = 0x5C  // uint32
+	sbFeatureIncompat = 0x60  // uint32
+	sbFeatureROCompat = 0x64  // uint32
+	sbUUID            = 0x68  // 16 bytes
+	sbVolumeName      = 0x78  // 16 bytes
+	sbBlocksCountHi   = 0x150 // uint32 (ext4 64bit feature)
+	sbDescSize        = 0xFE  // uint16 (group descriptor size; ext4 64bit feature)
 )
 
 // FEATURE_INCOMPAT 标志位（用于判断 ext2/ext3/ext4）
@@ -91,19 +91,19 @@ const (
 
 // SuperBlock 解析后的 ext 超块
 type SuperBlock struct {
-	Variant           Variant
-	BlockSize         int64  // 字节
-	InodesCount       uint32 // 总 inode 数
-	BlocksCount       uint64 // 总块数（拼合 32+32 位）
-	FreeBlocksCount   uint32
-	FreeInodesCount   uint32
-	FirstDataBlock    uint32 // 块大小 ≤4KB 时一般是 1，块大小 ≥8KB 时是 0
-	BlocksPerGroup    uint32
-	InodesPerGroup    uint32
-	FirstInode        uint32 // rev0 = 11 (固定)；rev1+ 用此字段
-	InodeSize         uint16 // 一个 inode 字节数（rev0 = 128；ext3/4 默认 256）
-	UUID              [16]byte
-	VolumeName        string
+	Variant         Variant
+	BlockSize       int64  // 字节
+	InodesCount     uint32 // 总 inode 数
+	BlocksCount     uint64 // 总块数（拼合 32+32 位）
+	FreeBlocksCount uint32
+	FreeInodesCount uint32
+	FirstDataBlock  uint32 // 块大小 ≤4KB 时一般是 1，块大小 ≥8KB 时是 0
+	BlocksPerGroup  uint32
+	InodesPerGroup  uint32
+	FirstInode      uint32 // rev0 = 11 (固定)；rev1+ 用此字段
+	InodeSize       uint16 // 一个 inode 字节数（rev0 = 128；ext3/4 默认 256）
+	UUID            [16]byte
+	VolumeName      string
 
 	// extent / 64-bit 等特性标志位
 	FeatureIncompat uint32
@@ -113,11 +113,11 @@ type SuperBlock struct {
 	GroupDescSize int
 
 	// 计算字段
-	GroupCount         uint64 // = ceil(BlocksCount / BlocksPerGroup)
-	GroupDescBlock     uint64 // 紧跟超块所在块的下一块
-	HasExtents         bool   // ext4 默认 true
-	Has64Bit           bool
-	PartitionOffset    int64
+	GroupCount      uint64 // = ceil(BlocksCount / BlocksPerGroup)
+	GroupDescBlock  uint64 // 紧跟超块所在块的下一块
+	HasExtents      bool   // ext4 默认 true
+	Has64Bit        bool
+	PartitionOffset int64
 }
 
 // ParseSuperblock 在分区 partitionOffset 处读取并解析 ext 超块。

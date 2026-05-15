@@ -239,9 +239,9 @@ func UnlockVMKWithStartupKey(externalKey []byte, vmk *VMKDatum) ([]byte, error) 
 // SummarizeProtectors 给上层一份"这卷有哪些 VMK 保护器、哪些可解、哪些卡住"的清单，
 // 配合 UI 提示用户该用哪种密钥 / 该跑什么命令导出 recovery key。
 type ProtectorSummary struct {
-	Kind         string // "recovery" / "password" / "tpm" / "tpm-pin" / "startup-key" / "unknown"
-	Solvable     bool   // 本工具能否独立解锁（recovery / password / startup-key 是 true）
-	Hint         string // 给用户的引导
+	Kind     string // "recovery" / "password" / "tpm" / "tpm-pin" / "startup-key" / "unknown"
+	Solvable bool   // 本工具能否独立解锁（recovery / password / startup-key 是 true）
+	Hint     string // 给用户的引导
 }
 
 // SummarizeProtectors 把 metadata 里的所有 VMK 翻译成人话清单。

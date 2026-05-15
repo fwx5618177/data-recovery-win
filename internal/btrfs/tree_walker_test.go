@@ -47,8 +47,8 @@ func TestWalkFSTree_SingleLeafAggregation(t *testing.T) {
 	binary.LittleEndian.PutUint64(inoBytes[136:144], 1700000000) // mtime
 
 	extBytes := make([]byte, 53)
-	binary.LittleEndian.PutUint64(extBytes[8:16], 4096)  // ram_bytes
-	extBytes[16] = 0                                       // no compression
+	binary.LittleEndian.PutUint64(extBytes[8:16], 4096) // ram_bytes
+	extBytes[16] = 0                                    // no compression
 	extBytes[20] = byte(ExtentDataRegular)
 	binary.LittleEndian.PutUint64(extBytes[21:29], 50000) // disk_bytenr
 	binary.LittleEndian.PutUint64(extBytes[45:53], 4096)  // num_bytes
@@ -229,8 +229,8 @@ func TestParseExtentData_Regular(t *testing.T) {
 
 func TestParseRootItem_ByteNr(t *testing.T) {
 	b := make([]byte, 220)
-	binary.LittleEndian.PutUint64(b[160:168], 42)        // generation
-	binary.LittleEndian.PutUint64(b[168:176], 256)       // root_dirid
+	binary.LittleEndian.PutUint64(b[160:168], 42)         // generation
+	binary.LittleEndian.PutUint64(b[168:176], 256)        // root_dirid
 	binary.LittleEndian.PutUint64(b[176:184], 0xCAFEBABE) // bytenr
 	r, err := ParseRootItem(b)
 	if err != nil {

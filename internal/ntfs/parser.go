@@ -1440,8 +1440,8 @@ func filetimeToTime(ft int64) *time.Time {
 	}
 
 	const (
-		ticksPerSecond  = int64(10_000_000) // 每秒 10^7 个 100ns 单位
-		filetimeToUnix  = int64(11644473600) // 1601-01-01 到 1970-01-01 的秒数
+		ticksPerSecond = int64(10_000_000)  // 每秒 10^7 个 100ns 单位
+		filetimeToUnix = int64(11644473600) // 1601-01-01 到 1970-01-01 的秒数
 	)
 
 	secs := ft / ticksPerSecond

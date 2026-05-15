@@ -26,10 +26,10 @@ import (
 
 // OmapEntry 是从 omap leaf 解出的一条映射记录（取最高 xid 的）。
 type OmapEntry struct {
-	OID     uint64
-	XID     uint64
-	PAddr   uint64 // 物理块号
-	Size    uint32 // 通常 = block_size
+	OID   uint64
+	XID   uint64
+	PAddr uint64 // 物理块号
+	Size  uint32 // 通常 = block_size
 }
 
 // OmapPhys 是 omap 对象本身（用容器超块 nx_omap_oid * block_size 读出来）。
@@ -60,9 +60,9 @@ func ParseOmapPhys(buf []byte) (*OmapPhys, error) {
 
 // LoadOmap 从容器读出整个 object map：
 //
-//	1. 读 nx_omap_oid 对应的物理块（这是 omap_phys 对象）
-//	2. 解出 om_tree_oid（omap B-tree 的物理块号）
-//	3. 读那一块作为 B-tree root，walk 收集 (oid → paddr) 全表
+//  1. 读 nx_omap_oid 对应的物理块（这是 omap_phys 对象）
+//  2. 解出 om_tree_oid（omap B-tree 的物理块号）
+//  3. 读那一块作为 B-tree root，walk 收集 (oid → paddr) 全表
 //
 // 当前实现假设 omap B-tree 整体规模在单个 root 节点里能放下；对中等规模 APFS 卷
 // （几万到几十万对象）通常成立。深层 B-tree 需要补 walkBranch 递归。

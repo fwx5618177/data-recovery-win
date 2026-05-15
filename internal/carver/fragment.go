@@ -307,9 +307,9 @@ func detectPNGFragment(reader disk.DiskReader, offset, size int64) FragmentDetec
 	}
 	sample := buf[:n]
 	otherMagics := [][]byte{
-		{0x89, 'P', 'N', 'G'},      // 另一个 PNG 头
-		{0xFF, 0xD8, 0xFF},         // JPEG
-		{'%', 'P', 'D', 'F', '-'},  // PDF
+		{0x89, 'P', 'N', 'G'},     // 另一个 PNG 头
+		{0xFF, 0xD8, 0xFF},        // JPEG
+		{'%', 'P', 'D', 'F', '-'}, // PDF
 	}
 	for _, m := range otherMagics {
 		if i := indexOf(sample, m); i >= 0 {

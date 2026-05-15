@@ -40,10 +40,10 @@ import (
 )
 
 const (
-	xfsAGIMagic uint32 = 0x58414749 // "XAGI"
-	xfsAGFMagic uint32 = 0x58414746 // "XAGF"
-	xfsINOMagic uint16 = 0x494E     // "IN" prefix in v5 inode
-	xfsINOMagicV5 uint16 = 0x494E   // 同上（CRC v5 加了其他校验字段）
+	xfsAGIMagic   uint32 = 0x58414749 // "XAGI"
+	xfsAGFMagic   uint32 = 0x58414746 // "XAGF"
+	xfsINOMagic   uint16 = 0x494E     // "IN" prefix in v5 inode
+	xfsINOMagicV5 uint16 = 0x494E     // 同上（CRC v5 加了其他校验字段）
 
 	// inode 内 di_format 枚举
 	xfsDinodeFmtDev     = 0 // 设备号
@@ -57,17 +57,17 @@ const (
 type ExtendedSuperblock struct {
 	*Superblock
 
-	UUID          [16]byte
-	LogStart      uint64  // 日志起始 block
-	RootIno       uint64  // 根目录 inode 号
-	InodeSize     uint16  // 通常 256 或 512
-	InodesPerBlk  uint16
-	AgBlocks      uint32  // 每个 AG 的 block 数
-	AgCount       uint32
-	SectorSize    uint16
-	DirBlkLog     uint8   // log2(dir block size / fs block size)
-	Features2     uint32  // v5 特性
-	Version       uint16  // 最低 4 bits = 版本
+	UUID         [16]byte
+	LogStart     uint64 // 日志起始 block
+	RootIno      uint64 // 根目录 inode 号
+	InodeSize    uint16 // 通常 256 或 512
+	InodesPerBlk uint16
+	AgBlocks     uint32 // 每个 AG 的 block 数
+	AgCount      uint32
+	SectorSize   uint16
+	DirBlkLog    uint8  // log2(dir block size / fs block size)
+	Features2    uint32 // v5 特性
+	Version      uint16 // 最低 4 bits = 版本
 }
 
 // ParseExtendedSuperblock 扩展解析主 superblock
@@ -191,15 +191,15 @@ func ReadAGI(reader disk.DiskReader, sb *ExtendedSuperblock, agIndex uint32) (*A
 
 // Inode 简化 XFS inode（含 core + inline data 支持）
 type Inode struct {
-	Ino       uint64  // inode 号（跨 AG 唯一）
-	Mode      uint16  // Unix mode
-	Size      uint64  // di_size
-	NBlocks   uint64  // di_nblocks
-	Format    uint8   // di_format
-	NExtents  uint32  // extents 数
-	MTime     int64
-	IsDir     bool
-	IsSymlink bool
+	Ino        uint64 // inode 号（跨 AG 唯一）
+	Mode       uint16 // Unix mode
+	Size       uint64 // di_size
+	NBlocks    uint64 // di_nblocks
+	Format     uint8  // di_format
+	NExtents   uint32 // extents 数
+	MTime      int64
+	IsDir      bool
+	IsSymlink  bool
 	InlineData []byte // 仅 format=LOCAL 时有效
 }
 

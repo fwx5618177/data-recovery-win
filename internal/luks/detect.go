@@ -1,25 +1,27 @@
 // Package luks 检测 LUKS / LUKS2 加密容器（Linux dm-crypt 标准）。
 //
 // LUKS1 header @ offset 0：
-//   magic   "LUKS\xba\xbe"  (6 bytes)
-//   version uint16 BE
-//   cipher_name [32]byte
-//   cipher_mode [32]byte
-//   hash_spec   [32]byte
-//   payload_offset uint32 BE
-//   key_bytes      uint32 BE
-//   ...
-//   uuid       [40]byte
+//
+//	magic   "LUKS\xba\xbe"  (6 bytes)
+//	version uint16 BE
+//	cipher_name [32]byte
+//	cipher_mode [32]byte
+//	hash_spec   [32]byte
+//	payload_offset uint32 BE
+//	key_bytes      uint32 BE
+//	...
+//	uuid       [40]byte
 //
 // LUKS2 header @ offset 0:
-//   magic    "LUKS\xba\xbe" 同样
-//   version  2
-//   header_size uint64
-//   seqid       uint64
-//   label    [48]byte
-//   csum_alg [32]byte
-//   ...
-//   JSON 区域在第 4KB 起，含完整 keyslot / segment / digest 配置
+//
+//	magic    "LUKS\xba\xbe" 同样
+//	version  2
+//	header_size uint64
+//	seqid       uint64
+//	label    [48]byte
+//	csum_alg [32]byte
+//	...
+//	JSON 区域在第 4KB 起，含完整 keyslot / segment / digest 配置
 //
 // 本包识别 magic 并解出 version + UUID/label + cipher 信息；
 // **不实现 PBKDF2 / Argon2id 用户密码 → MK 解锁链** —— 那需要支持 4 种 KDF + 3 种 AEAD，
@@ -39,12 +41,12 @@ var luksMagic = []byte{'L', 'U', 'K', 'S', 0xBA, 0xBE}
 
 // Header 是解析后的 LUKS 头
 type Header struct {
-	Offset       int64
-	Version      uint16 // 1 或 2
-	UUID         string // LUKS1 才直接有；LUKS2 在 JSON 区域
-	Label        string // LUKS2 才有
-	CipherName   string // LUKS1 才直接有
-	CipherMode   string
+	Offset        int64
+	Version       uint16 // 1 或 2
+	UUID          string // LUKS1 才直接有；LUKS2 在 JSON 区域
+	Label         string // LUKS2 才有
+	CipherName    string // LUKS1 才直接有
+	CipherMode    string
 	PayloadOffset uint32 // 加密区起始（block 单位）
 }
 

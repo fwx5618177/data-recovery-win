@@ -19,11 +19,11 @@ import (
 // TimelineEvent 是单个时间点的事件
 type TimelineEvent struct {
 	Time      time.Time `json:"time"`
-	Action    string    `json:"action"`   // "modified" / "created" / "deleted"
+	Action    string    `json:"action"` // "modified" / "created" / "deleted"
 	FileName  string    `json:"fileName"`
 	FilePath  string    `json:"filePath"`
 	Size      int64     `json:"size"`
-	Source    string    `json:"source"`   // ntfs / apfs / carver / ...
+	Source    string    `json:"source"` // ntfs / apfs / carver / ...
 	IsDeleted bool      `json:"isDeleted"`
 }
 
@@ -88,7 +88,8 @@ func BuildTimeline(files []*types.RecoveredFile) []TimelineEvent {
 //	Date|Size|Type|Mode|UID|GID|Meta|FileName
 //
 // 示例：
-//   2024-01-15T14:30:00Z|12345|m..|0|0|0|0|/Users/x/photo.jpg
+//
+//	2024-01-15T14:30:00Z|12345|m..|0|0|0|0|/Users/x/photo.jpg
 func WriteTimelineMACTime(w io.Writer, events []TimelineEvent) error {
 	for _, e := range events {
 		actionFlag := "..."

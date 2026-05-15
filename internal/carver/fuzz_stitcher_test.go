@@ -12,11 +12,11 @@ type memReader struct {
 	data []byte
 }
 
-func (m *memReader) Open() error             { return nil }
-func (m *memReader) Close() error            { return nil }
-func (m *memReader) Size() (int64, error)    { return int64(len(m.data)), nil }
-func (m *memReader) SectorSize() int         { return 512 }
-func (m *memReader) DevicePath() string      { return "memory" }
+func (m *memReader) Open() error          { return nil }
+func (m *memReader) Close() error         { return nil }
+func (m *memReader) Size() (int64, error) { return int64(len(m.data)), nil }
+func (m *memReader) SectorSize() int      { return 512 }
+func (m *memReader) DevicePath() string   { return "memory" }
 func (m *memReader) ReadAt(buf []byte, off int64) (int, error) {
 	if off < 0 || off >= int64(len(m.data)) {
 		return 0, nil
@@ -43,7 +43,7 @@ func FuzzPNGStitcher(f *testing.F) {
 		}()
 		r := &memReader{data: data}
 		s := NewPNGStitcher(r)
-		s.MaxOutputBytes = 1 << 20  // 1MB 上限防 decompression bomb
+		s.MaxOutputBytes = 1 << 20 // 1MB 上限防 decompression bomb
 		s.MaxSearchWindow = 64 * 1024
 		_, _ = s.Stitch(0)
 	})

@@ -30,10 +30,10 @@ const (
 	attrDirectory = 0x10
 	attrArchive   = 0x20
 
-	attrLongName = 0x0F // 四个基础位全置 = LFN 项标识
+	attrLongName     = 0x0F // 四个基础位全置 = LFN 项标识
 	attrLongNameMask = 0x3F
 
-	deletedMarker = 0xE5
+	deletedMarker  = 0xE5
 	endOfDirMarker = 0x00
 )
 
@@ -93,7 +93,7 @@ func parseDirEntries(buf []byte) []DirEntry {
 			IsVolumeID:  attr&attrVolumeID != 0,
 			FirstCluster: uint32(binary.LittleEndian.Uint16(buf[i+26:i+28])) |
 				uint32(binary.LittleEndian.Uint16(buf[i+20:i+22]))<<16,
-			FileSize:     int64(binary.LittleEndian.Uint32(buf[i+28 : i+32])),
+			FileSize: int64(binary.LittleEndian.Uint32(buf[i+28 : i+32])),
 			ModifiedTime: parseFATDate(binary.LittleEndian.Uint16(buf[i+24:i+26]),
 				binary.LittleEndian.Uint16(buf[i+22:i+24])),
 		}

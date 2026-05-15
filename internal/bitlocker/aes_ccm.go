@@ -151,8 +151,9 @@ func ccmCTRDecrypt(block cipher.Block, nonce, input, output []byte, startCounter
 // ccmCBCMAC 计算 plaintext 的 CCM CBC-MAC（含格式化 B0 + 长度前缀）
 //
 // B0 块：
-//   flags = (Adata? 0)<<6 | ((tagLen-2)/2)<<3 | (L-1)
-//   nonce(12) + Q(L=3 字节，big-endian 长度)
+//
+//	flags = (Adata? 0)<<6 | ((tagLen-2)/2)<<3 | (L-1)
+//	nonce(12) + Q(L=3 字节，big-endian 长度)
 //
 // 然后是 plaintext，每 16 字节一块；不足补零；XOR 然后 AES 加密链。
 func ccmCBCMAC(block cipher.Block, nonce, plaintext []byte, tagLen int) []byte {

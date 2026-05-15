@@ -77,9 +77,9 @@ type rpcClient struct {
 	// 响应分发 goroutine，现在用不着——单请求 round-trip 典型 < 10ms。
 	mu sync.Mutex
 
-	nextXID uint32 // atomic counter 起点；实际调用时 atomic.Add 拿
-	authUID uint32
-	authGID uint32
+	nextXID  uint32 // atomic counter 起点；实际调用时 atomic.Add 拿
+	authUID  uint32
+	authGID  uint32
 	authGIDs []uint32 // AUX groups
 	hostname string   // AUTH_UNIX 里的 "machinename" 字段
 }
@@ -87,8 +87,9 @@ type rpcClient struct {
 // newRPCClient 建立 TCP 连接（带超时）并返回客户端。
 //
 // authUID/authGID：走 AUTH_UNIX 时用的 UID/GID。对于只读恢复场景，一般用
-//   0/0（root）或用户端的 geteuid/getegid。public NFS 服务器（no_root_squash
-//   off 的情况）会把 root 映射成 nobody——那就以 nobody 权限读。
+//
+//	0/0（root）或用户端的 geteuid/getegid。public NFS 服务器（no_root_squash
+//	off 的情况）会把 root 映射成 nobody——那就以 nobody 权限读。
 func newRPCClient(ctx context.Context, host string, port int, authUID, authGID uint32) (*rpcClient, error) {
 	d := net.Dialer{Timeout: 15 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
@@ -141,10 +142,11 @@ func (c *rpcClient) SetDeadline(t time.Time) error {
 // 调用方负责把 result 用 xdrReader 解成结构体。
 //
 // 错误分层：
-//   net error / EOF       → 网络层故障，返回 err
-//   reply_stat != accepted → auth 或协议版本错误
-//   accept_stat != success → 程序没找到 / 版本不匹配 / 参数畸形
-//   以上三类都是 err；只有 accept_stat == SUCCESS 才返回 (result, nil)
+//
+//	net error / EOF       → 网络层故障，返回 err
+//	reply_stat != accepted → auth 或协议版本错误
+//	accept_stat != success → 程序没找到 / 版本不匹配 / 参数畸形
+//	以上三类都是 err；只有 accept_stat == SUCCESS 才返回 (result, nil)
 func (c *rpcClient) call(program, version, procedure uint32, args []byte, useAuthUnix bool) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

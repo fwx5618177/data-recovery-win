@@ -272,7 +272,7 @@ func TestGenerateOutputPath_CarverLowConfidenceRouting(t *testing.T) {
 		FileName:   "png_0x2000_000001.png",
 		Extension:  "png",
 		Category:   types.CategoryImage,
-		IsValid:    true,   // IsValid=true 但置信度低于阈值
+		IsValid:    true, // IsValid=true 但置信度低于阈值
 		Confidence: 0.3,
 	}
 
@@ -775,4 +775,3 @@ func TestGenerateOutputPath_ConflictResolution(t *testing.T) {
 		t.Errorf("冲突解决应追加 _N 后缀，实际 %s", filepath.Base(second))
 	}
 }
-

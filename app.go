@@ -14,6 +14,7 @@ import (
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"data-recovery/internal/android"
 	"data-recovery/internal/apfs"
 	"data-recovery/internal/backup"
 	"data-recovery/internal/bitlocker"
@@ -22,7 +23,6 @@ import (
 	"data-recovery/internal/disk"
 	"data-recovery/internal/forensics"
 	"data-recovery/internal/gpt"
-	"data-recovery/internal/android"
 	"data-recovery/internal/hfsplus"
 	"data-recovery/internal/ios"
 	"data-recovery/internal/logging"
@@ -46,13 +46,13 @@ import (
 // EncryptedVolumeInfo 是 ScanEncryptedVolumes 给前端的统一报告类型。
 // BitLocker / FileVault 都是"加密但本工具不能解密"的同一类问题，UI 用同一区块展示。
 type EncryptedVolumeInfo struct {
-	DrivePath  string `json:"drivePath"`  // 来源磁盘路径
-	Kind       string `json:"kind"`       // "bitlocker" / "filevault" / "apfs-volume"
-	Offset     int64  `json:"offset"`
-	Name       string `json:"name"`        // 卷名（APFS 有；BitLocker 无）
-	UUID       string `json:"uuid"`
-	Encrypted  bool   `json:"encrypted"`
-	Note       string `json:"note"`        // 给用户的引导（去 dislocker / 用专门工具等）
+	DrivePath string `json:"drivePath"` // 来源磁盘路径
+	Kind      string `json:"kind"`      // "bitlocker" / "filevault" / "apfs-volume"
+	Offset    int64  `json:"offset"`
+	Name      string `json:"name"` // 卷名（APFS 有；BitLocker 无）
+	UUID      string `json:"uuid"`
+	Encrypted bool   `json:"encrypted"`
+	Note      string `json:"note"` // 给用户的引导（去 dislocker / 用专门工具等）
 }
 
 // updateRepoOwner / updateRepoName 指向本项目的 GitHub 仓库，用于版本检查。
@@ -120,11 +120,11 @@ type App struct {
 
 	// 移动端任务的 cancel functions（v2.5.1）
 	// 一次每种 kind 只允许一个任务在跑，所以单字段够用
-	mtpDumpCancel    context.CancelFunc // Android root 块级 dump
-	mtpPullCancel    context.CancelFunc // ADB pull directory
-	iosBackupCancel  context.CancelFunc // libimobiledevice 备份触发
-	ptpPullCancel    context.CancelFunc // gphoto2 相机 pull
-	diskDumpCancel   context.CancelFunc // 整盘镜像 dump
+	mtpDumpCancel   context.CancelFunc // Android root 块级 dump
+	mtpPullCancel   context.CancelFunc // ADB pull directory
+	iosBackupCancel context.CancelFunc // libimobiledevice 备份触发
+	ptpPullCancel   context.CancelFunc // gphoto2 相机 pull
+	diskDumpCancel  context.CancelFunc // 整盘镜像 dump
 
 	// v2.8.16: 关闭按钮二次确认。用户点 X 时 OnBeforeClose 拦截 → 发 app:closeRequested
 	// 事件给前端 → 前端弹模态对话框（退出 / 最小化 / 取消）→ 前端调 ConfirmExit() 设
@@ -181,7 +181,8 @@ func (a *App) MinimizeWindow() {
 // indeterminate 动画 + "0.0%"。heartbeat 让 UI 至少能看到时间在走、scan 还活着。
 //
 // 调用方：开扫前 `go a.emitScanHeartbeat(stopCh, startTime)`，
-//        扫描 goroutine 结束后 `close(stopCh)`。
+//
+//	扫描 goroutine 结束后 `close(stopCh)`。
 func (a *App) emitScanHeartbeat(stopCh <-chan struct{}, startTime time.Time) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -448,7 +449,8 @@ func (a *App) GetAppVersion() string {
 // UnlockBitLockerAndScan 用 recovery key 解锁 BitLocker 卷，然后启动一次完整扫描。
 //
 // 这是 Phase 2 完整链 IPC 的对外入口：
-//   recovery key → VMK → FVEK → DecryptingReader → engine.ScanWithReader → NTFS/carver
+//
+//	recovery key → VMK → FVEK → DecryptingReader → engine.ScanWithReader → NTFS/carver
 //
 // 调用前 UI 应显示"正在派生密钥…"，因为 StretchKey 1M 次 SHA-256 在普通 CPU ~1-2s。
 // 前端事件流和普通扫描一致：bitlocker:keyDeriving / bitlocker:unlocked / scan:progress /
@@ -606,11 +608,11 @@ func (a *App) bindFileDrop(ctx context.Context) {
 // TPM-only / TPM+PIN 等无法跨平台直接解的 BitLocker 保护器。
 //
 // 现实路径：
-//   1. 用户从原 Windows 抓 hiberfil.sys（C:\hiberfil.sys，需要管理员）或用 winpmem
-//      / DumpIt 抓内存 dump
-//   2. 把 .raw / hiberfil.sys 路径传过来
-//   3. 我们扫一遍找出能解开 VMK datum 的 32 字节候选
-//   4. 用 VMK → FVEK → DecryptingReader → engine.ScanWithReader 完整链
+//  1. 用户从原 Windows 抓 hiberfil.sys（C:\hiberfil.sys，需要管理员）或用 winpmem
+//     / DumpIt 抓内存 dump
+//  2. 把 .raw / hiberfil.sys 路径传过来
+//  3. 我们扫一遍找出能解开 VMK datum 的 32 字节候选
+//  4. 用 VMK → FVEK → DecryptingReader → engine.ScanWithReader 完整链
 //
 // 这是 Passware / Elcomsoft 等专业取证工具用的同款"memory-based" 攻击；
 // 完全合法，只要被恢复的数据是用户自己的（被偷电脑、忘记密码、合规取证）。
@@ -832,10 +834,11 @@ func (a *App) SummarizeBitLockerProtectors(drivePath, volumeOffsetHex string) ([
 // RAIDScanRequest 是前端构造 RAID 阵列扫描时的输入。
 //
 // 字段语义：
-//   Level         "raid0" / "raid1" / "raid5"
-//   DiskPaths     按"原阵列编号顺序"排好的物理盘 / 镜像路径；缺失盘传空字符串 ""
-//   StripeBytes   条带大小（typical 65536 / 131072 / 524288）
-//   Mode          扫描模式 quick/deep/full
+//
+//	Level         "raid0" / "raid1" / "raid5"
+//	DiskPaths     按"原阵列编号顺序"排好的物理盘 / 镜像路径；缺失盘传空字符串 ""
+//	StripeBytes   条带大小（typical 65536 / 131072 / 524288）
+//	Mode          扫描模式 quick/deep/full
 type RAIDScanRequest struct {
 	Level       string   `json:"level"`
 	DiskPaths   []string `json:"diskPaths"`
@@ -1874,9 +1877,9 @@ func (a *App) DiscardSession() error {
 // ResumeLastScan 从上次会话的断点继续扫描（跳过已扫的 carver 偏移）。
 //
 // 前端在 WelcomePage 点"从断点继续"按钮时调用：
-//   1. 读 LastSession 拿到 drivePath / mode / carverResumeOffset
-//   2. SetResumeCarverOffset 告诉 engine 起点
-//   3. StartScan 启动新扫描，engine.runCarverScan 自动消费该 offset
+//  1. 读 LastSession 拿到 drivePath / mode / carverResumeOffset
+//  2. SetResumeCarverOffset 告诉 engine 起点
+//  3. StartScan 启动新扫描，engine.runCarverScan 自动消费该 offset
 //
 // NTFS / exFAT / FAT / ext / APFS / HFS+ 阶段会重跑（相对 carver 耗时很短）；
 // 主要目的是省掉 carver 的几小时全盘读。
@@ -2394,14 +2397,14 @@ func (a *App) LookupVirusTotal(sha256Hex, apiKey string) (*forensics.VTReport, e
 // 无 JSON tag，被 Wails 序列化后前端读 `firstLBA/lastLBA/name/typeGUID` 全是
 // undefined。用户截图里看到的"未命名 (undefined-undefined)"就是这个 bug。
 type GPTPartitionInfo struct {
-	Index       int    `json:"index"`     // 1-based 分区编号
-	Name        string `json:"name"`      // UTF-16 LE 解码后的分区名（可能为空）
-	TypeGUID    string `json:"typeGUID"`  // 标准 GUID 字符串，如 "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
-	TypeName    string `json:"typeName"`  // 已知 GUID 的人类名，如 "Microsoft Basic Data" / "EFI System"
-	FirstLBA    uint64 `json:"firstLBA"`
-	LastLBA     uint64 `json:"lastLBA"`
-	SizeBytes   uint64 `json:"sizeBytes"`
-	SizeHuman   string `json:"sizeHuman"` // 已格式化，如 "128.0 GB"
+	Index     int    `json:"index"`    // 1-based 分区编号
+	Name      string `json:"name"`     // UTF-16 LE 解码后的分区名（可能为空）
+	TypeGUID  string `json:"typeGUID"` // 标准 GUID 字符串，如 "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+	TypeName  string `json:"typeName"` // 已知 GUID 的人类名，如 "Microsoft Basic Data" / "EFI System"
+	FirstLBA  uint64 `json:"firstLBA"`
+	LastLBA   uint64 `json:"lastLBA"`
+	SizeBytes uint64 `json:"sizeBytes"`
+	SizeHuman string `json:"sizeHuman"` // 已格式化，如 "128.0 GB"
 }
 
 // RecoverGPTPartitions 从盘尾备份 GPT 恢复丢失的分区表。
@@ -2743,11 +2746,12 @@ func (a *App) LoadNSRLDatabase(path string) (int, error) {
 // UnlockFileVaultVolume 用用户输入的 password 解 FileVault 卷的 keybag → VEK → 注入 engine。
 //
 // 输入：
-//   drivePath     磁盘路径（或镜像）
-//   volumeUUID    目标卷的 APFS volume UUID（32 hex char 或 UUID 标准格式）
-//   password      用户密码
-//   salt          来自 PreBoot plist（用户可手动提供；macOS 上也可从 diskutil 拿）
-//   iter          PBKDF2 迭代数（典型 ~100000，来自 PreBoot plist）
+//
+//	drivePath     磁盘路径（或镜像）
+//	volumeUUID    目标卷的 APFS volume UUID（32 hex char 或 UUID 标准格式）
+//	password      用户密码
+//	salt          来自 PreBoot plist（用户可手动提供；macOS 上也可从 diskutil 拿）
+//	iter          PBKDF2 迭代数（典型 ~100000，来自 PreBoot plist）
 //
 // 成功后，engine.APFS 扫描路径会自动对该 UUID 卷启用透明解密 reader。
 func (a *App) UnlockFileVaultVolume(drivePath, volumeUUID, password string, salt []byte, iter int) error {
@@ -2833,9 +2837,9 @@ func parseHexUUID(s string) ([16]byte, error) {
 
 // ListAPFSSnapshots 枚举磁盘上所有 APFS 容器里的 snapshot
 type APFSSnapshotInfo struct {
-	DrivePath     string         `json:"drivePath"`
-	ContainerOffset int64        `json:"containerOffset"`
-	Snapshots     []apfs.Snapshot `json:"snapshots"`
+	DrivePath       string          `json:"drivePath"`
+	ContainerOffset int64           `json:"containerOffset"`
+	Snapshots       []apfs.Snapshot `json:"snapshots"`
 }
 
 func (a *App) ListAPFSSnapshots(drivePath string) ([]APFSSnapshotInfo, error) {
@@ -2883,7 +2887,7 @@ func (a *App) GetBadSectors() []disk.BadSector {
 
 // EncryptedReaderCacheStatsResp 给前端的统一返回（即便没缓存也带 Active 字段）
 type EncryptedReaderCacheStatsResp struct {
-	Active bool             `json:"active"` // false = 当前扫描非加密卷或无缓存
+	Active bool            `json:"active"` // false = 当前扫描非加密卷或无缓存
 	Stats  disk.CacheStats `json:"stats"`
 }
 
@@ -2915,7 +2919,7 @@ func (a *App) IsKnownBenign(sha256Hex string) bool {
 
 // DiscoveredNAS 前端 UI 展示用的简化视图（不暴露 net.IP 等内部类型）
 type DiscoveredNAS struct {
-	Kind     string `json:"kind"`     // "smb" | "nfs" | "afp"
+	Kind     string `json:"kind"` // "smb" | "nfs" | "afp"
 	Host     string `json:"host"`
 	IP       string `json:"ip"`
 	Port     uint16 `json:"port"`
@@ -3120,8 +3124,8 @@ func (a *App) DiscoverIOSBackups() ([]recovery.IOSBackupInfo, error) {
 
 // StartIOSBackupScan 后台扫描指定备份目录。
 //
-//   password == "":  对未加密备份直接扫；对加密备份立即发 scan:error "encrypted"，前端弹密码框。
-//   password 非空:   对加密备份做 keybag unlock + Manifest.db 解密 + 文件 enumerate。
+//	password == "":  对未加密备份直接扫；对加密备份立即发 scan:error "encrypted"，前端弹密码框。
+//	password 非空:   对加密备份做 keybag unlock + Manifest.db 解密 + 文件 enumerate。
 //
 // 与盘扫描复用同一套 scan:progress / scan:fileFound / scan:completed 事件。
 func (a *App) StartIOSBackupScan(backupPath, password string) error {
@@ -3199,8 +3203,9 @@ func (a *App) InspectAndroidBackup(path string) (*recovery.AndroidBackupInfo, er
 }
 
 // StartAndroidBackupScan 后台扫描 .ab 备份。事件流和盘扫描共用。
-//   password == ""        非加密：正常扫；加密：发 android:passwordRequired
-//   password 非空         加密：解锁后扫
+//
+//	password == ""        非加密：正常扫；加密：发 android:passwordRequired
+//	password 非空         加密：解锁后扫
 func (a *App) StartAndroidBackupScan(backupPath, password string) error {
 	a.mu.Lock()
 	if a.engine.IsScanning() {
@@ -3257,12 +3262,12 @@ func (a *App) StopAndroidBackupScan() {
 
 // CloudBackupFinding 给前端的发现结果（Provider 字符串化让 JSON 友好）
 type CloudBackupFinding struct {
-	Provider    string `json:"provider"`     // "iCloud" / "OneDrive" / ...
-	Kind        string `json:"kind"`         // "iOS-MobileSync" / "Android-AB"
-	Path        string `json:"path"`         // 备份绝对路径
-	SizeBytes   int64  `json:"sizeBytes"`    //
-	CloudRoot   string `json:"cloudRoot"`    // 它所在的同步根（"它在你 OneDrive 里"）
-	Description string `json:"description"`  //
+	Provider    string `json:"provider"`    // "iCloud" / "OneDrive" / ...
+	Kind        string `json:"kind"`        // "iOS-MobileSync" / "Android-AB"
+	Path        string `json:"path"`        // 备份绝对路径
+	SizeBytes   int64  `json:"sizeBytes"`   //
+	CloudRoot   string `json:"cloudRoot"`   // 它所在的同步根（"它在你 OneDrive 里"）
+	Description string `json:"description"` //
 }
 
 // CloudSyncRootInfo 给前端的同步根列表项
@@ -3363,9 +3368,9 @@ func (a *App) MTPListDevices() ([]MTPDeviceInfo, error) {
 // 不需要懂 MTP。
 //
 // 设计选择：先 pull 后 scan 而不是流式扫描，因为：
-//   1. adb pull 有官方进度，用户能看到拉了多少
-//   2. 拉完一份本地副本后扫描是只读的；万一手机断开也不丢已拉部分
-//   3. 拉到本地后用户可以反复扫不同 mode（fast / full / deep）
+//  1. adb pull 有官方进度，用户能看到拉了多少
+//  2. 拉完一份本地副本后扫描是只读的；万一手机断开也不丢已拉部分
+//  3. 拉到本地后用户可以反复扫不同 mode（fast / full / deep）
 func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) error {
 	if serial == "" || srcPath == "" || destDir == "" {
 		return fmt.Errorf("serial / srcPath / destDir 不能为空")

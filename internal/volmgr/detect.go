@@ -16,8 +16,8 @@ import (
 
 // Member 是单盘里识别出的卷管理器成员标识
 type Member struct {
-	Type  string // "mdadm" / "lvm2" / "storage-spaces"
-	Hint  string // 给用户的引导
+	Type string // "mdadm" / "lvm2" / "storage-spaces"
+	Hint string // 给用户的引导
 }
 
 // DetectAll 在盘的几个常见位置扫所有支持的 metadata 签名

@@ -36,17 +36,17 @@ type DiscoveredService struct {
 	Host     string      // 主机名（没有 IP 时用）
 	IP       net.IP      // 解析到的 IPv4
 	Port     uint16
-	Instance string      // 服务实例名，如 "Synology File Station"
-	TTL      uint32      // 服务公告的 TTL（秒）
+	Instance string // 服务实例名，如 "Synology File Station"
+	TTL      uint32 // 服务公告的 TTL（秒）
 }
 
 // ServiceKind 支持发现的服务类型
 type ServiceKind string
 
 const (
-	ServiceSMB  ServiceKind = "smb"
-	ServiceNFS  ServiceKind = "nfs"
-	ServiceAFP  ServiceKind = "afp"
+	ServiceSMB ServiceKind = "smb"
+	ServiceNFS ServiceKind = "nfs"
+	ServiceAFP ServiceKind = "afp"
 )
 
 var serviceToDNSName = map[ServiceKind]string{
@@ -134,9 +134,9 @@ func buildMDNSQuery(name string) []byte {
 
 	// Header: 12 bytes
 	var hdr [12]byte
-	binary.BigEndian.PutUint16(hdr[0:], 0)       // ID
-	binary.BigEndian.PutUint16(hdr[2:], 0x0000)  // flags: standard query
-	binary.BigEndian.PutUint16(hdr[4:], 1)       // QDCOUNT
+	binary.BigEndian.PutUint16(hdr[0:], 0)      // ID
+	binary.BigEndian.PutUint16(hdr[2:], 0x0000) // flags: standard query
+	binary.BigEndian.PutUint16(hdr[4:], 1)      // QDCOUNT
 	buf = append(buf, hdr[:]...)
 
 	// QNAME

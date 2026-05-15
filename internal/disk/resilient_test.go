@@ -10,9 +10,9 @@ import (
 
 // flakyReader 模拟"某些扇区每次读都失败"的盘
 type unstableMock struct {
-	data       []byte
-	badRanges  [][2]int64 // [start, end) 区间的扇区永远 fail
-	readCount  atomic.Int64
+	data      []byte
+	badRanges [][2]int64 // [start, end) 区间的扇区永远 fail
+	readCount atomic.Int64
 }
 
 func (m *unstableMock) Open() error  { return nil }
@@ -268,9 +268,9 @@ func TestResilientReader_DefaultMaxRetryIsOne(t *testing.T) {
 // chunk 之间能正确分辨健康区。
 func TestResilientReader_SkipModeRecoversWhenHealthyResumes(t *testing.T) {
 	const (
-		diskSize   = 4 * 1024 * 1024 // 4MB
-		badStart   = 1 * 1024 * 1024 // 1MB 健康头
-		badEnd     = 2 * 1024 * 1024 // 1MB 坏区
+		diskSize = 4 * 1024 * 1024 // 4MB
+		badStart = 1 * 1024 * 1024 // 1MB 健康头
+		badEnd   = 2 * 1024 * 1024 // 1MB 坏区
 		// 后 2MB 全健康
 	)
 	disk := make([]byte, diskSize)

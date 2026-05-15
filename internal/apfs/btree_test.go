@@ -50,8 +50,8 @@ func TestParseBTreeNode_Leaf_VariableKV(t *testing.T) {
 	// keys area 起点 = tocAt + tocLen = 0x38 + 16
 	keyArea := tocAt + int(tocLen)
 	for i := 0; i < keyLen; i++ {
-		buf[keyArea+i] = byte(0xA0 + i)         // key0
-		buf[keyArea+keyLen+i] = byte(0xB0 + i)  // key1
+		buf[keyArea+i] = byte(0xA0 + i)        // key0
+		buf[keyArea+keyLen+i] = byte(0xB0 + i) // key1
 	}
 
 	// values area 末尾在节点尾（无 root footer，因为不是 root）
@@ -127,12 +127,12 @@ func TestParseInodeRecord_BasicFields(t *testing.T) {
 	binary.LittleEndian.PutUint64(key[0:8], (uint64(JTypeInode)<<60)|0xABCD)
 
 	val := make([]byte, 0x5C)
-	binary.LittleEndian.PutUint64(val[0:8], 0x1)    // ParentID = root
-	binary.LittleEndian.PutUint64(val[8:16], 0x42)  // PrivateID
-	binary.LittleEndian.PutUint64(val[16:24], 100)  // CreateTime
-	binary.LittleEndian.PutUint64(val[24:32], 200)  // ModTime
-	binary.LittleEndian.PutUint32(val[56:60], 7)    // NumChildren
-	binary.LittleEndian.PutUint16(val[88:90], 0o755)// Mode
+	binary.LittleEndian.PutUint64(val[0:8], 0x1)     // ParentID = root
+	binary.LittleEndian.PutUint64(val[8:16], 0x42)   // PrivateID
+	binary.LittleEndian.PutUint64(val[16:24], 100)   // CreateTime
+	binary.LittleEndian.PutUint64(val[24:32], 200)   // ModTime
+	binary.LittleEndian.PutUint32(val[56:60], 7)     // NumChildren
+	binary.LittleEndian.PutUint16(val[88:90], 0o755) // Mode
 
 	in := ParseInodeRecord(key, val)
 	if in == nil {
@@ -160,7 +160,7 @@ func TestParseFileExtentRecord(t *testing.T) {
 	val := make([]byte, 24)
 	// length = 4096, flags = 0x80
 	binary.LittleEndian.PutUint64(val[0:8], (uint64(0x80)<<56)|4096)
-	binary.LittleEndian.PutUint64(val[8:16], 0xDEAD)  // physical block
+	binary.LittleEndian.PutUint64(val[8:16], 0xDEAD) // physical block
 
 	ex := ParseFileExtentRecord(key, val)
 	if ex == nil {

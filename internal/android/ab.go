@@ -2,17 +2,17 @@
 //
 // 文件格式（参考 Nikolay Elenkov 的逆向、abe.jar 源码、AOSP 中的 BackupManagerService）：
 //
-//   ASCII 头部行（每行 \n 结尾）：
-//     ANDROID BACKUP
-//     <version>           1, 2, 3, 4, 5（5 是 Android 9+ 的当前版本）
-//     <is_compressed>     "0" 或 "1"（zlib deflate）
-//     <encryption>        "none" 或 "AES-256"
-//   如果 encryption == "AES-256"：
-//     <user_password_salt_hex>     128 hex chars (64B)，用户密码 PBKDF2 的盐
-//     <master_key_checksum_salt>   128 hex chars (64B)，校验 master key 的盐
-//     <pbkdf2_rounds>              整数（典型 10000）
-//     <user_key_iv_hex>            32 hex chars (16B)，加密 master key blob 的 IV
-//     <master_key_blob_hex>        变长 hex，加密的 master key blob
+//	ASCII 头部行（每行 \n 结尾）：
+//	  ANDROID BACKUP
+//	  <version>           1, 2, 3, 4, 5（5 是 Android 9+ 的当前版本）
+//	  <is_compressed>     "0" 或 "1"（zlib deflate）
+//	  <encryption>        "none" 或 "AES-256"
+//	如果 encryption == "AES-256"：
+//	  <user_password_salt_hex>     128 hex chars (64B)，用户密码 PBKDF2 的盐
+//	  <master_key_checksum_salt>   128 hex chars (64B)，校验 master key 的盐
+//	  <pbkdf2_rounds>              整数（典型 10000）
+//	  <user_key_iv_hex>            32 hex chars (16B)，加密 master key blob 的 IV
+//	  <master_key_blob_hex>        变长 hex，加密的 master key blob
 //
 // 头部之后是二进制 payload：
 //   - 加密：先 AES-CBC 解密（key=master_key，IV=master_iv）
@@ -20,11 +20,11 @@
 //   - 内容：标准 tar 流
 //
 // 工作流程对应 abe.jar 的 unpack：
-//   1. ParseHeader → 知道是否加密 / 压缩 / 版本
-//   2. 加密：DeriveUserKey + DecryptMasterKey → master_key + master_iv
-//   3. 把 payload 用 master_key 解密 → 得到（可能压缩的）tar 流
-//   4. 压缩：zlib inflate → tar
-//   5. tar 流交给 archive/tar 标准库枚举文件
+//  1. ParseHeader → 知道是否加密 / 压缩 / 版本
+//  2. 加密：DeriveUserKey + DecryptMasterKey → master_key + master_iv
+//  3. 把 payload 用 master_key 解密 → 得到（可能压缩的）tar 流
+//  4. 压缩：zlib inflate → tar
+//  5. tar 流交给 archive/tar 标准库枚举文件
 //
 // 我们只做读路径（恢复场景），从不创建 .ab 备份。
 package android
@@ -46,11 +46,11 @@ type ABHeader struct {
 	Encryption   string // "none" | "AES-256"
 
 	// 加密相关字段（仅 Encryption == "AES-256" 时有意义）
-	UserPasswordSalt    []byte // 解密 user-key 用
+	UserPasswordSalt      []byte // 解密 user-key 用
 	MasterKeyChecksumSalt []byte // 校验 master key 用
-	PBKDF2Rounds         int
-	UserKeyIV            []byte // 16B AES IV
-	MasterKeyBlob        []byte // 加密的 master key 容器
+	PBKDF2Rounds          int
+	UserKeyIV             []byte // 16B AES IV
+	MasterKeyBlob         []byte // 加密的 master key 容器
 
 	// PayloadOffset 是头部结束后的字节偏移；调用方从这里开始读 payload。
 	PayloadOffset int64

@@ -1128,16 +1128,16 @@ var windowsReservedNames = map[string]bool{
 // sanitizeFilename 跨平台安全的文件名清洗。
 //
 // 处理：
-//   1. Windows 非法字符 < > : " / \ | ? * 替换为 _
-//   2. 控制字符（C0 0x00-0x1F / DEL 0x7F / C1 0x80-0x9F）去掉
-//   3. Unicode NFC 归一（macOS NFD → NFC，避免跨平台文件名不一致）
-//   4. 过滤 BiDi override（U+202A..U+202E / U+2066..U+2069）和零宽字符
-//      （防"evil.exe.pdf" 因 U+202E 在资源管理器显示成 "fdp.exe.live"）
-//   5. Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）前缀加 _
-//   6. 首尾空格和点去掉（Windows 建目录会报错）
-//   7. 长度限制：**按 rune 数而非 byte**，默认 200 字符（中文 UTF-8 每字符 3 字节，
-//      原按 byte 限 200 只能装 66 个汉字 → 改按 rune 装 200 个汉字）
-//   8. 空结果用 "unnamed" 兜底
+//  1. Windows 非法字符 < > : " / \ | ? * 替换为 _
+//  2. 控制字符（C0 0x00-0x1F / DEL 0x7F / C1 0x80-0x9F）去掉
+//  3. Unicode NFC 归一（macOS NFD → NFC，避免跨平台文件名不一致）
+//  4. 过滤 BiDi override（U+202A..U+202E / U+2066..U+2069）和零宽字符
+//     （防"evil.exe.pdf" 因 U+202E 在资源管理器显示成 "fdp.exe.live"）
+//  5. Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）前缀加 _
+//  6. 首尾空格和点去掉（Windows 建目录会报错）
+//  7. 长度限制：**按 rune 数而非 byte**，默认 200 字符（中文 UTF-8 每字符 3 字节，
+//     原按 byte 限 200 只能装 66 个汉字 → 改按 rune 装 200 个汉字）
+//  8. 空结果用 "unnamed" 兜底
 func sanitizeFilename(name string) string {
 	if name == "" {
 		return "unnamed"

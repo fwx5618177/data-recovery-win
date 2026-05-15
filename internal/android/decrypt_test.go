@@ -154,9 +154,9 @@ func TestPKCS7Unpad_Valid(t *testing.T) {
 
 func TestPKCS7Unpad_Invalid(t *testing.T) {
 	cases := [][]byte{
-		{},                                  // 空
-		{0x00},                              // pad=0
-		{0xFF},                              // pad>16
+		{},                                   // 空
+		{0x00},                               // pad=0
+		{0xFF},                               // pad>16
 		{0x01, 0x02, 0x05, 0x05, 0x05, 0x04}, // 不一致
 	}
 	for i, c := range cases {

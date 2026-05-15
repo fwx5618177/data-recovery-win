@@ -71,7 +71,7 @@ func TestParseRecoveryPassword_RejectsBadChecksum(t *testing.T) {
 
 func TestParseRecoveryPassword_RejectsBadLength(t *testing.T) {
 	cases := []string{
-		"111111-222222",     // 太短
+		"111111-222222", // 太短
 		"111111-2222222-333333-444444-555555-666666-777777-888888", // 7 位组
 		"",
 		"abcdef-111111",

@@ -2,11 +2,12 @@
 // Workstations）的只读检测和卷头解析。
 //
 // **本包当前实现的边界**：
-//   ✅ 检测 ReFS volume boot record（"ReFS" 签名 + 关键字段）
-//   ✅ 解 boot sector：bytes/sector / sectors/cluster / total sectors / 容器号 / version
-//   ❌ Minstore B-tree 遍历（文件枚举）—— ReFS 内部用 Minstore，文档极度匮乏，工作量大
-//   ❌ Integrity Streams 校验
-//   ❌ Block clone / dedupe
+//
+//	✅ 检测 ReFS volume boot record（"ReFS" 签名 + 关键字段）
+//	✅ 解 boot sector：bytes/sector / sectors/cluster / total sectors / 容器号 / version
+//	❌ Minstore B-tree 遍历（文件枚举）—— ReFS 内部用 Minstore，文档极度匮乏，工作量大
+//	❌ Integrity Streams 校验
+//	❌ Block clone / dedupe
 //
 // 合理定位：让用户**看见** Server / Pro for Workstations 盘上 ReFS 卷的存在 + 容量，
 // 配合 carver 仍可在 ReFS 卷上做 signature 雕刻找回大部分非碎片化文件。
@@ -42,8 +43,8 @@ import (
 //	+0x32  reserved (大量)
 //	+0x1FE 0x55 0xAA              boot signature
 const (
-	refsOEMID    = "ReFS\x00\x00\x00\x00" // 8 bytes
-	refsFSSignature = "FSRS"              // 4 bytes
+	refsOEMID       = "ReFS\x00\x00\x00\x00" // 8 bytes
+	refsFSSignature = "FSRS"                 // 4 bytes
 )
 
 // VolumeHeader 是 ReFS VBR 解析结果。
@@ -131,8 +132,8 @@ type FindOptions struct {
 // FindVolumes 定位 ReFS 卷。
 //
 // 策略（v2.8.26 修订）：
-//   1. offset 0 检测（fast path）
-//   2. 1MB 步进全盘扫 OEM ID + FS signature —— **仅 opts.BruteForce=true 启用**
+//  1. offset 0 检测（fast path）
+//  2. 1MB 步进全盘扫 OEM ID + FS signature —— **仅 opts.BruteForce=true 启用**
 //
 // 之前没 opt-in 默认做全盘扫，2TB SSD 跑 ~11 分钟。诊断路径（ScanEncryptedVolumes）
 // 现在走 BruteForce=false，秒级返回。

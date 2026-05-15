@@ -34,11 +34,11 @@ const fveOEMID = "-FVE-FS-"
 
 // Volume 表示一个被识别为 BitLocker 加密的卷
 type Volume struct {
-	Offset           int64  // 卷在磁盘上的起始字节偏移
-	OEMID            string // 应为 "-FVE-FS-"
-	BytesPerSector   uint16
+	Offset            int64  // 卷在磁盘上的起始字节偏移
+	OEMID             string // 应为 "-FVE-FS-"
+	BytesPerSector    uint16
 	SectorsPerCluster uint8
-	TotalSectors     int64
+	TotalSectors      int64
 	// FVE 特定字段（从 boot sector 偏移 176-183 处读取，BitLocker 自定义区）
 	FVEMetaBlockOffset1 int64 // 第一个 FVE metadata 块偏移（按字节）
 	FVEMetaBlockOffset2 int64 // 第二个备份

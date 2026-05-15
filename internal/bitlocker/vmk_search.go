@@ -71,7 +71,7 @@ func SearchVMKInMemoryImage(
 	}
 
 	const (
-		step          = int64(16)             // AES 块对齐
+		step          = int64(16)              // AES 块对齐
 		chunk         = int64(1 * 1024 * 1024) // 每次读 1MB 给 trial loop
 		candidateSize = 32
 	)

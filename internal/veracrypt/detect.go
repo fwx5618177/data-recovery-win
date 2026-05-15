@@ -23,9 +23,9 @@ import (
 
 // Hint 是"可能是 VeraCrypt 容器"的检测结果（只是提示，不保证）
 type Hint struct {
-	Offset    int64
+	Offset     int64
 	Confidence float64 // 0..1；越高越像
-	Note      string
+	Note       string
 }
 
 // 已知文件系统的 OEM ID / magic（命中其中之一就说明不是 VC）
@@ -79,9 +79,9 @@ func Detect(reader disk.DiskReader, volStart int64) (*Hint, error) {
 		return nil, nil
 	}
 	return &Hint{
-		Offset:    volStart,
+		Offset:     volStart,
 		Confidence: (ent - 7.5) / 0.5, // 7.5..8.0 → 0..1
-		Note:      fmt.Sprintf("可能是 VeraCrypt / TrueCrypt 容器（前 4KB 熵 %.2f bits，无已知 fs magic）。请用 VeraCrypt 客户端解锁后再扫挂载点。", ent),
+		Note:       fmt.Sprintf("可能是 VeraCrypt / TrueCrypt 容器（前 4KB 熵 %.2f bits，无已知 fs magic）。请用 VeraCrypt 客户端解锁后再扫挂载点。", ent),
 	}, nil
 }
 

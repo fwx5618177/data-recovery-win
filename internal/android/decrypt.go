@@ -153,11 +153,12 @@ func parseMasterKeyBlob(p []byte) (*MasterKey, error) {
 // computeMasterKeyChecksum 重算 master key 校验值。
 //
 // 版本差异（AOSP BackupManagerService 的 makeKeyChecksum）：
-//   v1, v2:  PBKDF2(master_key 字节, salt, rounds) — 直接拿原始字节当 password
-//   v3+:     先把 master_key 每字节当成 Unicode codepoint，转成 Java char[]，
-//            然后 String 化、UTF-8 编码，再喂 PBKDF2。
-//   这是 AOSP 的历史包袱：原本以为会用 char[]，但 PBKDF2 实现实际接收 byte[]，
-//   导致两种编码并存。Android 9+ 默认 v3，但旧手机/旧客户端备份可能是 v1/v2。
+//
+//	v1, v2:  PBKDF2(master_key 字节, salt, rounds) — 直接拿原始字节当 password
+//	v3+:     先把 master_key 每字节当成 Unicode codepoint，转成 Java char[]，
+//	         然后 String 化、UTF-8 编码，再喂 PBKDF2。
+//	这是 AOSP 的历史包袱：原本以为会用 char[]，但 PBKDF2 实现实际接收 byte[]，
+//	导致两种编码并存。Android 9+ 默认 v3，但旧手机/旧客户端备份可能是 v1/v2。
 func computeMasterKeyChecksum(masterKey, salt []byte, rounds, version int) []byte {
 	var pwd []byte
 	if version >= 3 {
@@ -178,13 +179,14 @@ func fallbackVersion(v int) int {
 
 // encodeMasterKeyAsChars 复刻 AOSP 的：
 //
-//   for byte b in masterKey:
-//       chars.append((char) b)        // 字节扩成 Java char（U+0000..U+00FF）
-//   bytes = String(chars).getBytes("UTF-8")
+//	for byte b in masterKey:
+//	    chars.append((char) b)        // 字节扩成 Java char（U+0000..U+00FF）
+//	bytes = String(chars).getBytes("UTF-8")
 //
 // 即每字节 b ∈ [0..255] → Unicode codepoint U+00b → UTF-8 编码：
-//   b ≤ 0x7F：1 字节
-//   b ≥ 0x80：2 字节（11xxxxxx 10xxxxxx）
+//
+//	b ≤ 0x7F：1 字节
+//	b ≥ 0x80：2 字节（11xxxxxx 10xxxxxx）
 func encodeMasterKeyAsChars(in []byte) []byte {
 	var out bytes.Buffer
 	for _, b := range in {

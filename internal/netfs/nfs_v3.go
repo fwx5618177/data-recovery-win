@@ -40,25 +40,25 @@ const (
 
 // Mount v3 procedures
 const (
-	mountVers3       = 3
-	mountProcNull    = 0
-	mountProcMnt     = 1
-	mountProcUmnt    = 3
-	mountProcExport  = 5
+	mountVers3      = 3
+	mountProcNull   = 0
+	mountProcMnt    = 1
+	mountProcUmnt   = 3
+	mountProcExport = 5
 )
 
 // NFS v3 procedures
 const (
-	nfsVers3            = 3
-	nfsProcNull         = 0
-	nfsProcGetattr      = 1
-	nfsProcAccess       = 4
-	nfsProcReadlink     = 5
-	nfsProcLookup       = 3
-	nfsProcRead         = 6
-	nfsProcReaddirplus  = 17
-	nfsProcFsstat       = 18
-	nfsProcFsinfo       = 19
+	nfsVers3           = 3
+	nfsProcNull        = 0
+	nfsProcGetattr     = 1
+	nfsProcAccess      = 4
+	nfsProcReadlink    = 5
+	nfsProcLookup      = 3
+	nfsProcRead        = 6
+	nfsProcReaddirplus = 17
+	nfsProcFsstat      = 18
+	nfsProcFsinfo      = 19
 )
 
 // NFS3 ACCESS bit mask（RFC 1813 §3.3.4）
@@ -123,8 +123,8 @@ func portmapGetPort(ctx context.Context, host string, prog, vers uint32) (uint32
 
 // MountExport 一条 export list 条目：路径 + 允许挂载的 client 列表
 type MountExport struct {
-	Path    string   // 服务端暴露的 export 点，如 "/volume1/photos"
-	Groups  []string // 允许挂载的 netgroup / IP / 域，空=全允许
+	Path   string   // 服务端暴露的 export 点，如 "/volume1/photos"
+	Groups []string // 允许挂载的 netgroup / IP / 域，空=全允许
 }
 
 // MountClient 封装一次 mountd 会话。
@@ -271,18 +271,18 @@ func (c *NFSClient) Close() error {
 
 // NFSAttr 文件属性（fattr3 的子集，只保留恢复工具用得上的）
 type NFSAttr struct {
-	Type     uint32 // 1=REG, 2=DIR, 3=BLK, 4=CHR, 5=LNK, 6=SOCK, 7=FIFO
-	Mode     uint32
-	Nlink    uint32
-	UID      uint32
-	GID      uint32
-	Size     uint64
-	Used     uint64
-	FSID     uint64
-	FileID   uint64
-	Atime    time.Time
-	Mtime    time.Time
-	Ctime    time.Time
+	Type   uint32 // 1=REG, 2=DIR, 3=BLK, 4=CHR, 5=LNK, 6=SOCK, 7=FIFO
+	Mode   uint32
+	Nlink  uint32
+	UID    uint32
+	GID    uint32
+	Size   uint64
+	Used   uint64
+	FSID   uint64
+	FileID uint64
+	Atime  time.Time
+	Mtime  time.Time
+	Ctime  time.Time
 }
 
 func (a NFSAttr) IsDir() bool     { return a.Type == 2 }
@@ -293,7 +293,7 @@ type NFSDirEntry struct {
 	FileID uint64
 	Name   string
 	Cookie uint64
-	Handle []byte  // 可能为 nil（POST_OP_FH3 可缺省）
+	Handle []byte   // 可能为 nil（POST_OP_FH3 可缺省）
 	Attr   *NFSAttr // 可能为 nil
 }
 
@@ -602,12 +602,12 @@ func (c *NFSClient) FSInfo(ctx context.Context, fh []byte) (*NFSFSInfo, error) {
 // 用法：用户问"NAS 上还剩多少空间"时调；recovery 任务前可用来估算"扫了一半再
 // 看 cache 还能写多少"。
 type NFSFSStat struct {
-	Tbytes  uint64 // 总字节
-	Fbytes  uint64 // 空闲字节
-	Abytes  uint64 // 普通用户可用
-	Tfiles  uint64
-	Ffiles  uint64
-	Afiles  uint64
+	Tbytes   uint64 // 总字节
+	Fbytes   uint64 // 空闲字节
+	Abytes   uint64 // 普通用户可用
+	Tfiles   uint64
+	Ffiles   uint64
+	Afiles   uint64
 	Invarsec uint32
 }
 

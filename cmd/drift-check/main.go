@@ -12,7 +12,7 @@
 //     deadline / 取消 / 超时 / 看门狗 等）
 //  3. 就在对应的函数体里 grep 对应的 drift-resolver 关键词
 //     （context.WithTimeout / time.AfterFunc / NewTimeoutReader /
-//      select 分支里的 ctx.Done() / context.WithDeadline / Stop() 等）
+//     select 分支里的 ctx.Done() / context.WithDeadline / Stop() 等）
 //  4. 只有注释有、body 没有时报告
 //
 // 故意不做完整 AST 分析是 trade-off：90% 的漂移都能抓到；10% 要人判断的就
@@ -24,10 +24,11 @@
 //   - 1 = 发现明确漂移（CI 会 fail）
 //
 // 用法：
-//   drift-check              # 扫当前目录起整棵树，报告但不 fail
-//   drift-check -strict      # 发现任何漂移就退出 1，适合 CI
-//   drift-check -v           # 打印每个匹配位置
-//   drift-check -root=./x    # 指定根目录
+//
+//	drift-check              # 扫当前目录起整棵树，报告但不 fail
+//	drift-check -strict      # 发现任何漂移就退出 1，适合 CI
+//	drift-check -v           # 打印每个匹配位置
+//	drift-check -root=./x    # 指定根目录
 package main
 
 import (

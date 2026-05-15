@@ -67,9 +67,9 @@ type dfxmlMetadata struct {
 }
 
 type dfxmlCreator struct {
-	XMLName xml.Name `xml:"creator"`
-	Program string   `xml:"program"`
-	Version string   `xml:"version"`
+	XMLName  xml.Name `xml:"creator"`
+	Program  string   `xml:"program"`
+	Version  string   `xml:"version"`
 	BuildEnv struct {
 		OS string `xml:"os"`
 	} `xml:"build_environment"`
@@ -94,15 +94,15 @@ type dfxmlByteRuns struct {
 }
 
 type dfxmlFileObject struct {
-	XMLName   xml.Name        `xml:"fileobject"`
-	Filename  string          `xml:"filename"`
-	Filesize  int64           `xml:"filesize"`
-	IsDeleted int             `xml:"unalloc,omitempty"` // 1 = 已删除/未分配；0 = 已分配（活动）
-	Source    string          `xml:"_source,omitempty"`
-	MTime     string          `xml:"mtime,omitempty"`
-	CTime     string          `xml:"ctime,omitempty"`
-	ByteRuns  *dfxmlByteRuns  `xml:"byte_runs,omitempty"`
-	Hashes    []dfxmlHash     `xml:"hashdigest"`
+	XMLName   xml.Name       `xml:"fileobject"`
+	Filename  string         `xml:"filename"`
+	Filesize  int64          `xml:"filesize"`
+	IsDeleted int            `xml:"unalloc,omitempty"` // 1 = 已删除/未分配；0 = 已分配（活动）
+	Source    string         `xml:"_source,omitempty"`
+	MTime     string         `xml:"mtime,omitempty"`
+	CTime     string         `xml:"ctime,omitempty"`
+	ByteRuns  *dfxmlByteRuns `xml:"byte_runs,omitempty"`
+	Hashes    []dfxmlHash    `xml:"hashdigest"`
 }
 
 type dfxmlHash struct {
@@ -112,14 +112,14 @@ type dfxmlHash struct {
 }
 
 type dfxmlDoc struct {
-	XMLName    xml.Name        `xml:"dfxml"`
-	XMLNS      string          `xml:"xmlns,attr"`
-	XMLNSDC    string          `xml:"xmlns:dc,attr"`
-	Version    string          `xml:"version,attr"`
-	Metadata   dfxmlMetadata
-	Creator    dfxmlCreator
-	Source     *dfxmlSource    `xml:"source,omitempty"`
-	Files      []dfxmlFileObject
+	XMLName  xml.Name `xml:"dfxml"`
+	XMLNS    string   `xml:"xmlns,attr"`
+	XMLNSDC  string   `xml:"xmlns:dc,attr"`
+	Version  string   `xml:"version,attr"`
+	Metadata dfxmlMetadata
+	Creator  dfxmlCreator
+	Source   *dfxmlSource `xml:"source,omitempty"`
+	Files    []dfxmlFileObject
 }
 
 // WriteDFXML 把 files 写成最小 DFXML 文档（无 source 信息）。

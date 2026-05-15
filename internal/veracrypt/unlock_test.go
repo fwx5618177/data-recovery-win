@@ -38,9 +38,9 @@ func serpentEncrypt256Zeros() string {
 // 用 OpenAndUnlock 解锁验证。
 
 const (
-	testIterFast = 1000      // 测试用低 iter 加速；生产 VC 默认 500000
+	testIterFast = 1000 // 测试用低 iter 加速；生产 VC 默认 500000
 	testHashName = "sha512"
-	testMKLen    = 64        // AES-XTS-256 用 64 字节 master key
+	testMKLen    = 64 // AES-XTS-256 用 64 字节 master key
 )
 
 // buildVCVolumeImage 构造一个完整的 VC 卷镜像（默认 testIterFast=1000 轮，
@@ -163,12 +163,12 @@ func buildVCVolumeImageGeneric(t *testing.T, password string, masterKey []byte, 
 	copy(dec[0:4], veraSignature)
 	binary.BigEndian.PutUint16(dec[4:6], 5)
 	binary.BigEndian.PutUint16(dec[6:8], 5)
-	binary.BigEndian.PutUint64(dec[28:36], 0)                              // hidden size
-	binary.BigEndian.PutUint64(dec[36:44], uint64(totalSize))              // volume size
-	binary.BigEndian.PutUint64(dec[44:52], uint64(payloadStart))           // payload offset
+	binary.BigEndian.PutUint64(dec[28:36], 0)                             // hidden size
+	binary.BigEndian.PutUint64(dec[36:44], uint64(totalSize))             // volume size
+	binary.BigEndian.PutUint64(dec[44:52], uint64(payloadStart))          // payload offset
 	binary.BigEndian.PutUint64(dec[52:60], uint64(len(plaintextPayload))) // payload size
-	binary.BigEndian.PutUint32(dec[60:64], 0)                              // flags
-	binary.BigEndian.PutUint32(dec[64:68], 512)                            // sector size
+	binary.BigEndian.PutUint32(dec[60:64], 0)                             // flags
+	binary.BigEndian.PutUint32(dec[64:68], 512)                           // sector size
 
 	// master keys @ offset 256, 共 192 字节（AES 用前 64B）
 	copy(dec[256:], masterKey)
@@ -318,9 +318,11 @@ func TestOpenAndUnlock_VC_AESTwofishCascade(t *testing.T) {
 // Serpent 单 cipher 端到端 + NESSIE KAT 顺便验证 cipher 接入正确。
 //
 // NESSIE Serpent-256 Set 4 vector 0:
-//   key = 256-bit zeros
-//   PT  = 128-bit zeros
-//   CT  = 49672BA898D98DF95019180445491089
+//
+//	key = 256-bit zeros
+//	PT  = 128-bit zeros
+//	CT  = 49672BA898D98DF95019180445491089
+//
 // 这个向量来自 Anderson/Biham/Knudsen 1998 NIST AES 提交，是 Serpent 最权威 KAT。
 func TestSerpent_NESSIE_KAT(t *testing.T) {
 	got := serpentEncrypt256Zeros()
@@ -553,7 +555,7 @@ func TestIterationsForPIMSystem_Formula(t *testing.T) {
 		{"system sha512 pim=999", "sha512", 999, 200000}, // 同上
 		{"system whirlpool pim=5", "whirlpool", 5, 200000},
 		{"system streebog pim=20", "streebog", 20, 200000},
-		{"system ripemd pim=0", "ripemd160", 0, 1000},     // 默认兜底
+		{"system ripemd pim=0", "ripemd160", 0, 1000}, // 默认兜底
 		{"system ripemd pim=1", "ripemd160", 1, 2048},
 		{"system ripemd pim=10", "ripemd160", 10, 20480},
 		{"system unknown hash", "sha3", 0, 200000}, // 兜底

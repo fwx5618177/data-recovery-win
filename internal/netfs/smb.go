@@ -95,7 +95,7 @@ func OpenSMB(ctx context.Context, cfg SMBConfig, filePath string) (*SMBFileReade
 	}, nil
 }
 
-func (r *SMBFileReader) Open() error  { return nil }
+func (r *SMBFileReader) Open() error { return nil }
 func (r *SMBFileReader) Close() error {
 	if r.file != nil {
 		r.file.Close()

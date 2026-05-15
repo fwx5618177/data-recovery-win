@@ -42,10 +42,10 @@ import (
 
 // MP4StitchResult 重组输出
 type MP4StitchResult struct {
-	Data          []byte  // 重组字节流（box 顺序 = 原盘顺序 + 断点跳过的 garbage 被跳掉）
+	Data          []byte // 重组字节流（box 顺序 = 原盘顺序 + 断点跳过的 garbage 被跳掉）
 	Boxes         []BoxInfo
 	FragmentsHit  int
-	HasMoov       bool    // 关键：没 moov 等于无法解码
+	HasMoov       bool // 关键：没 moov 等于无法解码
 	HasFtyp       bool
 	HasMdat       bool
 	ConfidenceHex float32

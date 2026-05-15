@@ -56,16 +56,16 @@ import (
 
 const (
 	// DMU object types
-	dmuOtNone         = 0
-	dmuOtObjectSet    = 10 // MOS root
-	dmuOtDslDataset   = 16
-	dmuOtDslDir       = 12
-	dmuOtDslDirChild  = 13
-	dmuOtPlainFile    = 19 // 普通文件 (ZPL_DATA)
-	dmuOtDirectory    = 20 // 目录 (ZPL_DIRECTORY)
-	dmuOtMasterNode   = 21
-	dmuOtDeleteQueue  = 22
-	dmuOtZapFat       = 24
+	dmuOtNone        = 0
+	dmuOtObjectSet   = 10 // MOS root
+	dmuOtDslDataset  = 16
+	dmuOtDslDir      = 12
+	dmuOtDslDirChild = 13
+	dmuOtPlainFile   = 19 // 普通文件 (ZPL_DATA)
+	dmuOtDirectory   = 20 // 目录 (ZPL_DIRECTORY)
+	dmuOtMasterNode  = 21
+	dmuOtDeleteQueue = 22
+	dmuOtZapFat      = 24
 
 	// ZIO 压缩算法
 	zioCompressOff   = 2
@@ -82,20 +82,20 @@ const (
 
 // Dnode 简化 dnode 结构
 type Dnode struct {
-	Type        uint8
-	IndBlkShift uint8
-	NLevels     uint8
-	NBlkPtr     uint8
-	BonusType   uint8
-	Checksum    uint8
-	Compress    uint8
-	Flags       uint8
+	Type         uint8
+	IndBlkShift  uint8
+	NLevels      uint8
+	NBlkPtr      uint8
+	BonusType    uint8
+	Checksum     uint8
+	Compress     uint8
+	Flags        uint8
 	DataBlkSzSec uint16 // data block 大小 / 512
-	BonusLen    uint16
-	ExtraSlots  uint8
-	MaxBlkid    uint64
-	Used        uint64
-	BlkPtrs     []*BlockPointer // nblkptr 个
+	BonusLen     uint16
+	ExtraSlots   uint8
+	MaxBlkid     uint64
+	Used         uint64
+	BlkPtrs      []*BlockPointer // nblkptr 个
 }
 
 // ParseDnode 从 512 字节 dnode 原数据解析
@@ -104,19 +104,19 @@ func ParseDnode(buf []byte) (*Dnode, error) {
 		return nil, fmt.Errorf("dnode 数据 < 512 字节")
 	}
 	d := &Dnode{
-		Type:        buf[0],
-		IndBlkShift: buf[1],
-		NLevels:     buf[2],
-		NBlkPtr:     buf[3],
-		BonusType:   buf[4],
-		Checksum:    buf[5],
-		Compress:    buf[6],
-		Flags:       buf[7],
+		Type:         buf[0],
+		IndBlkShift:  buf[1],
+		NLevels:      buf[2],
+		NBlkPtr:      buf[3],
+		BonusType:    buf[4],
+		Checksum:     buf[5],
+		Compress:     buf[6],
+		Flags:        buf[7],
 		DataBlkSzSec: binary.LittleEndian.Uint16(buf[8:10]),
-		BonusLen:    binary.LittleEndian.Uint16(buf[10:12]),
-		ExtraSlots:  buf[12],
-		MaxBlkid:    binary.LittleEndian.Uint64(buf[16:24]),
-		Used:        binary.LittleEndian.Uint64(buf[24:32]),
+		BonusLen:     binary.LittleEndian.Uint16(buf[10:12]),
+		ExtraSlots:   buf[12],
+		MaxBlkid:     binary.LittleEndian.Uint64(buf[16:24]),
+		Used:         binary.LittleEndian.Uint64(buf[24:32]),
 	}
 	// blkptrs 从 offset 64 起
 	if d.NBlkPtr > dnodeBlkptrCount {

@@ -52,7 +52,9 @@ func TestDecompressLZVN_UnsupportedOpReturnsPartial(t *testing.T) {
 }
 
 // small op (op ≤ 0x5F): L=bits7-6, M=(op&0x3F)+3
-//   op=0x42  = 01 000010 → L=1, M=5
+//
+//	op=0x42  = 01 000010 → L=1, M=5
+//
 // 先用 0xE2 "ABC" 累积 3 字节，再用 0x42 做 1 literal "D" + distance=3 match 5
 func TestDecompressLZVN_SmallOpMatch(t *testing.T) {
 	src := []byte{

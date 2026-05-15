@@ -36,11 +36,11 @@ import (
 )
 
 const (
-	eocdSig       = 0x06054B50
-	eocd64Sig     = 0x06064B50
-	eocd64LocSig  = 0x07064B50
-	cdFileHdrSig  = 0x02014B50
-	localFileSig  = 0x04034B50
+	eocdSig      = 0x06054B50
+	eocd64Sig    = 0x06064B50
+	eocd64LocSig = 0x07064B50
+	cdFileHdrSig = 0x02014B50
+	localFileSig = 0x04034B50
 )
 
 // ZIPStitchResult 重组输出
@@ -178,13 +178,13 @@ func (s *ZIPStitcher) Stitch() (*ZIPStitchResult, error) {
 
 // eocdRecord EOCD 解析结果
 type eocdRecord struct {
-	diskNum       uint16
-	cdStartDisk   uint16
-	diskEntries   uint16
-	totalEntries  uint64 // 用 64 存以支持 ZIP64
-	cdSize        uint64
-	cdOffset      uint64
-	commentLen    uint16
+	diskNum      uint16
+	cdStartDisk  uint16
+	diskEntries  uint16
+	totalEntries uint64 // 用 64 存以支持 ZIP64
+	cdSize       uint64
+	cdOffset     uint64
+	commentLen   uint16
 }
 
 // findEOCD 在 ZIP 末尾 65KB 找 EOCD（含 ZIP64 兼容）
@@ -460,8 +460,8 @@ func (s *ZIPStitcher) StitchFromLocalHeaders() (*ZIPStitchResult, error) {
 		// 合成对应的 CD 条目（46 字节固定 + name + extra + comment）
 		cdEntry := make([]byte, 46+nameLen)
 		binary.LittleEndian.PutUint32(cdEntry[0:4], cdFileHdrSig)
-		binary.LittleEndian.PutUint16(cdEntry[4:6], 20)         // version made by
-		binary.LittleEndian.PutUint16(cdEntry[6:8], 20)         // version needed
+		binary.LittleEndian.PutUint16(cdEntry[4:6], 20) // version made by
+		binary.LittleEndian.PutUint16(cdEntry[6:8], 20) // version needed
 		binary.LittleEndian.PutUint16(cdEntry[8:10], gpFlag)
 		binary.LittleEndian.PutUint16(cdEntry[10:12], compMethod)
 		binary.LittleEndian.PutUint16(cdEntry[12:14], mtime)

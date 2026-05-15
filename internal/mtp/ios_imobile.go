@@ -35,11 +35,11 @@ import (
 
 // IOSDevice 是 idevice_id 列出的一个 iOS 设备
 type IOSDevice struct {
-	UDID     string // iOS 设备唯一标识
-	Model    string // 例 "iPhone15,3" (iPhone 14 Pro Max)
-	Name     string // 用户给设备起的名字（"小红的 iPhone"）
-	IOSVer   string // 例 "17.4.1"
-	Trusted  bool   // 是否已 pair（用户在 iPhone 上点过"信任"）
+	UDID    string // iOS 设备唯一标识
+	Model   string // 例 "iPhone15,3" (iPhone 14 Pro Max)
+	Name    string // 用户给设备起的名字（"小红的 iPhone"）
+	IOSVer  string // 例 "17.4.1"
+	Trusted bool   // 是否已 pair（用户在 iPhone 上点过"信任"）
 }
 
 // LibIMobileDeviceAvailable 检测 idevice_id 是否在 PATH 里

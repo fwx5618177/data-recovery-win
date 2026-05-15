@@ -26,18 +26,18 @@ import (
 // 不实现真数字签名（需要 PKI 证书 + 法律资质）；提供"可验证的 hash chain"作为最低
 // 担保 — 第三方法务专家拿到 manifest 后能验证内容未被篡改。
 type Custody struct {
-	ToolName       string             `json:"toolName"`
-	ToolVersion    string             `json:"toolVersion"`
-	OperatorUser   string             `json:"operatorUser"`
-	OS             string             `json:"os"`
-	Arch           string             `json:"arch"`
-	StartedAt      time.Time          `json:"startedAt"`
-	CompletedAt    time.Time          `json:"completedAt"`
-	SourceDevice   string             `json:"sourceDevice"`
-	SourceSize     int64              `json:"sourceSize,omitempty"`
-	SourceSHA256   string             `json:"sourceSHA256,omitempty"`
-	OutputFiles    []CustodyFile      `json:"outputFiles"`
-	ManifestSHA256 string             `json:"manifestSHA256"` // 内容算完后自填
+	ToolName       string        `json:"toolName"`
+	ToolVersion    string        `json:"toolVersion"`
+	OperatorUser   string        `json:"operatorUser"`
+	OS             string        `json:"os"`
+	Arch           string        `json:"arch"`
+	StartedAt      time.Time     `json:"startedAt"`
+	CompletedAt    time.Time     `json:"completedAt"`
+	SourceDevice   string        `json:"sourceDevice"`
+	SourceSize     int64         `json:"sourceSize,omitempty"`
+	SourceSHA256   string        `json:"sourceSHA256,omitempty"`
+	OutputFiles    []CustodyFile `json:"outputFiles"`
+	ManifestSHA256 string        `json:"manifestSHA256"` // 内容算完后自填
 }
 
 type CustodyFile struct {
@@ -92,7 +92,8 @@ func BuildAndWrite(outputDir string, c Custody) (string, error) {
 //
 // outputDir：仅用作 1) 写 custody.json 落地位置 2) 算 Path 相对路径基准；不再 walk 它。
 // absPaths：要算 SHA256 的绝对路径列表（一般来自 recovery.FileRecoveryRecord.OutputPath）。
-//   nil / 空切片 → 生成的 manifest 不含 outputFiles，但其它元数据仍写盘。
+//
+//	nil / 空切片 → 生成的 manifest 不含 outputFiles，但其它元数据仍写盘。
 func BuildAndWriteFromPaths(outputDir string, c Custody, absPaths []string) (string, error) {
 	if outputDir == "" {
 		return "", fmt.Errorf("outputDir 为空")
@@ -174,10 +175,10 @@ func writeCustodyManifest(outputDir string, c Custody, files []CustodyFile) (str
 // signature + tsaResponseB64。
 //
 // 第三方验证流程：
-//   1. 拿到 custody.signed.json + 本工具发布的公钥（随 release 附）
-//   2. 用 VerifySignedCustody 或标准 Ed25519 工具验 signature
-//   3. 提取 tsaResponseB64 解 base64 → custody.tsr 文件
-//      → `openssl ts -reply -in custody.tsr -text` 查真实 TSA 时间戳
+//  1. 拿到 custody.signed.json + 本工具发布的公钥（随 release 附）
+//  2. 用 VerifySignedCustody 或标准 Ed25519 工具验 signature
+//  3. 提取 tsaResponseB64 解 base64 → custody.tsr 文件
+//     → `openssl ts -reply -in custody.tsr -text` 查真实 TSA 时间戳
 //
 // 失败时（TSA 全挂）不 fatal：manifest 签名已完成，时间戳字段留空。
 func BuildSignAndWrite(outputDir string, c Custody) (string, error) {

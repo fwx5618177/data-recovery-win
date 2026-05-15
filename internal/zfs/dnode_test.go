@@ -10,9 +10,10 @@ import (
 
 // TestLZ4RawDecompress 用手工构造的 LZ4 block 验证解压器正确性
 // LZ4 block format:
-//   token: upper 4 bits = literal len, lower 4 bits = match len - 4
-//   literals 跟在 token 后
-//   match offset (2 bytes LE) 跟在 literal 之后
+//
+//	token: upper 4 bits = literal len, lower 4 bits = match len - 4
+//	literals 跟在 token 后
+//	match offset (2 bytes LE) 跟在 literal 之后
 func TestLZ4RawDecompress_LiteralsOnly(t *testing.T) {
 	// 3 个 literal，无 match
 	// token = 0x30 = 3 literal len, 0 match len
@@ -32,9 +33,9 @@ func TestLZ4RawDecompress_WithMatch(t *testing.T) {
 	// 实际 LZ4 MINMATCH=4，我们做 "ABCDABCD"
 	// token: 4 literals ("ABCD") + match (offset=4, len=0 means 0+4=4 bytes)
 	src := []byte{
-		0x40,              // 4 literals, match_len_code = 0 → len=4
+		0x40, // 4 literals, match_len_code = 0 → len=4
 		'A', 'B', 'C', 'D',
-		0x04, 0x00,        // match offset = 4
+		0x04, 0x00, // match offset = 4
 	}
 	dst := make([]byte, 16)
 	n, err := lz4RawDecompress(src, dst)
@@ -50,7 +51,7 @@ func TestLZ4RawDecompress_OverlappingMatch(t *testing.T) {
 	// "AAAAAAA"：literal=1 ("A")，然后 match offset=1 len=6 (overlap)
 	// token: 1 literal, match_len_code = 2 (→ 2+4=6)
 	src := []byte{
-		0x12,       // 1 literal, match_len_code = 2
+		0x12, // 1 literal, match_len_code = 2
 		'A',
 		0x01, 0x00, // offset = 1
 	}
@@ -134,11 +135,11 @@ func TestZSTDDecompress_RoundTrip(t *testing.T) {
 func TestParseDnode(t *testing.T) {
 	buf := make([]byte, 512)
 	buf[0] = dmuOtPlainFile
-	buf[1] = 17        // ind_blk_shift
-	buf[2] = 1         // nlevels
-	buf[3] = 1         // nblkptr
-	buf[8], buf[9] = 2, 0 // datablkszsec = 2 (1KB)
-	binary.LittleEndian.PutUint64(buf[16:24], 100) // maxblkid
+	buf[1] = 17                                     // ind_blk_shift
+	buf[2] = 1                                      // nlevels
+	buf[3] = 1                                      // nblkptr
+	buf[8], buf[9] = 2, 0                           // datablkszsec = 2 (1KB)
+	binary.LittleEndian.PutUint64(buf[16:24], 100)  // maxblkid
 	binary.LittleEndian.PutUint64(buf[24:32], 4096) // used
 
 	// 单一 blkptr @ offset 64

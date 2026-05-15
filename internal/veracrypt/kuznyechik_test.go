@@ -7,9 +7,10 @@ import (
 )
 
 // RFC 7801 Appendix A.1 Test Vector
-//   Key:        8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef
-//   Plaintext:  1122334455667700ffeeddccbbaa9988
-//   Ciphertext: 7f679d90bebc24305a468d42b9d4edcd
+//
+//	Key:        8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef
+//	Plaintext:  1122334455667700ffeeddccbbaa9988
+//	Ciphertext: 7f679d90bebc24305a468d42b9d4edcd
 func TestKuznyechik_RFC7801_Encrypt(t *testing.T) {
 	key, _ := hex.DecodeString("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
 	pt, _ := hex.DecodeString("1122334455667700ffeeddccbbaa9988")
@@ -46,9 +47,9 @@ func TestKuznyechik_RFC7801_Decrypt(t *testing.T) {
 // Round-trip 多种 key/plaintext
 func TestKuznyechik_RoundTrip(t *testing.T) {
 	cases := []struct {
-		name    string
-		keyHex  string
-		ptHex   string
+		name   string
+		keyHex string
+		ptHex  string
 	}{
 		{"all-zero", "0000000000000000000000000000000000000000000000000000000000000000", "00000000000000000000000000000000"},
 		{"all-FF", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ffffffffffffffffffffffffffffffff"},

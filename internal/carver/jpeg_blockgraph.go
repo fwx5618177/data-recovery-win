@@ -6,12 +6,12 @@
 //
 // **本实现的核心思想**（block-graph 简化版）：
 //
-//	1. 从 SOI 起按 marker 顺序扫，记录所有"重启 marker" RST0..RST7 (0xFF D0..D7) 的位置
-//	2. RST marker 在 JPEG 里有"序号循环 0,1,2,3,4,5,6,7,0,1..."的强约束
-//	3. 当扫到一个"非法 marker"（比如 0xFF D8 SOI 又出现 = 另一个 JPEG 的开头），
-//	    判定为碎片断点
-//	4. 从断点位置向后扫**容器内其它 chunk**，找下一个 "合法 RST + 序号 = 期望值" 的位置
-//	5. 把断点前 + 找到的延续段 + 后续部分拼起来（stitching）
+//  1. 从 SOI 起按 marker 顺序扫，记录所有"重启 marker" RST0..RST7 (0xFF D0..D7) 的位置
+//  2. RST marker 在 JPEG 里有"序号循环 0,1,2,3,4,5,6,7,0,1..."的强约束
+//  3. 当扫到一个"非法 marker"（比如 0xFF D8 SOI 又出现 = 另一个 JPEG 的开头），
+//     判定为碎片断点
+//  4. 从断点位置向后扫**容器内其它 chunk**，找下一个 "合法 RST + 序号 = 期望值" 的位置
+//  5. 把断点前 + 找到的延续段 + 后续部分拼起来（stitching）
 //
 // **比传统启发的提升**：
 //   - RST 序号匹配比单纯"找下一个 0xFF D9" 严格一万倍（误匹配率 1/8 vs 1/2）
@@ -36,10 +36,10 @@ import (
 
 // JPEG marker bytes
 const (
-	jpegSOI byte = 0xD8
-	jpegEOI byte = 0xD9
-	jpegSOS byte = 0xDA // Start of Scan，之后是熵编码数据 + RST markers
-	jpegDRI byte = 0xDD // Define Restart Interval
+	jpegSOI  byte = 0xD8
+	jpegEOI  byte = 0xD9
+	jpegSOS  byte = 0xDA // Start of Scan，之后是熵编码数据 + RST markers
+	jpegDRI  byte = 0xDD // Define Restart Interval
 	jpegRST0 byte = 0xD0
 	jpegRST7 byte = 0xD7
 )
@@ -57,10 +57,10 @@ type JPEGCarverResult struct {
 // "容器"通常是整块磁盘 reader；StartOffset 是 SOI 位置。
 // MaxFileSize 限制最大输出（防止"找不到 EOI 一直读到盘尾"）。
 type JPEGBlockGraphCarver struct {
-	Reader        disk.DiskReader
-	MaxFileSize   int64 // 默认 32MB
-	SearchWindow  int64 // stitching 时向后搜的字节窗口；默认 16MB
-	ChunkSize     int64 // 内部 IO 块大小；默认 64KB
+	Reader       disk.DiskReader
+	MaxFileSize  int64 // 默认 32MB
+	SearchWindow int64 // stitching 时向后搜的字节窗口；默认 16MB
+	ChunkSize    int64 // 内部 IO 块大小；默认 64KB
 }
 
 // NewJPEGBlockGraphCarver 用合理默认值构造。

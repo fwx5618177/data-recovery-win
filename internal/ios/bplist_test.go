@@ -12,7 +12,9 @@ import (
 // 参考 Apple source: CoreFoundation/CFBinaryPList.c
 
 // buildMinimalPlist 组装一个 bplist00 样本：
-//   top = dict { key: value, ... } 其中 key 是 ASCII 字符串。
+//
+//	top = dict { key: value, ... } 其中 key 是 ASCII 字符串。
+//
 // count 最大 14（用 marker lo 字段），避免处理 extended length。
 func buildMinimalPlist(t *testing.T, pairs []kv) []byte {
 	t.Helper()
@@ -66,9 +68,9 @@ func buildMinimalPlist(t *testing.T, pairs []kv) []byte {
 
 	// trailer：5 保留 + 1 sortVer + 1 offSize + 1 refSize + 8 numObj + 8 topObj + 8 offTableOff
 	buf.Write(make([]byte, 5))
-	buf.WriteByte(0)             // sortVersion
-	buf.WriteByte(1)             // offsetIntSize
-	buf.WriteByte(1)             // objectRefSize
+	buf.WriteByte(0) // sortVersion
+	buf.WriteByte(1) // offsetIntSize
+	buf.WriteByte(1) // objectRefSize
 	var tmp [8]byte
 	binary.BigEndian.PutUint64(tmp[:], uint64(totalObjects))
 	buf.Write(tmp[:])

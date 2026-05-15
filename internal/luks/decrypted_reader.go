@@ -58,7 +58,6 @@ type DecryptedReaderConfig struct {
 	CacheSectors int
 }
 
-
 // NewDecryptedReader 构造一个解密视图 reader。
 // underlying 必须已经 Open()；本 reader 的 Open() / Close() 透传到底层。
 func NewDecryptedReader(cfg DecryptedReaderConfig) (*DecryptedReader, error) {

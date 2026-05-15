@@ -51,14 +51,16 @@ type DirEntry struct {
 // extractParentChildRelations 从 page 里启发找 parent-child 关系模式
 //
 // ReFS 内部 "directory index" 典型格式（社区逆向观察）:
-//   entry header (通常 16 字节) + child_id (u64) + ... + name_len (u16) + name (UTF-16)
-//   parent_id 则在 entry 所属 key 或附近的 16 字节 header 里
+//
+//	entry header (通常 16 字节) + child_id (u64) + ... + name_len (u16) + name (UTF-16)
+//	parent_id 则在 entry 所属 key 或附近的 16 字节 header 里
 //
 // 本函数扫 page body 找以下模式：
-//   8 字节候选 parent_id（合理范围 0..2^40，排除极端值）
-//   后接 8 字节候选 child_id
-//   附近 2 字节 name_len (2..510)
-//   紧跟 name_len 字节的 UTF-16 字符串
+//
+//	8 字节候选 parent_id（合理范围 0..2^40，排除极端值）
+//	后接 8 字节候选 child_id
+//	附近 2 字节 name_len (2..510)
+//	紧跟 name_len 字节的 UTF-16 字符串
 //
 // 命中则记录一条 DirEntry
 func extractParentChildRelations(buf []byte) []DirEntry {
@@ -98,7 +100,8 @@ func extractParentChildRelations(buf []byte) []DirEntry {
 }
 
 // looksLikeObjectID 合理的 ReFS Minstore ObjectID 启发
-//   非零 + 小于 2^48（实际 ReFS 卷里 ObjectID 远不会这么大）
+//
+//	非零 + 小于 2^48（实际 ReFS 卷里 ObjectID 远不会这么大）
 func looksLikeObjectID(id uint64) bool {
 	if id == 0 {
 		return false
@@ -110,10 +113,10 @@ func looksLikeObjectID(id uint64) bool {
 // BuildReFSDirectoryTree 完整枚举 + 目录树拼装
 //
 // 流程：
-//   1. 全卷 Pass 1：按现有 EnumerateReFSFullEntries 拿所有 file entry
-//   2. 全卷 Pass 2：按 extractParentChildRelations 拿 parent-child 关系
-//   3. 合并：对每个 file，用 relations 里 ChildID==ObjectID 的记录补 ParentID
-//   4. 递归拼 full path（带循环检测）
+//  1. 全卷 Pass 1：按现有 EnumerateReFSFullEntries 拿所有 file entry
+//  2. 全卷 Pass 2：按 extractParentChildRelations 拿 parent-child 关系
+//  3. 合并：对每个 file，用 relations 里 ChildID==ObjectID 的记录补 ParentID
+//  4. 递归拼 full path（带循环检测）
 func BuildReFSDirectoryTree(reader disk.DiskReader, volStart, volSize int64) ([]ReFSFileWithPath, error) {
 	// Pass 1: 收集 file entry
 	files, err := EnumerateReFSFullEntries(reader, volStart, volSize)

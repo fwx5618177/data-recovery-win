@@ -45,7 +45,7 @@ type SMBDirEntry struct {
 // SMBScanConfig SMB 扫描配置。Host/User/Password 来自 UI 表单。
 type SMBScanConfig struct {
 	Host     string
-	Port     int    // 默认 445
+	Port     int // 默认 445
 	User     string
 	Password string
 	Domain   string // 可选

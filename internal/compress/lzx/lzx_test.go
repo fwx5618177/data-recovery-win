@@ -7,14 +7,17 @@ import (
 // LZX bitreader 是 MS 奇异的"16-bit LE word + bit 从 MSB 取"格式。
 //
 // 字节流 [b0 b1 b2 b3]:
-//   word0 = LE16(b0 b1) = b0 | b1<<8
-//   word1 = LE16(b2 b3) = b2 | b3<<8
+//
+//	word0 = LE16(b0 b1) = b0 | b1<<8
+//	word1 = LE16(b2 b3) = b2 | b3<<8
+//
 // bit stream 从 word0 的 MSB 开始读。
 //
 // 例：b0=0x12 b1=0x34 → word0 = 0x3412
-//   先读 4 bit: 0x3 (bit 15..12)
-//   再读 4 bit: 0x4 (bit 11..8)
-//   再读 4 bit: 0x1 (bit 7..4)
+//
+//	先读 4 bit: 0x3 (bit 15..12)
+//	再读 4 bit: 0x4 (bit 11..8)
+//	再读 4 bit: 0x1 (bit 7..4)
 func TestBitReader_MSBFirst16LEWord(t *testing.T) {
 	src := []byte{0x12, 0x34}
 	r := newBitReader(src)

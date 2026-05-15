@@ -21,12 +21,12 @@ import (
 // ExtractDateTime 从 JPEG 字节流头部抽取拍摄时间。
 //
 // 解析路径：
-//   1. JPEG SOI (0xFFD8)
-//   2. 跳过到 APP1 marker (0xFFE1)
-//   3. APP1 payload 头是 "Exif\0\0"
-//   4. 之后是 TIFF header："II"或"MM"+ 0x002A + 4 字节 IFD0 偏移
-//   5. IFD0 entries 找 DateTime (0x0132)
-//   6. 顺着 IFD0 的 ExifIFD pointer (0x8769) 找 DateTimeOriginal (0x9003) — 优先用这个
+//  1. JPEG SOI (0xFFD8)
+//  2. 跳过到 APP1 marker (0xFFE1)
+//  3. APP1 payload 头是 "Exif\0\0"
+//  4. 之后是 TIFF header："II"或"MM"+ 0x002A + 4 字节 IFD0 偏移
+//  5. IFD0 entries 找 DateTime (0x0132)
+//  6. 顺着 IFD0 的 ExifIFD pointer (0x8769) 找 DateTimeOriginal (0x9003) — 优先用这个
 //
 // 时间字符串格式 "YYYY:MM:DD HH:MM:SS"。
 //
@@ -198,9 +198,9 @@ func ArchiveSubdir(t time.Time) string {
 // ExtractDateTimeHEIC HEIC/HEIF EXIF 在 ISO BMFF 容器里：meta box → iinf
 // → iloc 找到 "Exif" item 的字节范围。完整 BMFF 解析复杂，我们做精简版：
 //
-//	1. 顺着 box 链找 meta box
-//	2. 在 meta 里搜"Exif" 的字面 magic
-//	3. 在它附近找 TIFF II/MM 头并 parseEXIFPayload
+//  1. 顺着 box 链找 meta box
+//  2. 在 meta 里搜"Exif" 的字面 magic
+//  3. 在它附近找 TIFF II/MM 头并 parseEXIFPayload
 //
 // 不严格按规范但对 iPhone / 现代相机出的标准 HEIC 都 work。
 func ExtractDateTimeHEIC(heic []byte) (time.Time, error) {

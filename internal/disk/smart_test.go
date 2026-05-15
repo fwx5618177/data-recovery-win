@@ -120,8 +120,8 @@ func mkATABuf(attrs map[byte]uint64) []byte {
 		buf[off] = id
 		buf[off+1] = 0x32
 		buf[off+2] = 0x00
-		buf[off+3] = 100   // current value
-		buf[off+4] = 100   // worst value
+		buf[off+3] = 100 // current value
+		buf[off+4] = 100 // worst value
 		// raw 6 字节小端
 		buf[off+5] = byte(raw)
 		buf[off+6] = byte(raw >> 8)

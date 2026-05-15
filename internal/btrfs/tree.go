@@ -64,26 +64,26 @@ const (
 	btrfsCsumTreeObjectID   = 7
 
 	// Key type 常量（仅列 FS 文件枚举需要的）
-	keyTypeInodeItem    = 0x01
-	keyTypeInodeRef     = 0x0C
-	keyTypeDirItem      = 0x54
-	keyTypeDirIndex     = 0x60
-	keyTypeExtentData   = 0x6C
-	keyTypeRootItem     = 0x84
-	keyTypeChunkItem    = 0xE4
+	keyTypeInodeItem  = 0x01
+	keyTypeInodeRef   = 0x0C
+	keyTypeDirItem    = 0x54
+	keyTypeDirIndex   = 0x60
+	keyTypeExtentData = 0x6C
+	keyTypeRootItem   = 0x84
+	keyTypeChunkItem  = 0xE4
 )
 
 // ExtendedSuperblock Btrfs 关键字段（基础 Superblock 之外的更多信息）
 type ExtendedSuperblock struct {
 	*Superblock
 
-	Generation       uint64   // 创建代（每次写入递增）
-	RootTreeLogical  uint64   // root tree 的逻辑地址（指向 root tree 的第一个 block）
-	ChunkTreeLogical uint64   // chunk tree 的逻辑地址
-	LogTreeLogical   uint64
-	NumDevices       uint64
-	SysChunkArraySize uint32  // system chunk array 字节数
-	SysChunkArray    []byte   // system chunk array 原字节（含 chunk keys + chunk items）
+	Generation        uint64 // 创建代（每次写入递增）
+	RootTreeLogical   uint64 // root tree 的逻辑地址（指向 root tree 的第一个 block）
+	ChunkTreeLogical  uint64 // chunk tree 的逻辑地址
+	LogTreeLogical    uint64
+	NumDevices        uint64
+	SysChunkArraySize uint32 // system chunk array 字节数
+	SysChunkArray     []byte // system chunk array 原字节（含 chunk keys + chunk items）
 
 	// System chunks 解析结果：初始 logical→physical 映射（用来读 chunk tree 本身）
 	SysChunks []ChunkMapping
@@ -101,9 +101,9 @@ type ChunkMapping struct {
 
 // ChunkStripe 单个 stripe 在物理盘上的位置
 type ChunkStripe struct {
-	DevID    uint64 // 设备 ID（本工具单盘场景通常 = 1）
-	Offset   uint64 // 该 stripe 在设备上的物理偏移
-	DevUUID  [16]byte
+	DevID   uint64 // 设备 ID（本工具单盘场景通常 = 1）
+	Offset  uint64 // 该 stripe 在设备上的物理偏移
+	DevUUID [16]byte
 }
 
 // TreeBlockHeader btrfs_header —— 所有 node / leaf 共用的 101 字节头
@@ -240,9 +240,9 @@ func ParseExtendedSuperblock(reader disk.DiskReader, volStart int64) (*ExtendedS
 	// 实际字段 offset 以 kernel btrfs_super_block 为准；本实现取 Linux 6.x 默认布局
 
 	ext := &ExtendedSuperblock{Superblock: base}
-	ext.RootTreeLogical = binary.LittleEndian.Uint64(buf[80:88])   // root_tree_bytenr
-	ext.ChunkTreeLogical = binary.LittleEndian.Uint64(buf[88:96])  // chunk_tree_bytenr
-	ext.LogTreeLogical = binary.LittleEndian.Uint64(buf[96:104])   // log_tree_bytenr
+	ext.RootTreeLogical = binary.LittleEndian.Uint64(buf[80:88])  // root_tree_bytenr
+	ext.ChunkTreeLogical = binary.LittleEndian.Uint64(buf[88:96]) // chunk_tree_bytenr
+	ext.LogTreeLogical = binary.LittleEndian.Uint64(buf[96:104])  // log_tree_bytenr
 	ext.Generation = binary.LittleEndian.Uint64(buf[120:128])
 	ext.NumDevices = binary.LittleEndian.Uint64(buf[128:136])
 	ext.SysChunkArraySize = binary.LittleEndian.Uint32(buf[152:156])
@@ -468,8 +468,8 @@ func ParseINodeItem(data []byte) (*INodeItem, error) {
 type ExtentDataType uint8
 
 const (
-	ExtentDataInline  ExtentDataType = 0 // 数据直接驻留（小文件）
-	ExtentDataRegular ExtentDataType = 1 // 通常 extent（指向 extent tree）
+	ExtentDataInline   ExtentDataType = 0 // 数据直接驻留（小文件）
+	ExtentDataRegular  ExtentDataType = 1 // 通常 extent（指向 extent tree）
 	ExtentDataPrealloc ExtentDataType = 2 // 预分配但未写
 )
 
@@ -492,14 +492,14 @@ const (
 //	  37   8 offset (extent 内部偏移)
 //	  45   8 num_bytes (本 extent 在文件里覆盖的字节数)
 type ExtentData struct {
-	RamBytes      uint64
-	Compression   uint8
-	Type          ExtentDataType
-	InlineData    []byte // 仅 Type == ExtentDataInline 时有效
-	DiskByteNr    uint64 // 仅 Type != Inline；0 = hole
-	DiskNumBytes  uint64
-	Offset        uint64
-	NumBytes      uint64
+	RamBytes     uint64
+	Compression  uint8
+	Type         ExtentDataType
+	InlineData   []byte // 仅 Type == ExtentDataInline 时有效
+	DiskByteNr   uint64 // 仅 Type != Inline；0 = hole
+	DiskNumBytes uint64
+	Offset       uint64
+	NumBytes     uint64
 }
 
 // ParseExtentData 解析 EXTENT_DATA item data 区。

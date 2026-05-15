@@ -178,8 +178,8 @@ func minimalWAV() []byte {
 	buf.Write([]byte{0, 0, 0, 0})
 	buf.WriteString("WAVE")
 	buf.WriteString("fmt ")
-	buf.Write([]byte{16, 0, 0, 0})    // fmt chunk size = 16
-	buf.Write(make([]byte, 16))       // fmt 数据
+	buf.Write([]byte{16, 0, 0, 0}) // fmt chunk size = 16
+	buf.Write(make([]byte, 16))    // fmt 数据
 	buf.WriteString("data")
 	buf.Write([]byte{4, 0, 0, 0}) // data chunk size = 4
 	buf.Write([]byte{1, 2, 3, 4})

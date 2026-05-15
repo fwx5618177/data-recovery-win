@@ -54,7 +54,7 @@ func (s Schedule) GenerateInstallCommand() (string, error) {
 }
 
 // buildWindowsRegisterTaskPS 构造一段 PowerShell 脚本注册定时任务。
-// 路径里的单引号要双写成 ''（PowerShell 单引号字符串转义规则）。
+// 路径里的单引号要双写成 ”（PowerShell 单引号字符串转义规则）。
 //
 // 暴露成包级函数方便单元测试（runtime 在测试机上可能不是 Windows）。
 func buildWindowsRegisterTaskPS(srcDir, dstDir string, hour int) string {

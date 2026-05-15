@@ -23,9 +23,12 @@ func isUnixRoot() bool {
 // ensureAdminPrivileges 在非 Windows 平台尝试自动提权 + 重启自身。
 //
 // macOS：用 osascript "do shell script ... with administrator privileges" 弹原生
-//        Touch ID / 密码对话框，新进程 root 启动；本进程退出。
+//
+//	Touch ID / 密码对话框，新进程 root 启动；本进程退出。
+//
 // Linux：探测 pkexec / sudo -A（需 SUDO_ASKPASS 提供 GUI 密码框），都不可用则
-//        打印指南后退出。
+//
+//	打印指南后退出。
 //
 // 返回 (relaunched=true, nil) 时主进程必须立即返回（新进程已起）；
 // (false, nil) 表示已经是 root / 无须重启。
@@ -73,19 +76,19 @@ func ensureAdminPrivileges() (bool, error) {
 //
 // 三个独立信号任一满足即返回 true：
 //
-//	1. 经典 CI env vars（GitHub Actions / GitLab / CircleCI / Jenkins 等）
-//	2. Wails 自身在 build 阶段跑 bindings 临时二进制时设置的环境变量
-//	3. stdin 不是 char device（被管道 / 重定向接管 = 非交互）
+//  1. 经典 CI env vars（GitHub Actions / GitLab / CircleCI / Jenkins 等）
+//  2. Wails 自身在 build 阶段跑 bindings 临时二进制时设置的环境变量
+//  3. stdin 不是 char device（被管道 / 重定向接管 = 非交互）
 func isNonInteractiveContext() bool {
 	for _, k := range []string{
-		"CI",                      // 通用 (GitHub Actions / GitLab / CircleCI 等)
-		"GITHUB_ACTIONS",          // GitHub Actions
+		"CI",             // 通用 (GitHub Actions / GitLab / CircleCI 等)
+		"GITHUB_ACTIONS", // GitHub Actions
 		"BUILDKITE",
 		"JENKINS_URL",
 		"GITLAB_CI",
 		"CIRCLECI",
-		"TF_BUILD",                // Azure Pipelines
-		"WAILS_BIND",              // Wails 内部约定（如有）
+		"TF_BUILD",   // Azure Pipelines
+		"WAILS_BIND", // Wails 内部约定（如有）
 		"WAILS_BUILD",
 		"WAILS_NO_AUTO_RUN",
 	} {

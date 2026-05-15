@@ -17,10 +17,10 @@ func TestSignCustody_RoundTrip(t *testing.T) {
 	_ = pub
 
 	c := Custody{
-		ToolName:    "DataRecoveryMaster",
-		ToolVersion: "test",
-		StartedAt:   time.Date(2026, 4, 23, 0, 0, 0, 0, time.UTC),
-		CompletedAt: time.Date(2026, 4, 23, 1, 0, 0, 0, time.UTC),
+		ToolName:     "DataRecoveryMaster",
+		ToolVersion:  "test",
+		StartedAt:    time.Date(2026, 4, 23, 0, 0, 0, 0, time.UTC),
+		CompletedAt:  time.Date(2026, 4, 23, 1, 0, 0, 0, time.UTC),
 		SourceDevice: "/dev/null",
 		OutputFiles: []CustodyFile{
 			{Path: "a.txt", Size: 10, SHA256: "deadbeef"},

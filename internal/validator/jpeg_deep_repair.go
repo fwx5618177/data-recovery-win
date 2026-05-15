@@ -199,12 +199,12 @@ func InjectStandardDHT(data []byte) (patched []byte, info string) {
 // DeepRepairJPEG 链式跑多种修复策略，返回任一能 Decode 的修复版本。
 //
 // 策略顺序（逐步加大改动）：
-//   1) 原文件直接 Decode
-//   2) RepairJPEG（边界修复 + RST 对齐截尾）
-//   3) InjectStandardDHT（缺 DHT 段时）
-//   4) RepairJPEG → 再 InjectStandardDHT 组合
-//   5) StitchHuffmanState（合成 RST 注入 + 损坏点重同步）
-//   6) PartialDecode（in-tree partial JPEG decoder，碰损坏返回部分图像）—— 终极策略
+//  1. 原文件直接 Decode
+//  2. RepairJPEG（边界修复 + RST 对齐截尾）
+//  3. InjectStandardDHT（缺 DHT 段时）
+//  4. RepairJPEG → 再 InjectStandardDHT 组合
+//  5. StitchHuffmanState（合成 RST 注入 + 损坏点重同步）
+//  6. PartialDecode（in-tree partial JPEG decoder，碰损坏返回部分图像）—— 终极策略
 //
 // 返回 (final, true) 仅当某个策略产生的字节通过 image/jpeg.Decode。
 // 失败返回 (nil, false)。

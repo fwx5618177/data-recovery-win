@@ -39,7 +39,7 @@ func TestDecryptDataBlockAESGCM_RoundTrip(t *testing.T) {
 	for i := range dek {
 		dek[i] = byte(i + 1)
 	}
-	iv := []byte("123456789012")        // 12 bytes
+	iv := []byte("123456789012") // 12 bytes
 	aad := []byte("ZFS-BP-header-aad")
 	plaintext := []byte("这是 ZFS 加密池里的秘密数据 secret payload")
 

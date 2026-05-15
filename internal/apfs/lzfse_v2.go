@@ -69,15 +69,14 @@ const (
 	lmdSymbolMax     = 64  // D；L/M 上限 20
 )
 
-
 // V2Header 解出来的 v2 block header（Apple lzfse_compressed_block_header_v2 移植）
 type v2Header struct {
-	nRawBytes         uint32
-	nLiterals         uint32
+	nRawBytes            uint32
+	nLiterals            uint32
 	nLiteralPayloadBytes uint32
-	nMatches          uint32
-	literalBits       int8 // 0..7
-	literalStates     [4]uint16
+	nMatches             uint32
+	literalBits          int8 // 0..7
+	literalStates        [4]uint16
 
 	nLMDPayloadBytes uint32
 	lmdBits          int8 // 0..7
@@ -137,9 +136,9 @@ func parseV2Header(b []byte) (*v2Header, error) {
 // fseTable FSE decoder 表（tANS）
 // 每个 state 有 (symbol, delta_nbits, delta_finalState)
 type fseEntry struct {
-	symbol     int16  // 解码出的 symbol
-	nbits      uint8  // 下一次从流读多少 bit
-	deltaState int32  // 减去这些 bit 加回 base 得到 nextState
+	symbol     int16 // 解码出的 symbol
+	nbits      uint8 // 下一次从流读多少 bit
+	deltaState int32 // 减去这些 bit 加回 base 得到 nextState
 }
 
 // buildFSETable 从 frequency 表构造 FSE decoder 表。
@@ -256,13 +255,13 @@ var ErrLZFSEFSEPartial = fmt.Errorf(
 // DecompressLZFSEv2Block 解一个 bvx2 block。
 //
 // 策略（按可靠性排序）：
-//   1. 纯 Go decoder (decodeV2BlockPureGo)：完整移植 Apple lzfse v2
-//      header + freq + FSE table + bit reader + LMD + rep-distance。
-//      regression bar：lzfse_v2_e2e_test.go 用 Apple compression_tool
-//      生成真 bvx2 后字节级 round-trip 验证。跨平台无外部依赖。
-//   2. macOS 上调 /usr/bin/compression_tool（Apple 官方 lzfse）—— 防御性
-//      fallback：当真有未覆盖的 Apple encoder 变体或损坏数据时兜底。
-//   3. ErrLZFSEFSEPartial：明确"无法解开"，上层退化到 ErrLZFSEv2Unsupported。
+//  1. 纯 Go decoder (decodeV2BlockPureGo)：完整移植 Apple lzfse v2
+//     header + freq + FSE table + bit reader + LMD + rep-distance。
+//     regression bar：lzfse_v2_e2e_test.go 用 Apple compression_tool
+//     生成真 bvx2 后字节级 round-trip 验证。跨平台无外部依赖。
+//  2. macOS 上调 /usr/bin/compression_tool（Apple 官方 lzfse）—— 防御性
+//     fallback：当真有未覆盖的 Apple encoder 变体或损坏数据时兜底。
+//  3. ErrLZFSEFSEPartial：明确"无法解开"，上层退化到 ErrLZFSEv2Unsupported。
 //
 // 成功返回解出字节数。
 func DecompressLZFSEv2Block(block []byte, dst []byte) (int, error) {

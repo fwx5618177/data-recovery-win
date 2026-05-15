@@ -123,16 +123,18 @@ func ReconstructRAIDZ1(columns [][]byte, missingIdx int) ([]byte, error) {
 // missing 是缺失盘的 index 列表（必须 ≤ 2）
 //
 // 代数：
-//   P = Σ D_i  (XOR)
-//   Q = Σ α^i · D_i   其中 α = 2 (generator)
+//
+//	P = Σ D_i  (XOR)
+//	Q = Σ α^i · D_i   其中 α = 2 (generator)
 //
 // 假设 i < j 是两个缺失 index（映射到 data 编号 k_i, k_j）：
-//   case 1: 都是 data → 解线性方程 {D_i + D_j = P', α^{k_i} D_i + α^{k_j} D_j = Q'}
-//     其中 P' = P XOR (已知 data XOR 和)，Q' = Q XOR (已知 α^k D XOR 和)
-//     D_i = (Q' + α^{k_j} P') / (α^{k_i} + α^{k_j})
-//     D_j = P' + D_i
-//   case 2: 1 data + 1 parity (P 或 Q) → 先用另一 parity 解缺 data，再重算缺 parity
-//   case 3: 两个 parity → 直接从 data 重算
+//
+//	case 1: 都是 data → 解线性方程 {D_i + D_j = P', α^{k_i} D_i + α^{k_j} D_j = Q'}
+//	  其中 P' = P XOR (已知 data XOR 和)，Q' = Q XOR (已知 α^k D XOR 和)
+//	  D_i = (Q' + α^{k_j} P') / (α^{k_i} + α^{k_j})
+//	  D_j = P' + D_i
+//	case 2: 1 data + 1 parity (P 或 Q) → 先用另一 parity 解缺 data，再重算缺 parity
+//	case 3: 两个 parity → 直接从 data 重算
 func ReconstructRAIDZ2(columns [][]byte, missing []int) error {
 	if len(columns) < 3 {
 		return fmt.Errorf("RAIDZ2 至少 3 列 (P+Q+>=1 data)")
@@ -325,12 +327,13 @@ func ReconstructRAIDZ2(columns [][]byte, missing []int) error {
 // columns 顺序：[0]=P, [1]=Q, [2]=R, [3..N+2]=data (N data disks)
 //
 // missing 支持所有组合（≤3 盘缺失）：
-//   ≤2 缺失 → 降级走 RAIDZ2 逻辑（R 不动）或 P/Q parity 缺失场景
-//   3 盘缺失 → 分类讨论：
-//     case A: 3 parity 全缺 → 从 data 重算
-//     case B: 2 parity + 1 data → 用剩 1 parity 解 data，再重算 parity
-//     case C: 1 parity + 2 data → 用剩 2 parity 解 data，再重算 parity
-//     case D: 3 data 全缺 → 解 3×3 Vandermonde 矩阵求解（核心场景，本次实现）
+//
+//	≤2 缺失 → 降级走 RAIDZ2 逻辑（R 不动）或 P/Q parity 缺失场景
+//	3 盘缺失 → 分类讨论：
+//	  case A: 3 parity 全缺 → 从 data 重算
+//	  case B: 2 parity + 1 data → 用剩 1 parity 解 data，再重算 parity
+//	  case C: 1 parity + 2 data → 用剩 2 parity 解 data，再重算 parity
+//	  case D: 3 data 全缺 → 解 3×3 Vandermonde 矩阵求解（核心场景，本次实现）
 //
 // GF(2^8) 矩阵求解用 Gaussian elimination（in-place, 无除法只 XOR + gfMul/gfDiv）
 func ReconstructRAIDZ3(columns [][]byte, missing []int) error {
@@ -425,9 +428,10 @@ func ReconstructRAIDZ3(columns [][]byte, missing []int) error {
 // solveThreeData 三 data 缺失核心求解：Gaussian elimination on GF(2^8)
 //
 // 方程组：
-//   | 1        1        1        |   | D_a |   | P' |
-//   | α^ka     α^kb     α^kc     | · | D_b | = | Q' |
-//   | α^(2ka)  α^(2kb)  α^(2kc)  |   | D_c |   | R' |
+//
+//	| 1        1        1        |   | D_a |   | P' |
+//	| α^ka     α^kb     α^kc     | · | D_b | = | Q' |
+//	| α^(2ka)  α^(2kb)  α^(2kc)  |   | D_c |   | R' |
 //
 // P' = P XOR (已知 data 的 XOR)
 // Q' = Q XOR (已知 α^l · D_l 的 XOR)

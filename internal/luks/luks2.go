@@ -93,23 +93,23 @@ type LUKS2Metadata struct {
 
 // LUKS2Keyslot JSON keyslot 描述
 type LUKS2Keyslot struct {
-	Type     string         `json:"type"`     // "luks2"
-	KeySize  int            `json:"key_size"` // master key bytes
-	KDF      LUKS2KDF       `json:"kdf"`
-	AF       LUKS2AF        `json:"af"`
-	Area     LUKS2Area      `json:"area"`
-	Priority *int           `json:"priority,omitempty"`
+	Type     string    `json:"type"`     // "luks2"
+	KeySize  int       `json:"key_size"` // master key bytes
+	KDF      LUKS2KDF  `json:"kdf"`
+	AF       LUKS2AF   `json:"af"`
+	Area     LUKS2Area `json:"area"`
+	Priority *int      `json:"priority,omitempty"`
 }
 
 // LUKS2KDF：argon2id / argon2i / pbkdf2
 type LUKS2KDF struct {
 	Type       string `json:"type"`
-	Salt       string `json:"salt"`        // base64
-	Time       int    `json:"time"`        // argon2 t-cost
-	Memory     int    `json:"memory"`      // argon2 m-cost (KB)
-	CPUs       int    `json:"cpus"`        // argon2 parallelism
-	Hash       string `json:"hash"`        // pbkdf2 hash
-	Iterations int    `json:"iterations"`  // pbkdf2 iter
+	Salt       string `json:"salt"`       // base64
+	Time       int    `json:"time"`       // argon2 t-cost
+	Memory     int    `json:"memory"`     // argon2 m-cost (KB)
+	CPUs       int    `json:"cpus"`       // argon2 parallelism
+	Hash       string `json:"hash"`       // pbkdf2 hash
+	Iterations int    `json:"iterations"` // pbkdf2 iter
 }
 
 // LUKS2AF：AFsplit 配置
@@ -121,8 +121,8 @@ type LUKS2AF struct {
 
 // LUKS2Area：keyslot 加密数据区
 type LUKS2Area struct {
-	Type       string `json:"type"`       // "raw"
-	Offset     string `json:"offset"`     // 字节，作为字符串存（避免 JSON 64-bit 精度问题）
+	Type       string `json:"type"`   // "raw"
+	Offset     string `json:"offset"` // 字节，作为字符串存（避免 JSON 64-bit 精度问题）
 	Size       string `json:"size"`
 	Encryption string `json:"encryption"` // 例 "aes-xts-plain64"
 	KeySize    int    `json:"key_size"`   // keyslot 加密 key 长度
@@ -130,21 +130,21 @@ type LUKS2Area struct {
 
 // LUKS2Segment：payload 数据段
 type LUKS2Segment struct {
-	Type       string `json:"type"`       // "crypt"
-	Offset     string `json:"offset"`     // 字节
-	Size       string `json:"size"`       // 字节 / "dynamic"
-	IVTweak    string `json:"iv_tweak"`   // "0" 或一个数字
+	Type       string `json:"type"`     // "crypt"
+	Offset     string `json:"offset"`   // 字节
+	Size       string `json:"size"`     // 字节 / "dynamic"
+	IVTweak    string `json:"iv_tweak"` // "0" 或一个数字
 	Encryption string `json:"encryption"`
 	SectorSize int    `json:"sector_size"`
 }
 
 // LUKS2Digest：master key 摘要
 type LUKS2Digest struct {
-	Type       string   `json:"type"`       // "pbkdf2"
+	Type       string   `json:"type"` // "pbkdf2"
 	Keyslots   []string `json:"keyslots"`
 	Segments   []string `json:"segments"`
-	Salt       string   `json:"salt"`       // base64
-	Digest     string   `json:"digest"`     // base64
+	Salt       string   `json:"salt"`   // base64
+	Digest     string   `json:"digest"` // base64
 	Iterations int      `json:"iterations"`
 	Hash       string   `json:"hash"`
 }

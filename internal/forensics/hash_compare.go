@@ -65,7 +65,7 @@ func (db *NSRLDB) Size() int {
 // VTReport VirusTotal 文件报告的精简返回
 type VTReport struct {
 	SHA256       string `json:"sha256"`
-	Malicious    int    `json:"malicious"`     // 多少 AV 报恶意
+	Malicious    int    `json:"malicious"` // 多少 AV 报恶意
 	Suspicious   int    `json:"suspicious"`
 	Undetected   int    `json:"undetected"`
 	TotalEngines int    `json:"totalEngines"`
@@ -74,8 +74,8 @@ type VTReport struct {
 
 // VTClient VirusTotal API client（用户自带 API key）
 type VTClient struct {
-	APIKey  string
-	HTTP    *http.Client
+	APIKey string
+	HTTP   *http.Client
 }
 
 // NewVTClient 默认 30s 超时

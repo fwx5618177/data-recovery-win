@@ -19,8 +19,8 @@ func TestReadPrimaryHeader_Basic(t *testing.T) {
 	binary.LittleEndian.PutUint64(hdr[24:32], 1)  // my_lba
 	binary.LittleEndian.PutUint64(hdr[40:48], 34)
 	binary.LittleEndian.PutUint64(hdr[48:56], 8158)
-	binary.LittleEndian.PutUint64(hdr[72:80], 2)  // part_entry_lba
-	binary.LittleEndian.PutUint32(hdr[80:84], 1)  // 1 entry
+	binary.LittleEndian.PutUint64(hdr[72:80], 2) // part_entry_lba
+	binary.LittleEndian.PutUint32(hdr[80:84], 1) // 1 entry
 	binary.LittleEndian.PutUint32(hdr[84:88], 128)
 	// 计算 CRC（CRC 字段先 0）
 	binary.LittleEndian.PutUint32(hdr[16:20], 0)
@@ -28,12 +28,12 @@ func TestReadPrimaryHeader_Basic(t *testing.T) {
 	binary.LittleEndian.PutUint32(hdr[16:20], c)
 
 	// 分区 entry @ LBA 2
-	ent := disk[1024:1024+128]
+	ent := disk[1024 : 1024+128]
 	for i := 0; i < 16; i++ {
 		ent[i] = byte(0xA0 + i) // 非零 typeGUID
 	}
-	binary.LittleEndian.PutUint64(ent[32:40], 100)  // start LBA
-	binary.LittleEndian.PutUint64(ent[40:48], 200)  // end LBA
+	binary.LittleEndian.PutUint64(ent[32:40], 100) // start LBA
+	binary.LittleEndian.PutUint64(ent[40:48], 200) // end LBA
 
 	r := testutil.NewMemReader(disk)
 	h, err := ReadPrimaryHeader(r)

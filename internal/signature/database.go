@@ -331,9 +331,9 @@ func (db *SignatureDB) initSignatures() {
 		Description: "AVIF 图像（AV1）",
 		Category:    types.CategoryImage,
 		Headers: [][]byte{
-			hex("00000020667479706176696600000000"),     // size=32 + ftyp + "avif"
-			hex("000000186674797061766966"),              // size=24 + ftyp + "avif"
-			hex("0000001c667479706176696600000000"),     // size=28 + ftyp + "avif"
+			hex("00000020667479706176696600000000"), // size=32 + ftyp + "avif"
+			hex("000000186674797061766966"),         // size=24 + ftyp + "avif"
+			hex("0000001c667479706176696600000000"), // size=28 + ftyp + "avif"
 		},
 		MaxSize: 256 * MB,
 	})
@@ -709,8 +709,8 @@ func (db *SignatureDB) initSignatures() {
 		Description: "AVCHD 摄影机视频 (M2TS)",
 		Category:    types.CategoryVideo,
 		Headers: [][]byte{
-			hex("4742470000"),     // BD M2TS sync byte
-			hex("4742470180"),     // 同上变体
+			hex("4742470000"), // BD M2TS sync byte
+			hex("4742470180"), // 同上变体
 		},
 		MaxSize: 10 * GB,
 	})
@@ -770,7 +770,7 @@ func (db *SignatureDB) initSignatures() {
 		Extension:   "bson",
 		Description: "BSON 文档（MongoDB 导出）",
 		Category:    types.CategoryDatabase,
-		Headers: [][]byte{
+		Headers:     [][]byte{
 			// BSON 文档以 4 字节 LE 长度起头，没有固定 magic；
 			// 不可靠雕刻；放弃
 		},

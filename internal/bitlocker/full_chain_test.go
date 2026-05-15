@@ -143,9 +143,9 @@ func TestFullChain_RealLikeBitLockerImage(t *testing.T) {
 	fveMetaBytes := make([]byte, metaTotalSize)
 	copy(fveMetaBytes[0:8], []byte(fveOEMID))
 	binary.LittleEndian.PutUint16(fveMetaBytes[8:10], metaTotalSize)
-	binary.LittleEndian.PutUint16(fveMetaBytes[10:12], 2)            // Version
+	binary.LittleEndian.PutUint16(fveMetaBytes[10:12], 2)             // Version
 	binary.LittleEndian.PutUint16(fveMetaBytes[12:14], metaHeaderLen) // HeaderSize
-	binary.LittleEndian.PutUint16(fveMetaBytes[14:16], 1)            // CopyNumber
+	binary.LittleEndian.PutUint16(fveMetaBytes[14:16], 1)             // CopyNumber
 	for i := 0; i < 16; i++ {
 		fveMetaBytes[16+i] = byte(0xC0 + i) // VolumeIdentifier
 	}

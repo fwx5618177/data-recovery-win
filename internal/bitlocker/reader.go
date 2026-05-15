@@ -22,6 +22,7 @@ import (
 // BitLocker 卷头不加密的部分：
 //   - 第一个 sector（boot sector）—— 含 OEM ID 和 FVE metadata 偏移指针
 //   - 一些预留区域和 metadata blocks 本身
+//
 // 标准做法：从 metadata 里读 "Volume Header Block" datum（type 0x2007）拿到加密区
 // 起止偏移；本实现简化为"全部扇区都解"——上层若读到卷头明文区也只是看到乱码而已，
 // 后续读 NTFS boot sector 时都在加密区内，不影响。

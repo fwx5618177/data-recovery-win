@@ -37,6 +37,7 @@ var lzfseFreqNBitsTable = [32]uint8{
 	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
 	2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14,
 }
+
 // Apple `lzfse_decode_base.c` lzfse_freq_value_table（精确移植 BSD-3）：
 //
 //	{0, 2, 1, 4, 0, 3, 1, -1, 0, 2, 1, 5, 0, 3, 1, -1,
@@ -134,12 +135,12 @@ func (b *bitStreamForward) advance(n uint8) {
 // decodeFrequencies 从 bit-packed stream 解出一个 freq 数组。
 //
 // Apple LZFSE v2 算法（lzfse_decode_v2_block.c `decode_v1_freq_value`）：
-//   1. peek 14 bits buffered
-//   2. 取低 5 bits 作 codeword index
-//   3. nbits = lzfseFreqNBitsTable[idx], val = lzfseFreqValueTable[idx]
-//   4. nbits == 8: val = 8 + ((peek14 >> 4) & 0xF)
-//   5. nbits == 14: val = 24 + ((peek14 >> 4) & 0x3FF)
-//   6. stream.advance(nbits)
+//  1. peek 14 bits buffered
+//  2. 取低 5 bits 作 codeword index
+//  3. nbits = lzfseFreqNBitsTable[idx], val = lzfseFreqValueTable[idx]
+//  4. nbits == 8: val = 8 + ((peek14 >> 4) & 0xF)
+//  5. nbits == 14: val = 24 + ((peek14 >> 4) & 0x3FF)
+//  6. stream.advance(nbits)
 //
 // totalSymbols = 20 (L) / 20 (M) / 64 (D) / 256 (literal)
 // 约束：sum(freq) == numStates（由调用方传入 literalStates / lmdStates）
@@ -179,10 +180,11 @@ func decodeFrequencies(stream *bitStreamForward, totalSymbols int, numStates int
 // 返回 (lFreqs, mFreqs, dFreqs, litFreqs, consumedBytes, err)
 //
 // 布局（Apple `lzfse_decode_v1` 函数）：
-//   L freqs (20 symbols, 总和 = 64)
-//   M freqs (20 symbols, 总和 = 64)
-//   D freqs (64 symbols, 总和 = 256)   ← 早期 bug：以为 D 也是 64
-//   literal freqs (256 symbols, 总和 = 1024)
+//
+//	L freqs (20 symbols, 总和 = 64)
+//	M freqs (20 symbols, 总和 = 64)
+//	D freqs (64 symbols, 总和 = 256)   ← 早期 bug：以为 D 也是 64
+//	literal freqs (256 symbols, 总和 = 1024)
 //
 // **关键**：D states = 256（不是 64）。Apple 给 D 用 8-bit accuracy
 // （L/M 是 6-bit accuracy）因为 D 的 symbol 范围 1..65535 比 L/M 的 0..max

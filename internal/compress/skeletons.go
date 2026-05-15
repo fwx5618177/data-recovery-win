@@ -31,14 +31,15 @@ import (
 //	+0x10 ... data
 //
 // type 取值：
-//   1 = uncompressed, inline in xattr
-//   3 = zlib-deflate, inline (data follows header)
-//   4 = zlib-deflate, in resource fork
-//   5 = "no" (sparse) — extents 全 0
-//   7 = LZVN, inline
-//   8 = LZVN, in resource fork
-//  11 = LZFSE, inline
-//  12 = LZFSE, in resource fork
+//
+//	 1 = uncompressed, inline in xattr
+//	 3 = zlib-deflate, inline (data follows header)
+//	 4 = zlib-deflate, in resource fork
+//	 5 = "no" (sparse) — extents 全 0
+//	 7 = LZVN, inline
+//	 8 = LZVN, in resource fork
+//	11 = LZFSE, inline
+//	12 = LZFSE, in resource fork
 const decmpfsMagic uint32 = 0x636D7066 // "fpmc"
 
 type DecmpfsHeader struct {
@@ -128,11 +129,11 @@ func IsLZXCompact(b []byte) bool {
 //	+0x14 chunk_size   uint32  通常 0x8000 = 32KB
 //	...
 type WIMHeader struct {
-	HeaderSize      uint32
-	Version         uint32
-	Flags           uint32
-	ChunkSize       uint32
-	Compression     string // "LZX" / "XPRESS" / "LZMS" / "uncompressed"
+	HeaderSize  uint32
+	Version     uint32
+	Flags       uint32
+	ChunkSize   uint32
+	Compression string // "LZX" / "XPRESS" / "LZMS" / "uncompressed"
 }
 
 // ParseWIMHeader 解前 208 字节；返回压缩类型。识别后上层可决定是否调用外部解压（compact /U）

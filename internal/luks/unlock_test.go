@@ -24,13 +24,13 @@ const (
 
 // buildLUKS1Image 构造一个 1MB 的 LUKS1 镜像 fixture。
 //
-//   payload 区域不真填密文（我们只测 unlock 链，全卷 sector reader 留给后面）；
-//   仅保证 keyslot 区域里能解出 mk 且 mk_digest 正确。
+//	payload 区域不真填密文（我们只测 unlock 链，全卷 sector reader 留给后面）；
+//	仅保证 keyslot 区域里能解出 mk 且 mk_digest 正确。
 func buildLUKS1Image(t *testing.T, password string, masterKey []byte) []byte {
 	t.Helper()
 
 	const (
-		ksIter      = 1000 // 测试用低轮次
+		ksIter       = 1000 // 测试用低轮次
 		mkDigestIter = 1000
 	)
 

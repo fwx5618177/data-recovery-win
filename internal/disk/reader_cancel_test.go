@@ -61,12 +61,12 @@ func TestImageReader_CancelPoisonsFutureReads(t *testing.T) {
 // 用来跨平台测 disk 包以外的 reader 链（ResilientReader / DecryptingReader 等）
 // 是否正确透传 Cancel。
 type mockCancellableReader struct {
-	mu          sync.Mutex
-	data        []byte
-	sectorSize  int
-	devicePath  string
-	cancelled   atomic.Bool
-	readCount   atomic.Int64 // 真正打到 backend 的读次数
+	mu         sync.Mutex
+	data       []byte
+	sectorSize int
+	devicePath string
+	cancelled  atomic.Bool
+	readCount  atomic.Int64 // 真正打到 backend 的读次数
 }
 
 func newMockCancellableReader(size int, sectorSize int) *mockCancellableReader {

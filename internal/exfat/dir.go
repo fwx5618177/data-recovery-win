@@ -15,13 +15,14 @@ import (
 //   - 1 个 primary: File Directory Entry (0x85)
 //   - 1 个 secondary: Stream Extension (0xC0)
 //   - N 个 secondary: File Name (0xC1)，N = ceil(NameLen/15)
+//
 // primary 的 SecondaryCount 字段告诉我们后面还跟几条 secondary。
 const (
 	// In-use primary entry types
-	entryFile            uint8 = 0x85
+	entryFile             uint8 = 0x85
 	entryAllocationBitmap uint8 = 0x81
-	entryUpcaseTable     uint8 = 0x82
-	entryVolumeLabel     uint8 = 0x83
+	entryUpcaseTable      uint8 = 0x82
+	entryVolumeLabel      uint8 = 0x83
 
 	// In-use secondary entry types
 	entryStreamExtension uint8 = 0xC0
@@ -50,14 +51,14 @@ const (
 // DirEntry 是一个 entry set 解析后的完整文件信息。
 // 所有 subfield 都已经从 primary / stream / filename 三类条目合并好。
 type DirEntry struct {
-	Name         string    // UTF-16 解码后的文件名
-	FileSize     int64     // Data Length（真实文件大小，字节）
-	ValidSize    int64     // Valid Data Length（通常 == FileSize）
-	FirstCluster uint32    // 第一个簇号；0 或 ClusterHeapOffset 都代表"无数据"
-	NoFatChain   bool      // General Secondary Flags bit 1：1=连续存储、FAT 链不用走
-	IsDirectory  bool      // 是否为目录（由 FileAttributes bit 4 决定）
-	IsDeleted    bool      // 该 entry set 的 primary type 高位是否被清
-	Attr         FileAttr  // 原始属性位
+	Name         string   // UTF-16 解码后的文件名
+	FileSize     int64    // Data Length（真实文件大小，字节）
+	ValidSize    int64    // Valid Data Length（通常 == FileSize）
+	FirstCluster uint32   // 第一个簇号；0 或 ClusterHeapOffset 都代表"无数据"
+	NoFatChain   bool     // General Secondary Flags bit 1：1=连续存储、FAT 链不用走
+	IsDirectory  bool     // 是否为目录（由 FileAttributes bit 4 决定）
+	IsDeleted    bool     // 该 entry set 的 primary type 高位是否被清
+	Attr         FileAttr // 原始属性位
 	CreatedTime  *time.Time
 	ModifiedTime *time.Time
 	AccessedTime *time.Time

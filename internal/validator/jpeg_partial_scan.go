@@ -348,12 +348,13 @@ func clip(v int32) int32 {
 //   - 2D 第二次 1D 后 +128<<16, >>17 归一 + 加 128 偏移（YCbCr level shift）
 //
 // 关键常量（各 cosine 值 × 2048）：
-//   w1 = cos(pi/16)*2*2048 = 2841
-//   w2 = cos(2*pi/16)*2*2048 = 2676
-//   w3 = cos(3*pi/16)*2*2048 = 2408
-//   w5 = cos(5*pi/16)*2*2048 = 1609
-//   w6 = cos(6*pi/16)*2*2048 = 1108
-//   w7 = cos(7*pi/16)*2*2048 = 565
+//
+//	w1 = cos(pi/16)*2*2048 = 2841
+//	w2 = cos(2*pi/16)*2*2048 = 2676
+//	w3 = cos(3*pi/16)*2*2048 = 2408
+//	w5 = cos(5*pi/16)*2*2048 = 1609
+//	w6 = cos(6*pi/16)*2*2048 = 1108
+//	w7 = cos(7*pi/16)*2*2048 = 565
 const (
 	w1 = 2841
 	w2 = 2676
@@ -381,23 +382,24 @@ const (
 //   - DC-only: ~27 ns/op  (短路命中，自然图像 ~30-60% block 命中此路径)
 //   - Sparse:  ~60 ns/op
 //   - Dense:   ~84 ns/op
+//
 // vs 早期 cosine-matrix IDCT（精度 40 像素差）：精度 5.90 + 速度同档
 // vs Loeffler 朴素版（精度 5.90，DC=35/Sparse=63/Dense=88）：DC-only 快 24%
 // （得益于 OR-fused DC-only 检测和 BCE hint）
 //
 // **关于"激进 SIMD 优化" 的工程取舍**：
 //
-//   纯 Go 不写 .s assembly，剩余的优化空间不大（loop unrolling、BCE 等只有 5-15%）。
-//   真要追平 libjpeg-turbo 的 SIMD 性能（NEON / AVX2，5-10× 提速），需要：
-//     1. 写 amd64 / arm64 .s 文件用 8-wide vector 指令
-//     2. 维护 fallback 纯 Go 路径给其他架构
-//     3. 写 build constraints + benchmark CI
+//	纯 Go 不写 .s assembly，剩余的优化空间不大（loop unrolling、BCE 等只有 5-15%）。
+//	真要追平 libjpeg-turbo 的 SIMD 性能（NEON / AVX2，5-10× 提速），需要：
+//	  1. 写 amd64 / arm64 .s 文件用 8-wide vector 指令
+//	  2. 维护 fallback 纯 Go 路径给其他架构
+//	  3. 写 build constraints + benchmark CI
 //
-//   工程取舍：本工具典型 workload 是恢复几百到几千张 JPEG，IDCT 总耗时
-//   ~1-10 秒（不是热路径，磁盘 IO + 熵解码才是）。Loeffler pure-Go 已够用。
-//   未来若集成到批量验证场景（10 万张 / 秒级），再投入 assembly 优化。
+//	工程取舍：本工具典型 workload 是恢复几百到几千张 JPEG，IDCT 总耗时
+//	~1-10 秒（不是热路径，磁盘 IO + 熵解码才是）。Loeffler pure-Go 已够用。
+//	未来若集成到批量验证场景（10 万张 / 秒级），再投入 assembly 优化。
 //
-//   保留 BCE hint + DC-only 短路（这两个是 0 维护成本的快速胜利）。
+//	保留 BCE hint + DC-only 短路（这两个是 0 维护成本的快速胜利）。
 func idct8x8(block *[64]int32) {
 	// Bounds check elimination 提示：让编译器知道整个 [64]int32 都可访问。
 	_ = (*block)[63]

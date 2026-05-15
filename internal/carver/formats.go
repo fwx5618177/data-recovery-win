@@ -553,12 +553,12 @@ func isValidAtomType(t string) bool {
 // 合法 bitrate/sample-rate/layer 组合也只有 2/3 过滤率，纯随机数据也能
 // 偶发凑出几个"valid-looking frame"。所以这里做三层硬性校验：
 //
-//   1. AC 命中偏移处必须直接是一个合法帧头（FFFB/FFF3/FFF2），或
-//      是一个合法的 ID3v2 头（"ID3" + syncsafe size + 非零版本号）。
-//   2. 跳过 ID3v2 tag 后，**下一个字节**就必须是合法帧头（不允许移位搜索）。
-//   3. 从第一帧起连续读 minValidFrames 帧，每帧必须正好落在 prev+fs 偏移上
-//      （不允许 1-3 字节的 slack），且 fs 在合法范围（16..2881 字节）内。
-//      一旦失败就整体放弃，而不是"容忍 3 次"。
+//  1. AC 命中偏移处必须直接是一个合法帧头（FFFB/FFF3/FFF2），或
+//     是一个合法的 ID3v2 头（"ID3" + syncsafe size + 非零版本号）。
+//  2. 跳过 ID3v2 tag 后，**下一个字节**就必须是合法帧头（不允许移位搜索）。
+//  3. 从第一帧起连续读 minValidFrames 帧，每帧必须正好落在 prev+fs 偏移上
+//     （不允许 1-3 字节的 slack），且 fs 在合法范围（16..2881 字节）内。
+//     一旦失败就整体放弃，而不是"容忍 3 次"。
 //
 // 常量 minValidFrames = 16 的依据：
 //   - 单帧 FF + valid header 的随机发生率 ≈ 1/3100

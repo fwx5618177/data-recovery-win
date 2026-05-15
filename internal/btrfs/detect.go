@@ -2,9 +2,10 @@
 // (Fedora 33+, openSUSE)、Synology NAS、Facebook 服务器都用。
 //
 // **本包当前实现的边界**：
-//   ✅ 检测主 superblock (magic "_BHRfS_M" @ offset 0x10000)
-//   ✅ 解关键字段：bytenr / fsid / nodesize / sectorsize / total_bytes / 文件系统标签
-//   ❌ 完整 B-tree 文件枚举 — 1-2 周工作量；调用方要读 Btrfs 文件需要专业工具
+//
+//	✅ 检测主 superblock (magic "_BHRfS_M" @ offset 0x10000)
+//	✅ 解关键字段：bytenr / fsid / nodesize / sectorsize / total_bytes / 文件系统标签
+//	❌ 完整 B-tree 文件枚举 — 1-2 周工作量；调用方要读 Btrfs 文件需要专业工具
 //
 // 价值：让用户在 Linux 盘上看到"这是一个 Btrfs 卷，X GB"，配合 carver 仍可恢复
 // 大部分非碎片化文件。
@@ -43,15 +44,15 @@ const (
 
 // Superblock Btrfs 主超块解析结果（btrfs_super_block 关键字段）。
 type Superblock struct {
-	Offset       int64    // 在卷里的字节偏移（始终 0x10000）
-	FSID         [16]byte // 文件系统 UUID
-	BytesUsed    uint64
-	TotalBytes   uint64
-	SectorSize   uint32
-	NodeSize     uint32
-	LeafSize     uint32
-	StripeSize   uint32
-	Label        string // 用户可见的文件系统标签
+	Offset     int64    // 在卷里的字节偏移（始终 0x10000）
+	FSID       [16]byte // 文件系统 UUID
+	BytesUsed  uint64
+	TotalBytes uint64
+	SectorSize uint32
+	NodeSize   uint32
+	LeafSize   uint32
+	StripeSize uint32
+	Label      string // 用户可见的文件系统标签
 }
 
 // Detect 在给定 volStart 处尝试识别 Btrfs。
@@ -106,8 +107,8 @@ func NewScanner(r disk.DiskReader) *Scanner { return &Scanner{reader: r} }
 // FindVolumes 定位 Btrfs 卷。
 //
 // 策略（v2.8.11 修订）：
-//   1. offset 0 检测（fast path）
-//   2. 16MB 步进全盘扫 _BHRfS_M magic —— **仅 opts.BruteForce=true 启用**
+//  1. offset 0 检测（fast path）
+//  2. 16MB 步进全盘扫 _BHRfS_M magic —— **仅 opts.BruteForce=true 启用**
 func (s *Scanner) FindVolumes(ctx context.Context, opts FindOptions) ([]*Superblock, error) {
 	size, err := s.reader.Size()
 	if err != nil {

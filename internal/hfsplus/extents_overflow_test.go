@@ -12,16 +12,16 @@ func TestScanLeafForExtentsOverflow_FindsRecord(t *testing.T) {
 
 	leafKind := BTNodeKindLeaf
 	buf[8] = byte(leafKind)
-	buf[9] = 1                                          // height
-	binary.BigEndian.PutUint16(buf[10:12], 1)            // 1 record
+	buf[9] = 1                                // height
+	binary.BigEndian.PutUint16(buf[10:12], 1) // 1 record
 
 	// record 内容：12 byte key + 8*8 byte extents = 76 字节
 	rec := make([]byte, 12+8*8)
 	binary.BigEndian.PutUint16(rec[0:2], 10) // keyLength
 	rec[2] = ForkTypeData
 	rec[3] = 0
-	binary.BigEndian.PutUint32(rec[4:8], 42)    // fileID
-	binary.BigEndian.PutUint32(rec[8:12], 8)    // startBlock（catalog 里前 8 个之后）
+	binary.BigEndian.PutUint32(rec[4:8], 42) // fileID
+	binary.BigEndian.PutUint32(rec[8:12], 8) // startBlock（catalog 里前 8 个之后）
 	// 3 个 extent
 	binary.BigEndian.PutUint32(rec[12:16], 100)
 	binary.BigEndian.PutUint32(rec[16:20], 5)

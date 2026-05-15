@@ -71,8 +71,9 @@ type vcUnlockFunc func(reader disk.DiskReader, volStart int64, password string, 
 //
 // PIM (Personal Iterations Multiplier) 是 VeraCrypt 高级用户在创建容器时可
 // 指定的 KDF 强化系数：
-//   pim == 0 → 走默认 iter（500K SHA-512 / 655K RIPEMD-160）
-//   pim > 0  → iter = 15000 + 1000*pim (SHA-512/256) 或 327661 + 2048*pim (RIPEMD-160)
+//
+//	pim == 0 → 走默认 iter（500K SHA-512 / 655K RIPEMD-160）
+//	pim > 0  → iter = 15000 + 1000*pim (SHA-512/256) 或 327661 + 2048*pim (RIPEMD-160)
 //
 // 用 PIM 创建的卷必须用同一 PIM 解开 —— PIM 错跟密码错都返回 ErrWrongPassword。
 func (a *App) UnlockVeraCryptAndScanWithPIM(drivePath, volumeOffsetHex, password string, pim int, mode string) error {

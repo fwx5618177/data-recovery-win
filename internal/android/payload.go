@@ -24,9 +24,10 @@ import (
 // OpenPayloadReader 把 raw payload byte 流包装成"可读的 tar 流"。
 //
 // 参数：
-//   raw     —— 已 Seek 到 PayloadOffset 的 reader
-//   header  —— ParseHeader 返回的头部
-//   master  —— 仅 header.IsEncrypted() 时需要；非加密传 nil
+//
+//	raw     —— 已 Seek 到 PayloadOffset 的 reader
+//	header  —— ParseHeader 返回的头部
+//	master  —— 仅 header.IsEncrypted() 时需要；非加密传 nil
 //
 // 返回的 reader 调用方需要 Close（如果是加密+压缩链，Close 会按顺序拆掉）。
 func OpenPayloadReader(raw io.Reader, header *ABHeader, master *MasterKey) (io.ReadCloser, error) {
@@ -94,11 +95,11 @@ func (c *chainedReadCloser) Close() error {
 // ============================================================================
 
 type cbcStreamDecrypter struct {
-	src    io.Reader
-	mode   cipher.BlockMode
-	buf    []byte // 已解密但还没返还给调用方的字节
+	src       io.Reader
+	mode      cipher.BlockMode
+	buf       []byte // 已解密但还没返还给调用方的字节
 	prevBlock []byte // 已解密但暂未输出（可能是最后一块；要等下一次读到 EOF 才能去 padding）
-	doneEOF bool
+	doneEOF   bool
 }
 
 func newCBCStreamDecrypter(src io.Reader, key, iv []byte) (*cbcStreamDecrypter, error) {

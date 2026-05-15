@@ -2,11 +2,12 @@
 // 让上层（NTFS scanner / carver）可以无感地扫描 RAID 阵列。
 //
 // **支持的 level**：
-//   ✅ RAID 0    — 条带 (stripe)，没有冗余；任一磁盘缺失就完蛋
-//   ✅ RAID 1    — 镜像；任一磁盘可用即可全文恢复
-//   ✅ RAID 5    — 单奇偶校验 (XOR)；最多容许 1 块盘缺失（用 P 重建）
-//   ✅ RAID 6    — 双奇偶 (P + Q, GF(2^8) Reed-Solomon)；最多容许 2 块盘缺失，见 galois.go
-//   ✅ RAID 10   — mirror 对的 stripe；每对至少 1 盘可用
+//
+//	✅ RAID 0    — 条带 (stripe)，没有冗余；任一磁盘缺失就完蛋
+//	✅ RAID 1    — 镜像；任一磁盘可用即可全文恢复
+//	✅ RAID 5    — 单奇偶校验 (XOR)；最多容许 1 块盘缺失（用 P 重建）
+//	✅ RAID 6    — 双奇偶 (P + Q, GF(2^8) Reed-Solomon)；最多容许 2 块盘缺失，见 galois.go
+//	✅ RAID 10   — mirror 对的 stripe；每对至少 1 盘可用
 //
 // 不做"自动检测条带大小 / 顺序"——RAID metadata 五花八门（mdadm / hardware controller /
 // LVM / Storage Spaces / Apple Software RAID），用户应自行知道：盘的顺序、stripe size、
@@ -46,12 +47,12 @@ const (
 
 // Config 描述 RAID 阵列布局
 type Config struct {
-	Level        Level
-	Disks        []disk.DiskReader // 按"原阵列编号"顺序提供；某盘缺失传 nil
-	StripeBytes  int64             // 条带大小（RAID0/5 必填；典型 64KB / 128KB / 512KB）
-	Parity       ParityLayout      // 仅 RAID5 用到
-	LogicalSize  int64             // 阵列对外呈现的总字节大小（不传则按 disks * size 算）
-	devicePath   string            // DevicePath() 返回值
+	Level       Level
+	Disks       []disk.DiskReader // 按"原阵列编号"顺序提供；某盘缺失传 nil
+	StripeBytes int64             // 条带大小（RAID0/5 必填；典型 64KB / 128KB / 512KB）
+	Parity      ParityLayout      // 仅 RAID5 用到
+	LogicalSize int64             // 阵列对外呈现的总字节大小（不传则按 disks * size 算）
+	devicePath  string            // DevicePath() 返回值
 }
 
 // Reader 实现 disk.DiskReader，把 N 个底层盘按 RAID 规则虚拟成一个连续设备。
@@ -232,11 +233,11 @@ func (r *Reader) ReadAt(buf []byte, offset int64) (int, error) {
 //   - 数据列从 (Q列+1) 开始环绕
 //
 // 读路径：
-//   1. 全部在 → 直接读目标数据盘
-//   2. 单盘缺 + 缺的是数据盘 → 用 P 做 XOR 重建（galois.go 里的 XOR 等价于 RAID 5）
-//   3. 单盘缺 + 缺的是 P/Q → 直接读目标
-//   4. 双盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
-//   5. 双盘缺含 P/Q 一个 + 一个数据盘 → 用另一个校验盘重建
+//  1. 全部在 → 直接读目标数据盘
+//  2. 单盘缺 + 缺的是数据盘 → 用 P 做 XOR 重建（galois.go 里的 XOR 等价于 RAID 5）
+//  3. 单盘缺 + 缺的是 P/Q → 直接读目标
+//  4. 双盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
+//  5. 双盘缺含 P/Q 一个 + 一个数据盘 → 用另一个校验盘重建
 func (r *Reader) readRAID6(buf []byte, offset int64) (int, error) {
 	stripe := r.cfg.StripeBytes
 	n := int64(len(r.cfg.Disks))
@@ -285,9 +286,10 @@ func (r *Reader) readRAID6(buf []byte, offset int64) (int, error) {
 
 // rebuildRAID6Row 用同行 stripe 重建缺失盘 missingCol 的字节段。
 // 情况：
-//   a) 目标缺 + 其它盘（含 P、Q）都在 → 单缺场景：优先用 P（XOR）更快
-//   b) 两盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
-//   c) 两盘缺含 P/Q 一个 + 一个数据盘 → 用另一校验盘重建
+//
+//	a) 目标缺 + 其它盘（含 P、Q）都在 → 单缺场景：优先用 P（XOR）更快
+//	b) 两盘缺且都是数据盘 → 调 RAID6RecoverTwoDataDisks
+//	c) 两盘缺含 P/Q 一个 + 一个数据盘 → 用另一校验盘重建
 func (r *Reader) rebuildRAID6Row(out []byte, row int64, pCol, qCol, missingCol int64, diskOff int, readLen int) (int, error) {
 	n := int64(len(r.cfg.Disks))
 	// 找所有缺失列
@@ -389,7 +391,8 @@ func (r *Reader) rebuildRAID6Row(out []byte, row int64, pCol, qCol, missingCol i
 }
 
 // rebuildSingleDataDiskFromQ P 缺时用 Q 重建某个数据盘：
-//   Dx = (Q - Σ_{i≠x 的所有数据盘} α^i·Di) / α^x
+//
+//	Dx = (Q - Σ_{i≠x 的所有数据盘} α^i·Di) / α^x
 func rebuildSingleDataDiskFromQ(out []byte, rowData [][]byte, qData []byte, missingCol, n, pCol, qCol int64, diskOff int, stripeReadOff int64, readLen int) (int, error) {
 	stripe := len(qData)
 	_ = pCol
@@ -461,7 +464,9 @@ func findDataIdx(dataColMap []int64, col int64) int {
 // ---------------- RAID 10 ----------------
 //
 // RAID 10 = N/2 个 mirror 对 stripe 起来：
-//   pair_0 = [disk0, disk1]    pair_1 = [disk2, disk3]    ...
+//
+//	pair_0 = [disk0, disk1]    pair_1 = [disk2, disk3]    ...
+//
 // 写：每个 stripe 写到对里的两块盘；读：从对里任一块可用盘读。
 func (r *Reader) readRAID10(buf []byte, offset int64) (int, error) {
 	stripe := r.cfg.StripeBytes

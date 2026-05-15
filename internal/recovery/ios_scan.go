@@ -63,7 +63,8 @@ func (e *Engine) DiscoverIOSBackups() ([]IOSBackupInfo, error) {
 // ScanIOSBackup 扫描指定备份目录，产出每个文件为 RecoveredFile（源头="ios"）。
 //
 // password = "" 时：
-//   非加密备份正常扫描；加密备份返回 ios.ErrEncrypted，UI 应提示用户输密码。
+//
+//	非加密备份正常扫描；加密备份返回 ios.ErrEncrypted，UI 应提示用户输密码。
 //
 // 会话由 Engine 持有直到 Shutdown —— Recover 阶段要复用 session 拷贝 / 解密文件。
 func (e *Engine) ScanIOSBackup(

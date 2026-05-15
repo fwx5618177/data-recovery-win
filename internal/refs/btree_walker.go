@@ -46,10 +46,10 @@ const (
 
 // ParsedNode 是结构化解析的 MSB+ page
 type ParsedNode struct {
-	Offset    int64
-	LSN       uint64
-	Kind      MinstoreNodeKind
-	Entries   []MinstoreEntry
+	Offset  int64
+	LSN     uint64
+	Kind    MinstoreNodeKind
+	Entries []MinstoreEntry
 	// 如果是 internal node，每个 entry 的 value 解出一个 child page offset
 	ChildPages []int64
 }
@@ -114,9 +114,10 @@ func ParseNodeStructured(reader disk.DiskReader, pageOffset, volStart, volSize i
 // FieldTLV 是 leaf entry value 里一段 (tag, length, payload)
 //
 // ReFS field 编码（社区 RE）：
-//   2 字节 tag (refsField* 常量)
-//   4 字节 length（含 self 的总字节数？或 payload 字节数？社区数据不一致）
-//   payload bytes
+//
+//	2 字节 tag (refsField* 常量)
+//	4 字节 length（含 self 的总字节数？或 payload 字节数？社区数据不一致）
+//	payload bytes
 type FieldTLV struct {
 	Tag     uint16
 	Length  uint32
@@ -152,17 +153,18 @@ func ParseValueAsTLV(value []byte) []FieldTLV {
 // ExtractFileNameFromTLV 在 TLV fields 里找 $FILE_NAME，返回 utf-8 名 + parent ID
 //
 // $FILE_NAME payload 估计布局（社区 RE）：
-//   +0x00  uint64 parent object id
-//   +0x08  uint64 created time (FILETIME)
-//   +0x10  uint64 modified time
-//   +0x18  uint64 mft_changed time
-//   +0x20  uint64 access time
-//   +0x28  uint64 allocated_size
-//   +0x30  uint64 file_size
-//   +0x38  uint32 file_attributes
-//   +0x3C  uint8  name_length (UTF-16 units)
-//   +0x3D  uint8  name_type (0=POSIX, 1=Win32, 2=DOS, 3=Win32+DOS)
-//   +0x3E  utf16  name_units
+//
+//	+0x00  uint64 parent object id
+//	+0x08  uint64 created time (FILETIME)
+//	+0x10  uint64 modified time
+//	+0x18  uint64 mft_changed time
+//	+0x20  uint64 access time
+//	+0x28  uint64 allocated_size
+//	+0x30  uint64 file_size
+//	+0x38  uint32 file_attributes
+//	+0x3C  uint8  name_length (UTF-16 units)
+//	+0x3D  uint8  name_type (0=POSIX, 1=Win32, 2=DOS, 3=Win32+DOS)
+//	+0x3E  utf16  name_units
 func ExtractFileNameFromTLV(fields []FieldTLV) (name string, parentID uint64, ok bool) {
 	for _, f := range fields {
 		if f.Tag != refsFieldFileName {

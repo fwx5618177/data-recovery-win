@@ -54,11 +54,11 @@ var _ = [...]uint32{xfsBmbtMagicV3, xfsBmbtMagicLegacy}
 
 // InobtRecord 叶节点一条 record
 type InobtRecord struct {
-	StartIno   uint32 // chunk 起始 inode 号（AG-relative）
-	Holemask   uint16 // v5+ 标记 "hole" inode（未分配但已保留）
-	Count      uint8  // chunk 内已分配 inode 数
-	FreeCount  uint8
-	FreeMask   uint64 // 位 i=1 表示 inode i 是 free；allocated = !freeMask
+	StartIno  uint32 // chunk 起始 inode 号（AG-relative）
+	Holemask  uint16 // v5+ 标记 "hole" inode（未分配但已保留）
+	Count     uint8  // chunk 内已分配 inode 数
+	FreeCount uint8
+	FreeMask  uint64 // 位 i=1 表示 inode i 是 free；allocated = !freeMask
 }
 
 // EnumerateAllInodes 遍历所有 AG 的 inobt，对每个 allocated inode 调 visit
@@ -190,10 +190,11 @@ func readInodeByAGNum(reader disk.DiskReader, sb *ExtendedSuperblock,
 
 // BmbtRec extent record（packed 128-bit）
 // 格式：63 位 | 52 位 | 21 位 | 1 位 = 9 + 52 + 21 + 1 位（高位含 flag）
-//   flag:1 bit (PREALLOC / UNWRITTEN)
-//   logical block offset: 54 bits
-//   physical block: 52 bits
-//   length: 21 bits
+//
+//	flag:1 bit (PREALLOC / UNWRITTEN)
+//	logical block offset: 54 bits
+//	physical block: 52 bits
+//	length: 21 bits
 type BmbtRec struct {
 	LogicalOffset uint64 // file 内 block 偏移
 	Physical      uint64 // FS block 号

@@ -30,7 +30,7 @@ func TestScan_TotalBytes_PrefilledAtStart(t *testing.T) {
 	engine := NewEngine()
 
 	var (
-		mu             sync.Mutex
+		mu              sync.Mutex
 		firstTotalBytes int64 = -1 // -1 = 未设置
 	)
 	callbacks := ScanCallbacks{

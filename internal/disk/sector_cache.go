@@ -33,13 +33,13 @@ type SectorCache struct {
 //
 // HitRatio 计算公式：hits / (hits + misses)；分母 0 时返回 0。
 type CacheStats struct {
-	Capacity int     `json:"capacity"`
-	Size     int     `json:"size"`     // 当前 entry 数
-	Hits     uint64  `json:"hits"`     // Get 命中次数
-	Misses   uint64  `json:"misses"`   // Get 未命中次数
-	Puts     uint64  `json:"puts"`     // Put 调用次数（含覆盖）
-	Evictions uint64 `json:"evictions"` // 因 capacity 淘汰的次数
-	HitRatio float64 `json:"hitRatio"`
+	Capacity  int     `json:"capacity"`
+	Size      int     `json:"size"`      // 当前 entry 数
+	Hits      uint64  `json:"hits"`      // Get 命中次数
+	Misses    uint64  `json:"misses"`    // Get 未命中次数
+	Puts      uint64  `json:"puts"`      // Put 调用次数（含覆盖）
+	Evictions uint64  `json:"evictions"` // 因 capacity 淘汰的次数
+	HitRatio  float64 `json:"hitRatio"`
 }
 
 type cachedSector struct {

@@ -8,10 +8,10 @@ import (
 
 // UnlockResult 是端到端解锁的最终产出：可读的"明文"DiskReader + 元数据。
 type UnlockResult struct {
-	Reader            *DecryptingReader
-	EncryptionMethod  uint16 // AES-XTS-128 / AES-XTS-256 等
-	VolumeIdentifier  [16]byte
-	MetadataBlock     *FVEMetadataBlock
+	Reader           *DecryptingReader
+	EncryptionMethod uint16 // AES-XTS-128 / AES-XTS-256 等
+	VolumeIdentifier [16]byte
+	MetadataBlock    *FVEMetadataBlock
 }
 
 // UnlockBitLockerVolumeWithRecoveryKey 是给上层用的"一键解锁"入口：

@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golang.org/x/crypto/pbkdf2"
 	"crypto/sha1"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // 把 plaintext 按 iOS 备份用的 CBC(IV=0) + PKCS7 加密

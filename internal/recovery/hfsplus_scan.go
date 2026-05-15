@@ -14,18 +14,18 @@ import (
 
 // hfsplusRecoverySource 保存 HFS+ 文件恢复所需信息：
 type hfsplusRecoverySource struct {
-	VolumeOffset int64               // 卷在底层 reader 上的字节偏移
-	BlockSize    uint32              // HFS+ block size
-	LogicalSize  uint64              // 文件 data fork 字节数
+	VolumeOffset int64  // 卷在底层 reader 上的字节偏移
+	BlockSize    uint32 // HFS+ block size
+	LogicalSize  uint64 // 文件 data fork 字节数
 	Extents      [8]hfsplus.ForkExtent
 }
 
 // runHFSPlusScan 执行 HFS+ / HFSX 卷扫描：
 //
-//	1. 全盘找 HFS+ 卷
-//	2. 对每个卷读 catalog header → 拿到 catalog file 的 extents
-//	3. 顺着 extents 读 catalog B-tree 的 leaf nodes，把 folder/file records 摊出来
-//	4. 拍平成 (full path, file) 列表 → RecoveredFile
+//  1. 全盘找 HFS+ 卷
+//  2. 对每个卷读 catalog header → 拿到 catalog file 的 extents
+//  3. 顺着 extents 读 catalog B-tree 的 leaf nodes，把 folder/file records 摊出来
+//  4. 拍平成 (full path, file) 列表 → RecoveredFile
 //
 // 由于 HFS+ catalog file 可能跨多个 extent + extents overflow tree（极少见），
 // 本实现处理 vol header 给出的 catalog extents（前 8 个）即可覆盖几乎所有真实卷。

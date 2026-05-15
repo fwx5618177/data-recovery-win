@@ -2,13 +2,14 @@
 // 设备 / 一些嵌入式 Linux 用。
 //
 // F2FS superblock 在偏移 +0x400 (1024)：
-//   +0x00 magic = 0xF2F52010 (LE uint32)
-//   +0x04 major_ver / minor_ver (各 uint16)
-//   +0x08 log_sectorsize (uint32)
-//   +0x0C log_sectors_per_block (uint32)
-//   +0x10 log_blocksize (uint32)
-//   +0x14 log_blocks_per_seg (uint32)
-//   +0x18 segs_per_sec (uint32)
+//
+//	+0x00 magic = 0xF2F52010 (LE uint32)
+//	+0x04 major_ver / minor_ver (各 uint16)
+//	+0x08 log_sectorsize (uint32)
+//	+0x0C log_sectors_per_block (uint32)
+//	+0x10 log_blocksize (uint32)
+//	+0x14 log_blocks_per_seg (uint32)
+//	+0x18 segs_per_sec (uint32)
 package f2fs
 
 import (

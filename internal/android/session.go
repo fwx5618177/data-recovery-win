@@ -29,7 +29,7 @@ import (
 
 // ABEntry 一条 .ab 里的文件元数据（来自 tar header）
 type ABEntry struct {
-	Name      string    // tar 路径，例如 "apps/com.android.providers.media/db/external.db"
+	Name      string // tar 路径，例如 "apps/com.android.providers.media/db/external.db"
 	Size      int64
 	Mode      int64
 	ModTime   time.Time
@@ -40,8 +40,8 @@ type ABEntry struct {
 
 // Backup 一个已打开的 .ab 文件（路径 + 头部 + 可选 master key）
 type Backup struct {
-	Path     string
-	Header   *ABHeader
+	Path      string
+	Header    *ABHeader
 	MasterKey *MasterKey // 仅加密 backup 解锁后非 nil
 	// 缓存元数据：第一次 EnumerateFiles 把整个 tar 头扫一遍存这里
 	entries []ABEntry
@@ -287,9 +287,9 @@ func (b *fileBackedReadCloser) Close() error {
 
 // AppDomainFromPath 从 tar entry 路径推断"所属 App"
 //
-//   apps/com.example.app/db/users.db  → "com.example.app"
-//   apps/com.foo/sp/prefs.xml         → "com.foo"
-//   shared/0/Pictures/IMG.jpg         → "shared(共享存储)"
+//	apps/com.example.app/db/users.db  → "com.example.app"
+//	apps/com.foo/sp/prefs.xml         → "com.foo"
+//	shared/0/Pictures/IMG.jpg         → "shared(共享存储)"
 func AppDomainFromPath(p string) string {
 	parts := strings.Split(p, "/")
 	if len(parts) >= 2 && parts[0] == "apps" {

@@ -187,7 +187,7 @@ func TestFiletimeToTime_Bounds(t *testing.T) {
 		t.Error("FILETIME=0 应返回 nil")
 	}
 	// 不合理的大值（对应年份 > 2100）应返回 nil
-	if filetimeToTime(int64(1) << 62) != nil {
+	if filetimeToTime(int64(1)<<62) != nil {
 		t.Error("超出合理范围的 FILETIME 应返回 nil")
 	}
 	// 2020-01-01 UTC 对应的 FILETIME 约为 132223104000000000

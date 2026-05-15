@@ -50,14 +50,14 @@ import (
 
 // DefaultTSAURLs 公共 RFC 3161 TSA 服务（按可用性排序）
 var DefaultTSAURLs = []string{
-	"https://freetsa.org/tsr",          // 免费，CAcert 背书
-	"http://timestamp.digicert.com",    // 商用，高可用（Authenticode 代码签名同 TSA）
-	"http://timestamp.sectigo.com",     // 商用替代
+	"https://freetsa.org/tsr",       // 免费，CAcert 背书
+	"http://timestamp.digicert.com", // 商用，高可用（Authenticode 代码签名同 TSA）
+	"http://timestamp.sectigo.com",  // 商用替代
 }
 
 // SignedCustody 扩展 Custody，加签名 + 时间戳字段
 type SignedCustody struct {
-	Custody                       // 嵌入原结构
+	Custody                      // 嵌入原结构
 	SignaturePublicKey string    `json:"signaturePublicKey,omitempty"` // ed25519 公钥 base64
 	SignatureScheme    string    `json:"signatureScheme,omitempty"`    // "ed25519"
 	Signature          string    `json:"signature,omitempty"`          // base64 ed25519 signature over manifest

@@ -9,9 +9,10 @@ import (
 
 // ReadFATEntry 读 cluster 对应的 FAT 条目。
 // 不同 FAT 变体条目宽度不同：
-//   FAT12: 1.5 字节/条目（两个 cluster 共享 3 字节，低/高 nibble 编码）
-//   FAT16: 2 字节/条目
-//   FAT32: 4 字节/条目，低 28 位有效
+//
+//	FAT12: 1.5 字节/条目（两个 cluster 共享 3 字节，低/高 nibble 编码）
+//	FAT16: 2 字节/条目
+//	FAT32: 4 字节/条目，低 28 位有效
 //
 // 返回值已统一成 uint32；FAT12 / FAT16 的 EOC / BAD 值会映射到 FAT32 的常量便于上层统一判断。
 func ReadFATEntry(

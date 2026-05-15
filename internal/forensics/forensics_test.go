@@ -32,9 +32,9 @@ func TestBuildTimeline_SortedByTime(t *testing.T) {
 //
 // v2.8.32: carver 文件兜底写一条 "found" 事件，至少让用户看见有恢复结果。
 // 这个测试模拟"只有 carver 文件"的输入（mtime/ctime 全 nil），断言：
-//   1. events 数 == 文件数（不是 0）
-//   2. 所有 event 的 Action == "found"
-//   3. 用 WriteTimelineMACTime 写出来不是空文件
+//  1. events 数 == 文件数（不是 0）
+//  2. 所有 event 的 Action == "found"
+//  3. 用 WriteTimelineMACTime 写出来不是空文件
 func TestBuildTimeline_CarverFilesWithoutTimestamps(t *testing.T) {
 	files := []*types.RecoveredFile{
 		{FileName: "carve_0x12345.jpg", Source: "carver", Size: 1024 * 1024},

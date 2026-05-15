@@ -38,13 +38,13 @@ type RefsFileCandidate struct {
 // ExtractFileNamesFromPage 扫一个 16KB MSB+ page 的所有 entry，抽取候选文件名。
 //
 // 策略（启发式）：
-//   1. page header 64 字节后开始扫 entry
-//   2. ReFS MSB+ entry 典型结构：offset 表 (pages 的 entry index) + 每 entry 有 size 字段 +
-//      key bytes + value bytes；key 常含 UTF-16 name
-//   3. 扫整 page 找"合理的 UTF-16 字符串"：
-//      a. 从每个偶数 offset 尝试 decode UTF-16 LE
-//      b. 合法 ASCII/BMP 字符连续 >= 2 <= 255 即采信
-//      c. 过滤全 ASCII-A 之类明显垃圾模式
+//  1. page header 64 字节后开始扫 entry
+//  2. ReFS MSB+ entry 典型结构：offset 表 (pages 的 entry index) + 每 entry 有 size 字段 +
+//     key bytes + value bytes；key 常含 UTF-16 name
+//  3. 扫整 page 找"合理的 UTF-16 字符串"：
+//     a. 从每个偶数 offset 尝试 decode UTF-16 LE
+//     b. 合法 ASCII/BMP 字符连续 >= 2 <= 255 即采信
+//     c. 过滤全 ASCII-A 之类明显垃圾模式
 //
 // 返回候选列表（可能有重复或假阳性；上层去重 + NSRL 过滤）。
 func ExtractFileNamesFromPage(reader disk.DiskReader, pageOffset int64) ([]RefsFileCandidate, error) {

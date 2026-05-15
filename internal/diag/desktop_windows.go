@@ -11,7 +11,8 @@ import (
 // 引用真实"桌面"路径（包括 OneDrive 重定向 / D: 重定向 / 中文桌面 等情况）。
 //
 // MSDN reference: https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid
-//                 {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+//
+//	{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
 var folderIDDesktop = syscall.GUID{
 	Data1: 0xB4BFCC3A,
 	Data2: 0xDB2C,
@@ -20,10 +21,10 @@ var folderIDDesktop = syscall.GUID{
 }
 
 var (
-	modShell32                = syscall.NewLazyDLL("shell32.dll")
-	procSHGetKnownFolderPath  = modShell32.NewProc("SHGetKnownFolderPath")
-	modOle32                  = syscall.NewLazyDLL("ole32.dll")
-	procCoTaskMemFree         = modOle32.NewProc("CoTaskMemFree")
+	modShell32               = syscall.NewLazyDLL("shell32.dll")
+	procSHGetKnownFolderPath = modShell32.NewProc("SHGetKnownFolderPath")
+	modOle32                 = syscall.NewLazyDLL("ole32.dll")
+	procCoTaskMemFree        = modOle32.NewProc("CoTaskMemFree")
 )
 
 // resolveRealDesktopPath 调 Windows Shell SHGetKnownFolderPath 拿真实桌面路径。

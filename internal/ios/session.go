@@ -25,17 +25,17 @@ type Session struct {
 	classKeys map[uint32][]byte
 
 	// 已打开的 Manifest.db 连接
-	db           *sql.DB
-	manifestTmp  string // 加密路径下，临时明文 db 的位置（Close 时删）
+	db          *sql.DB
+	manifestTmp string // 加密路径下，临时明文 db 的位置（Close 时删）
 }
 
 // DialBackup 打开一份备份，准备做文件枚举。
 //
 //   - 未加密备份：直接打开 Manifest.db
 //   - 加密备份：
-//       password == ""  → 返回 ErrEncrypted，UI 应要用户输密码后再调一次
-//       password 正确   → 解 keybag + 解 Manifest.db 到临时文件 + 打开
-//       password 错误   → 返回带"密码错误"字样的 err
+//     password == ""  → 返回 ErrEncrypted，UI 应要用户输密码后再调一次
+//     password 正确   → 解 keybag + 解 Manifest.db 到临时文件 + 打开
+//     password 错误   → 返回带"密码错误"字样的 err
 func DialBackup(ctx context.Context, backup *Backup, password string) (*Session, error) {
 	if backup == nil {
 		return nil, fmt.Errorf("backup 为 nil")
@@ -147,8 +147,8 @@ func (s *Session) EnumerateFiles(ctx context.Context, onRecord func(FileRecord))
 // 分支：
 //   - 未加密备份：直接从 <backup>/<prefix>/<fileID> 拷贝
 //   - 加密备份：
-//       file record 有 EncryptionKey → 走 DecryptBackupFile
-//       没有           → 备份本身加密但这条文件未加密（少见；直接拷贝）
+//     file record 有 EncryptionKey → 走 DecryptBackupFile
+//     没有           → 备份本身加密但这条文件未加密（少见；直接拷贝）
 func (s *Session) RecoverFile(rec FileRecord, outputPath string) error {
 	if !rec.IsFile() {
 		return fmt.Errorf("不是普通文件（flags=%d）", rec.Flags)

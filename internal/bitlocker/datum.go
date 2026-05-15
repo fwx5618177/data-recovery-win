@@ -26,52 +26,52 @@ import (
 
 // DatumEntryType（业务角色 / 用途）
 const (
-	DatumEntryUnknown            uint16 = 0x0000
-	DatumEntryProperty           uint16 = 0x0002
-	DatumEntryVMKInfo            uint16 = 0x2000
-	DatumEntryFVEKInfo           uint16 = 0x2002
-	DatumEntryValidation         uint16 = 0x2003
-	DatumEntryStartupKey         uint16 = 0x2004
-	DatumEntryDescription        uint16 = 0x2005
-	DatumEntryFVEKBackup         uint16 = 0x2006
-	DatumEntryVolumeHeaderBlock  uint16 = 0x2007
+	DatumEntryUnknown           uint16 = 0x0000
+	DatumEntryProperty          uint16 = 0x0002
+	DatumEntryVMKInfo           uint16 = 0x2000
+	DatumEntryFVEKInfo          uint16 = 0x2002
+	DatumEntryValidation        uint16 = 0x2003
+	DatumEntryStartupKey        uint16 = 0x2004
+	DatumEntryDescription       uint16 = 0x2005
+	DatumEntryFVEKBackup        uint16 = 0x2006
+	DatumEntryVolumeHeaderBlock uint16 = 0x2007
 )
 
 // DatumValueType（载荷字节的 schema）
 const (
-	DatumValueErased         uint16 = 0x0000 // 未使用 / 已擦除
-	DatumValueKey            uint16 = 0x0001 // 裸密钥
-	DatumValueUnicodeString  uint16 = 0x0002 // UTF-16 LE 字符串
-	DatumValueStretchKey     uint16 = 0x0003 // 拉伸密钥（password / recovery）
-	DatumValueUse            uint16 = 0x0004 // "USE" datum，含 role 子标识
-	DatumValueAESCCMKey      uint16 = 0x0005 // AES-CCM 加密的密钥（被另一个密钥包过）
-	DatumValueTPMEncodedKey  uint16 = 0x0006 // TPM 封装密钥
-	DatumValueValidation     uint16 = 0x0007
-	DatumValueVMK            uint16 = 0x0008 // VMK 整体，包含若干 protector 子 datum
-	DatumValueExternalKey    uint16 = 0x0009 // 外部密钥（startup key）
-	DatumValueUpdate         uint16 = 0x000A
-	DatumValueErrorLog       uint16 = 0x000B
-	DatumValueOffsetSize     uint16 = 0x000F
-	DatumValueRecoveryTime   uint16 = 0x0011
-	DatumValueAESCCMConcat   uint16 = 0x0014 // 老版本里有时见到
+	DatumValueErased        uint16 = 0x0000 // 未使用 / 已擦除
+	DatumValueKey           uint16 = 0x0001 // 裸密钥
+	DatumValueUnicodeString uint16 = 0x0002 // UTF-16 LE 字符串
+	DatumValueStretchKey    uint16 = 0x0003 // 拉伸密钥（password / recovery）
+	DatumValueUse           uint16 = 0x0004 // "USE" datum，含 role 子标识
+	DatumValueAESCCMKey     uint16 = 0x0005 // AES-CCM 加密的密钥（被另一个密钥包过）
+	DatumValueTPMEncodedKey uint16 = 0x0006 // TPM 封装密钥
+	DatumValueValidation    uint16 = 0x0007
+	DatumValueVMK           uint16 = 0x0008 // VMK 整体，包含若干 protector 子 datum
+	DatumValueExternalKey   uint16 = 0x0009 // 外部密钥（startup key）
+	DatumValueUpdate        uint16 = 0x000A
+	DatumValueErrorLog      uint16 = 0x000B
+	DatumValueOffsetSize    uint16 = 0x000F
+	DatumValueRecoveryTime  uint16 = 0x0011
+	DatumValueAESCCMConcat  uint16 = 0x0014 // 老版本里有时见到
 )
 
 // USE datum 的 role 标识符（"这个保护器是干什么的"），位于 USE 载荷头 4 字节
 const (
-	UseRoleVMK              uint32 = 0x80
-	UseRoleAESCCMKey        uint32 = 0x100
-	UseRoleStretchedKey     uint32 = 0x200
+	UseRoleVMK          uint32 = 0x80
+	UseRoleAESCCMKey    uint32 = 0x100
+	UseRoleStretchedKey uint32 = 0x200
 	// 实际还有更多，需要时再加
 )
 
 // VMK protection type（VMK datum payload 的 Protection Type 字段，2 字节）
 const (
-	VMKProtectionClearKey      uint16 = 0x0000 // 没保护（已解密的 VMK）
-	VMKProtectionTPM           uint16 = 0x0100
-	VMKProtectionStartupKey    uint16 = 0x0200
-	VMKProtectionTPMAndPin     uint16 = 0x0500
-	VMKProtectionRecoveryPwd   uint16 = 0x0800 // 48-digit recovery key ⭐
-	VMKProtectionPassword      uint16 = 0x2000 // 用户密码
+	VMKProtectionClearKey    uint16 = 0x0000 // 没保护（已解密的 VMK）
+	VMKProtectionTPM         uint16 = 0x0100
+	VMKProtectionStartupKey  uint16 = 0x0200
+	VMKProtectionTPMAndPin   uint16 = 0x0500
+	VMKProtectionRecoveryPwd uint16 = 0x0800 // 48-digit recovery key ⭐
+	VMKProtectionPassword    uint16 = 0x2000 // 用户密码
 )
 
 // Datum 是解析后的统一表示。Body 是去掉 8 字节头之后的原始载荷，
@@ -154,13 +154,21 @@ func hasNestedChildren(vt uint16) bool {
 // nestedHeaderLen 不同 wrapper datum 的固定 header 长度（在子 datum 之前）
 //
 // VMK 头部 28 字节：
-//   GUID(16) + last_change(8) + protection(2) + ?(2)
+//
+//	GUID(16) + last_change(8) + protection(2) + ?(2)
+//
 // STRETCH_KEY 头部 20 字节：
-//   encryption_method(4) + salt(16)
+//
+//	encryption_method(4) + salt(16)
+//
 // AES_CCM_KEY 头部 28 字节：
-//   nonce_time(8) + nonce_counter(4) + mac(16)
+//
+//	nonce_time(8) + nonce_counter(4) + mac(16)
+//
 // EXTERNAL_KEY 头部 28 字节：
-//   GUID(16) + last_change(8) + ?(4)
+//
+//	GUID(16) + last_change(8) + ?(4)
+//
 // USE 头部 4 字节：role(uint32)
 func nestedHeaderLen(vt uint16) int {
 	switch vt {

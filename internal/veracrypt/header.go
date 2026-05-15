@@ -76,7 +76,7 @@ const (
 
 // VolumeHeader 解密后的卷头
 type VolumeHeader struct {
-	IsTrueCrypt   bool   // true="TRUE"，false="VERA"
+	IsTrueCrypt   bool // true="TRUE"，false="VERA"
 	HeaderVersion uint16
 	MinProgVer    uint16
 	HiddenSize    uint64
@@ -99,10 +99,10 @@ var (
 // ParseDecryptedHeader 解析 *已用 header_key 解密好的* 448 字节卷头。
 //
 // 校验流程（从严到松）：
-//   1. signature 必须是 "VERA" / "TRUE"
-//   2. header CRC32 必须匹配（防止密码恰好让加密 garbage 看起来像头）
-//   3. master keys CRC32 必须匹配
-//   4. 卷大小 / payload offset / payload size 都要合理
+//  1. signature 必须是 "VERA" / "TRUE"
+//  2. header CRC32 必须匹配（防止密码恰好让加密 garbage 看起来像头）
+//  3. master keys CRC32 必须匹配
+//  4. 卷大小 / payload offset / payload size 都要合理
 //
 // 任何一步失败都返回 error；上层"枚举密码 × 算法"循环里把错误当成密码错处理。
 func ParseDecryptedHeader(buf []byte) (*VolumeHeader, error) {

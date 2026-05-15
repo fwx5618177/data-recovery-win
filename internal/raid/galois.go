@@ -137,7 +137,7 @@ func RAID6RecoverTwoDataDisks(dataStripes [][]byte, p, q []byte, x, y int) (dx, 
 var (
 	ErrSizeMismatch = raidError("数据盘字节切片长度不一致")
 	ErrBadIndex     = raidError("缺失盘索引不合法")
-	ErrSingular    = raidError("GF 方程无解（x == y 或布局不合法）")
+	ErrSingular     = raidError("GF 方程无解（x == y 或布局不合法）")
 )
 
 type raidError string

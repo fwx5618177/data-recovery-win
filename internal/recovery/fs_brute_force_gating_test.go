@@ -44,7 +44,8 @@ var _ disk.DiskReader = (*countingMock)(nil)
 // 都不应该做全盘 brute-force。如果哪个 FS 还在偷跑全盘扫，underlying.ReadAt 调用次数会爆。
 //
 // 没有 brute-force：每个 FS 只读 ~1KB（offset 0 superblock/boot sector）+ carver 一次顺序扫
-//   总计 ~7 个小读 + carver 的 ~32MB / 4MB = 8 个块读 = 15-30 次 ReadAt
+//
+//	总计 ~7 个小读 + carver 的 ~32MB / 4MB = 8 个块读 = 15-30 次 ReadAt
 //
 // 如果有任何 FS 偷跑全盘 brute-force：32MB / 1MB step = 32 次 × N 个 FS = 100+ 次 ReadAt
 //
@@ -83,7 +84,7 @@ func TestScan_ForensicMode_TriggersAllFSBruteForce(t *testing.T) {
 	engine := NewEngine()
 
 	var (
-		mu             sync.Mutex
+		mu                   sync.Mutex
 		bruteForcePhasesSeen = make(map[string]bool)
 	)
 	callbacks := ScanCallbacks{
