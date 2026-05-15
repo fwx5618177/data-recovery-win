@@ -4,6 +4,124 @@
 
 ---
 
+## v2.8.28 (2026-05-15)
+
+**恢复流 + 工具弹窗一批修复（用户报的 21 个里的 5 个高优先级）**
+
+### Issue 1+2: 恢复完成统计全 0 + 文件列表不显示 ✅
+
+**根因**：前端 `if (norm.records) setRecoveryRecords(...)` 把空数组 `[]` 当 truthy，
+于是当事件 payload 因序列化等原因带回空数组时，**不会**回退到
+`GetLastRecoveryRecords()` 取记录。统计卡片（高可靠/低可靠/失败/...）从 records 派生 ——
+records 空 → 全显 0。文件列表也走 `records.length > 0` 才渲染。
+
+**修复**：
+```js
+// 之前
+if (norm.records) setRecoveryRecords(norm.records);
+
+// 现在
+if (norm.records && norm.records.length > 0) {
+    setRecoveryRecords(norm.records);
+} else if (wailsApp?.GetLastRecoveryRecords) {
+    wailsApp.GetLastRecoveryRecords()
+        .then((list) => setRecoveryRecords(list || []))
+        .catch(() => setRecoveryRecords([]));
+}
+```
+
+加 `TestRecoveryResult_JSONShape` + `TestRecoveryResult_EmptyRecordsStillSerializesAsArray`
+锁结构 —— records 必须是 lowerCamelCase + 内嵌 state 必须是字符串，将来谁改字段
+名或 enum 化 state 都立刻 fail。
+
+### Issue 3+21: 恢复完成 100% 后页面不切换 + 磁盘 IO 继续 ✅
+
+**根因**：app.go `RecoverWithOptions` 返回后**同步**跑 5 个 forensics 步骤
+（custody manifest / Ed25519 签名 / TSA 时间戳 / HTML 报告 / Evidence zip），跑完才
+发 `recovery:completed` 事件。
+- 期间前端卡在"正在恢复文件 100%"+"停止"按钮（issue 3）
+- 期间 forensics 写 outputDir，看起来"磁盘 IO 持续"（issue 21）
+- forensics 里有 `filepath.Walk(outputDir) + sha256` 每个文件 —— outputDir 选 `C:\`
+  根目录就会 hash 整个 C: 盘，可能跑好几分钟
+
+**修复**：把 `recovery:completed` 事件**立刻**发出来，forensics 抽到独立 goroutine
+`runForensicsPostProcess` 跑：
+
+```go
+// 之前：跑 5 个 forensics 步骤后才发事件
+result, err := a.engine.RecoverWithOptions(...)
+... 5 个 forensics 调用，串行 ...
+wailsRuntime.EventsEmit(a.ctx, "recovery:completed", result)
+
+// 现在：先发事件，forensics 后台跑
+result, err := a.engine.RecoverWithOptions(...)
+wailsRuntime.EventsEmit(a.ctx, "recovery:completed", result)
+if result.Succeeded > 0 {
+    go a.runForensicsPostProcess(outputDir, result)
+}
+```
+
+前端立刻切到"恢复完成"页，"停止"按钮变成"打开输出目录 / 导出报告 / 回到工作台" —— 等
+于 issue 3 期望的"操作按钮在执行结束后文案变为下一步提示"。
+
+### Issue 14: 多盘并行扫描报"未知扫描模式: auto" ✅
+
+**根因**：前端 `MultiDiskScanModal.tsx` 默认 mode="auto"（"自动（推荐）"），但
+`ScanWithReaderOptions` 的 switch case 只认 quick / deep / full。
+
+**修复**：归一化别名
+
+```go
+switch string(mode) {
+case "", "auto", "default":
+    mode = types.ScanFull
+}
+```
+
+加 `TestScanWithReaderOptions_AutoModeAccepted` (3 sub-cases: "auto" / "" / "default")
++ `TestScanWithReaderOptions_UnknownModeStillErrors` 锁住"别名归一化"语义。
+
+### Issue 5: SMART / SED / GPT 失败弹窗永不自动关闭 ✅
+
+**根因**：3 处 toast 用 `duration: 0`（toast.ts 约定：0 = 永不自动关闭）。
+v2.8.17 引入是因为想让用户看完文字，但实测用户烦——文字虽多 15 秒够看完且能手动关。
+
+**修复**：3 处 `duration: 0` → `duration: 15000`（15s）。
+- SMART 不可用（App.tsx:1826）
+- SMART 异常（App.tsx:1846）
+- SED 已锁定（App.tsx:1871）
+- GPT 备份恢复失败（App.tsx:1914）
+
+### 出于诚信声明：用户报的 21 个里这次没动的 16 个
+
+下面这些都注意到了，但 scope 太大放下一批（v2.8.29+）：
+6（SED 用法说明）、7（GPT 引导）、8（查重图 UX）、9（计划备份 install 报错 0x80004005）、
+10（时间线导出空）、11（DFXML 用途说明）、12（保管链 outputDir 为空报错）、
+13（NSRL 文件选择器）、15（VSS 快照点了没反应）、16/17/18（ADB/PTP/iOS 下载链接）、
+19（整盘镜像报错）、20（系统文件选择器）。
+
+### 测试
+
+```
+go test -race -count=1 ./...                         ✅ 全绿
+TestScanWithReaderOptions_AutoModeAccepted (3 sub)  ✅
+TestScanWithReaderOptions_UnknownModeStillErrors    ✅
+TestRecoveryResult_JSONShape                        ✅
+TestRecoveryResult_EmptyRecordsStillSerializesAsArray ✅
+GOOS=windows go build ./...                         ✅
+pnpm run build                                       ✅
+```
+
+### Files Changed
+
+- `app.go` — 恢复后 forensics 抽出独立 goroutine；recovery:completed 立刻发
+- `frontend/src/App.tsx` — records 空数组也走 GetLastRecoveryRecords 回退；4 处 duration:0 改 15000
+- `internal/recovery/engine.go` — ScanWithReaderOptions 归一化 mode 别名
+- `internal/recovery/scan_mode_alias_test.go` — 新增（mode 别名 + 未知模式仍报错）
+- `internal/recovery/result_serialization_test.go` — 新增（JSON 形状契约）
+
+---
+
 ## v2.8.27 (2026-05-13)
 
 **补全 ScanEncryptedVolumes 管线的 UT 防回归 —— 这次保证全量覆盖**

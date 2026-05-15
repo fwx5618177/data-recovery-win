@@ -458,9 +458,19 @@ export default function App() {
       const norm = normalizeRecoveryCompletion(p, 0, 0);
       setRecoveryProgress(norm);
       setRecoveryActive(false);
-      if (norm.records) setRecoveryRecords(norm.records);
-      else if (wailsApp?.GetLastRecoveryRecords) {
-        wailsApp.GetLastRecoveryRecords().then((list) => setRecoveryRecords(list || [])).catch(() => {});
+      // v2.8.28: 修复"恢复完成后统计全 0、文件列表空"的 bug。
+      // 之前 `if (norm.records)` 对空数组 `[]` 也是 truthy，于是不回退到
+      // GetLastRecoveryRecords()。当事件 payload 因序列化原因带回空数组时，
+      // 前端就拿不到记录，统计卡片（高可靠/低可靠/失败...）全显 0、文件列表也不渲染。
+      // 改成显式检查长度 > 0 才用事件 payload；否则始终从后端拉一次。
+      if (norm.records && norm.records.length > 0) {
+        setRecoveryRecords(norm.records);
+      } else if (wailsApp?.GetLastRecoveryRecords) {
+        wailsApp.GetLastRecoveryRecords()
+          .then((list) => setRecoveryRecords(list || []))
+          .catch(() => setRecoveryRecords([]));
+      } else {
+        setRecoveryRecords([]);
       }
     });
     const offRecErr = wailsRuntime.EventsOn("recovery:error", (payload) => {
@@ -1812,8 +1822,10 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                   `不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。\n` +
                   `如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；` +
                   `或用 CrystalDiskInfo / smartctl --scan 等专业工具。`;
-                // v2.8.20 Issue 20: toast 加 id 防止重复触发时叠加（之前用户截图见过两条相同 toast）
-                toast.warning({ title: "S.M.A.R.T. 不可用（硬件限制，非软件 bug）", description: desc, duration: 0, dedupeKey: "smart-unavailable" });
+                // v2.8.20 Issue 20: toast 加 id 防止重复触发时叠加。
+                // v2.8.28 Issue 5: duration 从 0（永不自动关闭）改为 15s。
+                // 之前用户反馈"不会自动关闭很烦"——文字虽然多但 15s 够看完且能手动关。
+                toast.warning({ title: "S.M.A.R.T. 不可用（硬件限制，非软件 bug）", description: desc, duration: 15000, dedupeKey: "smart-unavailable" });
                 return;
               }
               // 拼装多行 description：型号 / 通电时长 / 温度 / 坏扇区
@@ -1831,7 +1843,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
               const desc = [r.notes, lines.length ? lines.join("\n") : ""].filter(Boolean).join("\n\n");
               const title = `SMART：${r.healthy ? "健康" : "异常"}`;
               if (r.healthy) toast.success({ title, description: desc, duration: 10000 });
-              else           toast.error({ title, description: desc, duration: 0 });
+              else           toast.error({ title, description: desc, duration: 15000 });
             } catch (err: any) {
               toast.error("SMART 查询失败：" + (err?.message || err));
             }
@@ -1856,7 +1868,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 toast.error({
                   title: "SED 已锁定",
                   description: r.note + (r.opalVersion ? `\n\nOPAL 版本：${r.opalVersion}` : ""),
-                  duration: 0,
+                  duration: 15000,
                 });
               } else if (r.isSED) {
                 toast.success({
@@ -1899,7 +1911,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 title: "GPT 备份恢复失败",
                 description: (err?.message || String(err)) +
                   "\n\n提示：GPT 备份表在物理盘的最后一个 LBA。在逻辑卷（C: / G: 等）上读不到，请选物理盘（PhysicalDrive*）后再试。",
-                duration: 0,
+                duration: 15000,
               });
             }
           }, true /* needsDisk */)}

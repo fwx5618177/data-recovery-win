@@ -338,6 +338,13 @@ func (e *Engine) ScanWithReaderOptions(
 	if reader == nil {
 		return nil, fmt.Errorf("reader 不能为 nil")
 	}
+	// v2.8.28: 前端"多盘并行扫描"对话框默认 mode="auto"（"自动（推荐）"），但
+	// switch case 只认 quick/deep/full —— 用户报"未知扫描模式: auto"。
+	// "auto" / "" / "default" 都规范成 full（业界默认值，所有 FS 全跑 + 深度雕刻）。
+	switch string(mode) {
+	case "", "auto", "default":
+		mode = types.ScanFull
+	}
 
 	// v2.8.25: 把"宣布扫描启动"的所有状态字段（scanning / scanDone / scanCancel /
 	// reader）放进同一个 mu 临界区原子初始化。这关掉了 v2.8.24 留下的 race：

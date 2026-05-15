@@ -1716,38 +1716,54 @@ func (a *App) startRecoveryInternal(fileIDs []string, outputDir string, allowSam
 		}
 		appLogger.Info("恢复结果已发送", "success", result.Succeeded, "failed", result.Failed)
 
-		// 恢复成功后自动生成保管链 manifest.json（取证场景友好；
-		// 普通用户即便看不懂也无害 — 就一个多出来的 JSON 文件）
-		if result.Succeeded > 0 {
-			custody := forensics.Custody{
-				ToolName:     "DataRecovery",
-				ToolVersion:  updater.Version,
-				StartedAt:    time.Now().UTC(),
-				SourceDevice: a.currentDrive.Path,
-			}
-			if mp, err := forensics.BuildAndWrite(outputDir, custody); err == nil {
-				appLogger.Info("保管链已自动生成", "path", mp)
-				// 签名版本（Ed25519 + 可选 RFC 3161 TSA）；失败不阻塞恢复
-				if sp, err := forensics.BuildSignAndWrite(outputDir, custody); err == nil {
-					appLogger.Info("签名保管链已生成", "path", sp)
-					// HTML 取证报告（可打印成 PDF）
-					if rp, err := forensics.GenerateHTMLReport(outputDir); err == nil {
-						appLogger.Info("HTML 取证报告已生成", "path", rp)
-					}
-					// 再打成 evidence.zip bundle，方便 B2B 客户直接交付法务
-					if zp, err := forensics.BundleEvidence(outputDir); err == nil {
-						appLogger.Info("Evidence Bundle 已生成", "path", zp)
-					}
-				} else {
-					appLogger.Warn("签名保管链生成失败（不影响恢复结果）", "err", err)
-				}
-			}
-		}
-
+		// v2.8.28: 把 recovery:completed 事件**立刻**发出，让前端立刻切到"恢复完成"页 ——
+		// 之前会等 5 个 forensics 步骤（SHA256 walk outputDir / 签名 / TSA / HTML / zip 打包）
+		// 跑完才发，期间前端卡在"正在恢复文件 100%"还显示"停止"按钮，外加 outputDir
+		// 全盘 SHA256 walk 让用户磁盘 IO 持续几十秒，看起来像"扫描没停"。
 		wailsRuntime.EventsEmit(a.ctx, "recovery:completed", result)
+
+		// 取证后处理放到独立 goroutine 跑 —— 用户体验上不阻塞任何东西；失败也只影响
+		// 取证证据包，不影响用户已经看到的恢复结果。
+		if result.Succeeded > 0 {
+			go a.runForensicsPostProcess(outputDir, result)
+		}
 	}()
 
 	return nil
+}
+
+// runForensicsPostProcess 跑取证证据链（manifest / 签名 / HTML / zip bundle）。
+// v2.8.28 抽出来独立 goroutine 跑 —— 之前在 recovery 主 goroutine 里同步跑会让
+// recovery:completed 事件被几十秒到几分钟的 forensics 工作阻塞，前端 UI 看起来
+// "卡在 100% 不动"。现在 emit 早就发了，这里只在后台默默生成附加证据文件。
+func (a *App) runForensicsPostProcess(outputDir string, result *recovery.RecoveryResult) {
+	_ = result // 预留参数：未来 forensics 可以用 records 列表精确算 SHA256，避免 walk outputDir
+	custody := forensics.Custody{
+		ToolName:     "DataRecovery",
+		ToolVersion:  updater.Version,
+		StartedAt:    time.Now().UTC(),
+		SourceDevice: a.currentDrive.Path,
+	}
+	mp, err := forensics.BuildAndWrite(outputDir, custody)
+	if err != nil {
+		appLogger.Warn("保管链生成失败（不影响恢复结果）", "err", err)
+		return
+	}
+	appLogger.Info("保管链已自动生成", "path", mp)
+
+	sp, err := forensics.BuildSignAndWrite(outputDir, custody)
+	if err != nil {
+		appLogger.Warn("签名保管链生成失败（不影响恢复结果）", "err", err)
+		return
+	}
+	appLogger.Info("签名保管链已生成", "path", sp)
+
+	if rp, err := forensics.GenerateHTMLReport(outputDir); err == nil {
+		appLogger.Info("HTML 取证报告已生成", "path", rp)
+	}
+	if zp, err := forensics.BundleEvidence(outputDir); err == nil {
+		appLogger.Info("Evidence Bundle 已生成", "path", zp)
+	}
 }
 
 // RetryFailedRecovery 基于上一次恢复记录，只对失败/跳过的文件重试。
