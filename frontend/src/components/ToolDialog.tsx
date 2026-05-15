@@ -29,6 +29,9 @@ export interface ToolDialogField {
   required?: boolean;
   // 用于 directory/file 类型：选择对话框标题
   pickerTitle?: string;
+  // file 类型专用：过滤器显示名（如 "NSRL hash 库"）+ 扩展名模式（如 "*.txt;*.csv"）
+  fileFilterName?: string;
+  fileFilterExt?: string;
 }
 
 export interface ToolDialogProps {
@@ -82,6 +85,22 @@ export function ToolDialog({
       if (dir) update(key, dir);
     } catch (err: any) {
       toast.error("选目录失败：" + (err?.message || err));
+    }
+  };
+
+  // v2.8.29: 文件选择支持。之前 type:"file" 只渲染为文本框，用户得手贴绝对路径；
+  // NSRL 库等场景文件名很长，复制粘贴出错率高。现在调后端 SelectFile IPC。
+  const pickFile = async (
+    key: string,
+    pickerTitle?: string,
+    filterName?: string,
+    filterExt?: string,
+  ) => {
+    try {
+      const path = await wailsApp?.SelectFile?.(pickerTitle || "选择文件", filterName || "", filterExt || "");
+      if (path) update(key, path);
+    } catch (err: any) {
+      toast.error("选文件失败：" + (err?.message || err));
     }
   };
 
@@ -167,6 +186,26 @@ export function ToolDialog({
                     title="选择目录"
                   >
                     <IconFolderOpen size={14} /> 选目录
+                  </button>
+                </div>
+              ) : f.type === "file" ? (
+                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                  <input
+                    className="input"
+                    style={{ flex: 1 }}
+                    type="text"
+                    value={values[f.key] || ""}
+                    onChange={(e) => update(f.key, e.target.value)}
+                    placeholder={f.placeholder || "点右边「选文件」打开系统文件选择器"}
+                    disabled={submitting}
+                  />
+                  <button
+                    className="btn btn--sm"
+                    onClick={() => pickFile(f.key, f.pickerTitle || `选择"${f.label}"`, f.fileFilterName, f.fileFilterExt)}
+                    disabled={submitting}
+                    title="选择文件"
+                  >
+                    <IconFolderOpen size={14} /> 选文件
                   </button>
                 </div>
               ) : (

@@ -696,7 +696,18 @@ export function IOSBackupModal({ wailsApp, outputDir, onClose, onStarted }: Moda
         <div className="banner banner--danger" style={{ margin: 0 }}>
           <div className="banner__content">
             <div className="banner__title">libimobiledevice 未安装</div>
-            <div className="banner__text" style={{ whiteSpace: "pre-line" }}>{err}</div>
+            <div className="banner__text" style={{ whiteSpace: "pre-line" }}>
+              {/* v2.8.29: 用 prominent 安装指令 + 复制 + 下载链接代替简单文字 */}
+              libimobiledevice 是 Apple 设备直连备份的官方开源工具链。本工具用它触发 iOS
+              系统级 iTunes 备份并立刻扫描，不需要在 PC 上装 iTunes。
+              {"\n\n"}
+              <b>安装：</b>
+              {"\n"}<b>macOS</b>: <code className="mono">brew install libimobiledevice</code>
+              {"\n"}<b>Linux (Debian/Ubuntu)</b>: <code className="mono">sudo apt install libimobiledevice-utils</code>
+              {"\n"}<b>Windows</b>: 装 <a href="https://github.com/libimobiledevice-win32/imobiledevice-net/releases" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>libimobiledevice-net 预编译版</a>（解压后把目录加进 PATH）
+              {"\n\n"}
+              <span style={{ color: "var(--text-muted)" }}>装好后重启本工具，再打开本对话框。</span>
+            </div>
           </div>
         </div>
       )}
@@ -886,7 +897,20 @@ export function PTPCameraModal({ wailsApp, outputDir, onClose, onStarted }: Moda
           <div className="banner__content">
             <div className="banner__title">gphoto2 未安装</div>
             <div className="banner__text" style={{ whiteSpace: "pre-line" }}>
-              macOS: brew install gphoto2{"\n"}Linux: apt install gphoto2{"\n"}Windows: 装 libgphoto2 + WinGphoto2 (zadig USB driver)
+              {/* v2.8.29: 加官方下载链接 */}
+              gphoto2 是开源的相机 PTP 协议工具，用来通过 USB 拉取所有照片（包括相机里已删除但
+              未覆盖的图片）。本工具调它批量 pull → 然后跑深度扫描雕刻找回更多。
+              {"\n\n"}
+              <b>安装：</b>
+              {"\n"}<b>macOS</b>: <code className="mono">brew install gphoto2</code>
+              {"\n"}<b>Linux (Debian/Ubuntu)</b>: <code className="mono">sudo apt install gphoto2</code>
+              {"\n"}<b>Windows</b>: 装{" "}
+              <a href="http://www.gphoto.org/proj/libgphoto2/" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>libgphoto2 官网</a>
+              {" "}的预编译版 + 用{" "}
+              <a href="https://zadig.akeo.ie/" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>Zadig</a>
+              {" "}给相机替换 USB 驱动为 WinUSB
+              {"\n\n"}
+              <span style={{ color: "var(--text-muted)" }}>装好后重启本工具，再打开本对话框。</span>
             </div>
           </div>
         </div>
@@ -957,6 +981,8 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalP
   const [src, setSrc] = useState("/sdcard/DCIM");
   const [dst, setDst] = useState(outputDir || "");
   const [err, setErr] = useState("");
+  // v2.8.29: adb 未装走专门的 banner，不挤在普通"失败"信息里
+  const [adbMissing, setAdbMissing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -965,7 +991,7 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalP
         const status = await wailsApp?.MTPCheck?.();
         if (cancelled) return;
         if (!status?.available) {
-          setErr("adb 未安装\n请装 Android Platform Tools:\nhttps://developer.android.com/tools/releases/platform-tools");
+          setAdbMissing(true);
           setPhase("input");
           return;
         }
@@ -1025,7 +1051,34 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalP
       }
     >
       {phase === "loading" && <div className="muted">检测 adb + 列设备…</div>}
-      {phase !== "loading" && (
+      {phase !== "loading" && adbMissing && (
+        <div className="banner banner--danger" style={{ margin: "0 0 12px 0" }}>
+          <div className="banner__content">
+            <div className="banner__title">adb 未安装 —— Android 拉文件需要 Google 官方 Platform Tools</div>
+            <div className="banner__text" style={{ whiteSpace: "pre-line", lineHeight: 1.7 }}>
+              {/* v2.8.29: 把 download 链接做成可点击 + 明确的安装步骤 */}
+              本工具调 adb 拉 Android 设备的目录（如 /sdcard/DCIM 整个相册），再跑深度雕刻
+              恢复"已删但未覆盖"的文件。adb 是 Android 官方调试桥，所有 Android 工具都用它。
+              {"\n\n"}
+              <b>下载 + 安装：</b>
+              {"\n"}1. 访问 Google 官方下载页：
+              {" "}<a href="https://developer.android.com/tools/releases/platform-tools" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                https://developer.android.com/tools/releases/platform-tools
+              </a>
+              {"\n"}2. 下载 platform-tools-latest-<b>{
+                /* @ts-ignore navigator typing */
+                typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("win") ? "windows" :
+                typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac") ? "darwin" : "linux"
+              }</b>.zip，解压到任意位置
+              {"\n"}3. 把解压后的目录加进系统 <code className="mono">PATH</code> 环境变量
+              {"\n"}4. 重启本工具，再打开本对话框
+              {"\n\n"}
+              <b>替代方案：</b>装好 adb 后用 <code className="mono">adb shell</code> 验证手机能识别再回来。
+            </div>
+          </div>
+        </div>
+      )}
+      {phase !== "loading" && !adbMissing && (
         <>
           {devs.length === 0 ? (
             <div className="banner banner--info" style={{ margin: "0 0 12px 0" }}>
@@ -1164,9 +1217,26 @@ export function DiskDumpModal({ wailsApp, selectedDrive, onClose, onStarted }: M
           </Field>
           <Field
             label="输出 .img 路径"
-            hint="⚠️ 必须在**不同**物理盘上（避免覆盖源盘扇区）"
+            hint="⚠️ 必须在不同物理盘上（避免覆盖源盘扇区）"
           >
-            <TextInput value={outImg} onChange={setOutImg} placeholder="~/Desktop/disk.img" />
+            {/* v2.8.29: 加系统文件保存对话框按钮 —— 之前要求手贴路径 */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <TextInput value={outImg} onChange={setOutImg} placeholder="点右侧按钮打开系统文件保存对话框" />
+              <button
+                className="btn btn--sm"
+                onClick={async () => {
+                  try {
+                    const picked = await wailsApp?.SelectImageSavePath?.();
+                    if (picked) setOutImg(picked);
+                  } catch (e: any) {
+                    setErr("选保存路径失败：" + (e?.message || e));
+                  }
+                }}
+                title="选择保存位置"
+              >
+                选位置…
+              </button>
+            </div>
           </Field>
           {driveSize > 0 && (
             <div className="muted" style={{ fontSize: 11 }}>

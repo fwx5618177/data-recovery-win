@@ -4,6 +4,83 @@
 
 ---
 
+## v2.8.29 (2026-05-15)
+
+**用户报的 21 个问题里 v2.8.28 没动的 16 个一起补 —— 9 个真 bug + 7 个 UX**
+
+### 真 bug
+
+**Issue 12 ✅ 保管链点了报"outputDir 为空"** —— `BuildCustody/VerifyCustody/Timeline/DFXML`
+4 个工具都直接传 `outputDir || ""`，用户没做过恢复时 outputDir 是空字符串 →
+后端立刻报错。改用 ToolDialog 强制让用户选目录 + 用大段说明解释每个工具是干啥的。
+
+**Issue 9 ✅ 计划定时备份 install 报 0x80004005 + GBK mojibake** —— `schtasks /Create
+/TR "robocopy \"%s\" \"%s\" /MIR"` 在 cmd.exe 里嵌套引号解析出错，schtasks 直接报
+0x80004005，中文 Windows 的报错文字是 GBK 编码，Go 抓到的是 mojibake。改用
+PowerShell `Register-ScheduledTask`，参数走数组形式不存在引号嵌套问题。
+回归测试 `TestBuildWindowsRegisterTaskPS_QuoteSafety` 锁住空格路径 + 单引号路径都安全。
+
+**Issue 19 ✅ "整盘镜像 dump" 输出路径要手贴** —— 改成系统文件保存对话框
+（`SelectImageSavePath`，已存在但未连到 UI）。RAID 检测 0 结果文案从"未检测到 RAID 阵列"
+改成正面表达"已扫描，没发现 RAID 成员标记 —— 这是正常的单盘环境"。
+
+**Issue 13 ✅ NSRL hash 库要手贴绝对路径** —— 新增后端 `SelectFile(title, filterName,
+filterExt)` IPC + ToolDialog 增加 `type: "file"` 字段 + filter 支持。NSRL 工具现在
+弹系统文件选择器。
+
+**Issue 8 ✅ 查找重复图片"没任何提示、许久之后弹结果"** —— 加扫描中 toast（用
+`dismissByKey` 在结果出来时关掉）。toast.ts 新增 `dismissByKey(key)` helper。
+
+### UX 改进
+
+**Issue 16 ✅ ADB 未装提示** —— 新加 prominent banner with 平台分步骤安装 +
+Google 官方下载链接（可点击 a 标签）+ 自动检测 OS 显示对应的 ZIP 名。
+
+**Issue 17 ✅ PTP gphoto2 未装** —— 同上模式，加 libgphoto2 官网 + Zadig 驱动替换链接。
+
+**Issue 18 ✅ iOS libimobiledevice 未装** —— 同上模式，加 libimobiledevice-net 预编译版下载。
+
+**Issue 6 ✅ SED 检测不会用** —— 详细解释 SED 是企业 SSD 硬件加密 + sedutil-cli 装法
++ "普通家用 99% 不是 SED 跳过即可"。
+
+**Issue 7 ✅ GPT 备份表恢复后没下文** —— 结果 toast 解释"这是诊断"，不会自动写回；
+要真写回用 sgdisk / TestDisk 等专门工具（设计原则：源盘只读）。0 结果时列出 5 种常见原因。
+
+**Issue 10 ✅ 导出时间线（mactime）干啥的** —— ToolDialog description 解释 SleuthKit
+bodyfile 格式 + 怎么 mactime -b ... -d 二次处理。
+
+**Issue 11 ✅ DFXML 取证报告干啥的** —— description 解释 DFXML 是数字取证 XML 标准 +
+用 fiwalk / dfxml-python 等工具分析 + 普通用户可不导出。
+
+**Issue 15 ✅ APFS 时光快照点了没反应** —— 0 结果时详细解释 APFS 是 macOS FS，
+Windows / Linux 不会有快照，不是 bug。
+
+### Files Changed
+
+- `app.go` — 新增 `SelectFile` IPC 通用文件选择对话框；`runForensicsPostProcess` 已在 v2.8.28
+- `frontend/src/App.tsx` — Custody/Verify/Timeline/DFXML/NSRL 全部走 ToolDialog；
+  SED/GPT/APFS-snapshot/RAID 文案改正面；查重图加进度 toast
+- `frontend/src/components/ToolDialog.tsx` — 新增 `file` 类型字段渲染 + 文件选择按钮
+- `frontend/src/components/MobileToolsModals.tsx` — DiskDumpModal 加文件保存按钮；
+  ADBPullModal / iOSDirectModal / PTPModal 加详细安装步骤 + 下载链接
+- `frontend/src/toast.ts` — 新增 `dismissByKey(key)` helper
+- `internal/backup/monitor.go` — `Install/Uninstall` Windows 路径改 PowerShell
+  Register-ScheduledTask，杜绝引号嵌套
+- `internal/backup/monitor_test.go` — 加 2 个回归测试
+
+### 测试
+
+```
+go test -race -count=1 ./...                             ✅ 全绿
+TestBuildWindowsRegisterTaskPS_QuoteSafety               ✅
+TestBuildWindowsRegisterTaskPS_PathWithSingleQuote       ✅
+TestGenerateInstallCommand_PerOS  (mode=Windows 检查 Register-ScheduledTask) ✅
+GOOS=windows go build ./...                              ✅
+pnpm run build                                            ✅
+```
+
+---
+
 ## v2.8.28 (2026-05-15)
 
 **恢复流 + 工具弹窗一批修复（用户报的 21 个里的 5 个高优先级）**

@@ -1861,7 +1861,20 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 return;
               }
               if (!r.available) {
-                toast.warning({ title: "SED 检测不可用", description: r.note });
+                // v2.8.29: 详细说明 SED 是什么 + 怎么验证装好 sedutil 后能用
+                toast.warning({
+                  title: "SED 检测不可用",
+                  description:
+                    (r.note || "") + "\n\n" +
+                    "什么是 SED：Self-Encrypting Drive，企业级 SSD 自带的 AES-XTS 全盘硬件加密\n" +
+                    "（Samsung 850 EVO Pro / Intel SSD Pro / Micron 等）。普通家用盘 99% 不是 SED。\n\n" +
+                    "如何验证：\n" +
+                    "1. 装 sedutil-cli（开源工具）：https://github.com/Drive-Trust-Alliance/sedutil\n" +
+                    "2. 命令行跑 sedutil-cli --scan，列出当前机器上所有 SED 盘\n" +
+                    "3. 装好后重启本工具，本菜单就能查锁定状态了\n\n" +
+                    "普通用户：跳过这一项即可，对扫描和恢复无影响",
+                  duration: 15000,
+                });
                 return;
               }
               if (r.locked) {
@@ -1891,20 +1904,35 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             try {
               const parts = await wailsApp?.RecoverGPTPartitions?.(drivePath);
               if (!parts || parts.length === 0) {
+                // v2.8.29: 加引导 —— "未找到"是正常的（多数盘是 MBR / 没坏 GPT）
                 toast.info({
                   title: "未找到备份 GPT 分区表",
-                  description: "可能盘是 MBR / 未分区 / 备份表也已损坏。提示：在物理盘（不是逻辑卷）上查 GPT 才有意义。",
+                  description:
+                    "可能原因：\n" +
+                    "  · 盘是 MBR 分区方式（老 BIOS 系统 / U 盘常见）\n" +
+                    "  · GPT 主表健康，没必要恢复（只在主表损坏时才用备份表）\n" +
+                    "  · 选的是逻辑卷（C: / D:）而不是物理盘 —— 必须在 PhysicalDrive* 上查\n" +
+                    "  · 盘的备份表也已损坏（最后 33 个扇区被覆写）\n\n" +
+                    "对扫描和恢复没影响，这个工具只是给「分区表挂掉了」的特殊场景用。",
+                  duration: 12000,
                 });
                 return;
               }
+              // v2.8.29: 加更详细的解释 —— 这是"诊断"工具，光读出来不会自动写回
               const lines = parts.slice(0, 6).map((p: any, i: number) =>
-                `${i + 1}. ${p.name || p.typeGUID || "未命名"}（${p.firstLBA}–${p.lastLBA}）`
+                `${i + 1}. ${p.name || p.typeGUID || "未命名"}（LBA ${p.firstLBA}–${p.lastLBA}）`
               );
               const more = parts.length > 6 ? `\n…还有 ${parts.length - 6} 个` : "";
               toast.success({
-                title: `找到 ${parts.length} 个分区`,
-                description: lines.join("\n") + more,
-                duration: 12000,
+                title: `✅ 从备份 GPT 读出 ${parts.length} 个分区`,
+                description:
+                  lines.join("\n") + more + "\n\n" +
+                  "这是诊断信息 —— 证明备份表有效，分区元数据可读。\n" +
+                  "如要真的把备份表写回主位置，业界标准做法是用专门工具：\n" +
+                  "  · Linux: sgdisk --backup-from-backup\n" +
+                  "  · Windows: TestDisk（开源）→ Advanced → Boot → Repair GPT\n" +
+                  "本工具不直接改盘（设计原则：源盘只读），以免误操作。",
+                duration: 20000,
               });
             } catch (err: any) {
               toast.error({
@@ -1916,20 +1944,33 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
             }
           }, true /* needsDisk */)}
           {item("🖼 查找重复图片", async () => {
-            // v2.8.17 Issue 7 + 9 + 8: 用 Wails native 目录选择 + 弹出结果展示页
-            // （之前 native prompt 标题 "wails.localhost 显示" + 只 toast 提示数量，无结果界面）
+            // v2.8.29 Issue 8: 加进度提示 toast。之前查重期间静默几十秒甚至几分钟，
+            // 用户不知道有没有在跑，体验差。dedupeKey 保证不会叠多条 toast。
             try {
               const dir = await wailsApp?.SelectDirectory?.("选择要查重的目录");
               if (!dir) return; // 用户取消
+
+              toast.info({
+                title: "🖼 正在扫描重复图片",
+                description: `目录：${dir}\n\n每张图片算 perceptual hash 后两两比对，目录里图越多越慢。\n大目录（>1 万张）可能要 1-3 分钟，请等待...`,
+                duration: 60000,
+                dedupeKey: "dup-scan-running",
+              });
+
               const groups = await wailsApp?.FindDuplicateImages?.(dir, 5);
+
+              // 关掉进度 toast（结果出来了）
+              toast.dismissByKey?.("dup-scan-running");
+
               if (!groups || groups.length === 0) {
-                toast.info({ title: "未找到重复图片", description: "目录里没有相似度超过阈值的组" });
+                toast.info({ title: "✅ 扫描完成 · 未找到重复图片", description: "目录里没有相似度超过阈值的组（perceptual hash 距离 > 5）" });
                 return;
               }
               // 弹出 DuplicateImagesModal 让用户看具体路径 + 删除/打开
               onDuplicateGroups?.(groups);
-              toast.success({ title: `找到 ${groups.length} 组相似图片`, description: "点击查看并处理" });
-            } catch (err) {
+              toast.success({ title: `✅ 找到 ${groups.length} 组相似图片`, description: "点击查看并处理" });
+            } catch (err: any) {
+              toast.dismissByKey?.("dup-scan-running");
               toast.error("查重失败：" + (err?.message || err));
             }
           })}
@@ -1984,24 +2025,138 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
               },
             });
           })}
-          {item("📜 导出时间线 (mactime)", () => runAsync(
-            () => wailsApp?.ExportTimeline?.(outputDir || "", "mactime"),
-            (p) => `已导出：${p}`
-          ))}
-          {item("📄 导出 DFXML 取证报告", () => runAsync(
-            () => wailsApp?.ExportDFXML?.(outputDir || ""),
-            (p) => `已导出：${p}`
-          ))}
-          {item("🔐 生成保管链 (custody.json)", () => runAsync(
-            () => wailsApp?.BuildCustody?.(outputDir || "", drivePath || "", ""),
-            (p) => `已生成：${p}`
-          ))}
-          {item("✅ 校验保管链", () => runAsync(
-            () => wailsApp?.VerifyCustody?.(outputDir || ""),
-            (probs) => probs.length === 0 ? "✅ 保管链完整" : "⚠️ 问题:\n" + probs.join("\n")
-          ))}
+          {item("📜 导出时间线 (mactime)", () => {
+            // v2.8.29: 用 ToolDialog 引导用户选输出目录，并解释时间线是干什么的。
+            // 之前直接传 outputDir || ""，输出目录为空时直接报错"outputDir 为空"，
+            // 用户也不懂"时间线"是什么。
+            setOpen(false);
+            onToolDialog?.({
+              title: "📜 导出时间线 (mactime / bodyfile 格式)",
+              description:
+                "把这次扫描发现的全部文件按时间顺序导出成 SleuthKit mactime body file，\n" +
+                "再用 mactime 工具能生成「2024-03-15 14:30:21 文件 X 被修改」这种事件日志。\n\n" +
+                "用途：取证场景查「被偷电脑里的攻击者操作时间线」；普通恢复场景可不导出。\n\n" +
+                "输出文件：<目录>/timeline-YYYYMMDD-HHMMSS.body —— 用 SleuthKit 的 mactime\n" +
+                "命令二次处理：mactime -b timeline-XXX.body -d > events.csv",
+              fields: [
+                {
+                  key: "dir",
+                  label: "输出目录",
+                  type: "directory",
+                  pickerTitle: "选择时间线导出目录",
+                  defaultValue: outputDir || "",
+                  hint: outputDir ? "默认是上次恢复输出目录；可改成其它目录" : "请选择把 timeline 文件保存到哪",
+                  required: true,
+                },
+              ],
+              submitLabel: "导出",
+              onSubmit: async (vals) => {
+                const p = await wailsApp?.ExportTimeline?.(vals.dir, "mactime");
+                return `已导出：${p}`;
+              },
+            });
+          })}
+          {item("📄 导出 DFXML 取证报告", () => {
+            // v2.8.29: 同 timeline，prompt outputDir + 解释用途
+            setOpen(false);
+            onToolDialog?.({
+              title: "📄 导出 DFXML 取证报告",
+              description:
+                "DFXML (Digital Forensics XML) 是数字取证行业标准格式，记录扫描发现的所有文件的元数据：\n" +
+                "  · 文件名 / 大小 / 偏移 / SHA-256\n" +
+                "  · byte runs（碎片在磁盘上的物理位置）\n" +
+                "  · 来源（carver / NTFS / exFAT...）\n\n" +
+                "用途：交付给法务 / 第三方取证人员做证据；用 fiwalk / dfxml-python 等工具进一步分析。\n" +
+                "普通家用恢复场景可以不导出。\n\n" +
+                "输出文件：<目录>/dfxml-YYYYMMDD-HHMMSS.xml —— 可用浏览器或 fiwalk 工具打开。",
+              fields: [
+                {
+                  key: "dir",
+                  label: "输出目录",
+                  type: "directory",
+                  pickerTitle: "选择 DFXML 报告导出目录",
+                  defaultValue: outputDir || "",
+                  hint: outputDir ? "默认是上次恢复输出目录；可改成其它目录" : "请选择把 DFXML 文件保存到哪",
+                  required: true,
+                },
+              ],
+              submitLabel: "导出",
+              onSubmit: async (vals) => {
+                const p = await wailsApp?.ExportDFXML?.(vals.dir);
+                return `已导出：${p}`;
+              },
+            });
+          })}
+          {item("🔐 生成保管链 (custody.json)", () => {
+            // v2.8.29: 用户直接点这个工具时 outputDir 经常为空 → 后端报"outputDir 为空"。
+            // 改成 ToolDialog 强制让用户选恢复输出目录（custody 是对那个目录里所有文件算 SHA256）。
+            setOpen(false);
+            onToolDialog?.({
+              title: "🔐 生成保管链 (custody.json)",
+              description:
+                "保管链 (Chain of Custody) 是取证场景的标配文档：\n" +
+                "  · 谁（操作员） / 何时 / 用什么工具 / 从哪个源盘恢复了哪些文件\n" +
+                "  · 每个恢复文件的 SHA-256，证明从生成到提交未被篡改\n\n" +
+                "用途：法庭 / 公司内审 / 跨团队交付时证明数据完整性。普通家用恢复场景可不生成。\n\n" +
+                "操作：选已经做完恢复的输出目录 → 本工具递归算 SHA-256 + 写 custody.json。",
+              fields: [
+                {
+                  key: "dir",
+                  label: "恢复输出目录",
+                  type: "directory",
+                  pickerTitle: "选择已恢复完成的输出目录",
+                  defaultValue: outputDir || "",
+                  hint: "工具会递归扫描这个目录算每个文件的 SHA-256 —— 文件多/盘大时较慢",
+                  required: true,
+                },
+                {
+                  key: "operator",
+                  label: "操作员（可选）",
+                  type: "text",
+                  placeholder: "你的姓名 / 工号，会写进 custody.json",
+                  hint: "用于取证场景标识谁执行了恢复操作；私人使用可留空",
+                  required: false,
+                },
+              ],
+              submitLabel: "生成",
+              onSubmit: async (vals) => {
+                const p = await wailsApp?.BuildCustody?.(vals.dir, drivePath || "", vals.operator || "");
+                return `已生成：${p}`;
+              },
+            });
+          })}
+          {item("✅ 校验保管链", () => {
+            // v2.8.29: 同 BuildCustody，让用户选 custody.json 所在目录
+            setOpen(false);
+            onToolDialog?.({
+              title: "✅ 校验保管链",
+              description:
+                "重算保管链 (custody.json) 里记录的每个文件的 SHA-256，与原值比对，发现：\n" +
+                "  · 被删除的文件（manifest 里有但盘上没有）\n" +
+                "  · 被修改的文件（manifest hash 与重算 hash 不一致）\n" +
+                "  · 多出来的文件（盘上有但 manifest 没记）\n\n" +
+                "用途：在交付证据后任何时间点重新验证文件没被改过。",
+              fields: [
+                {
+                  key: "dir",
+                  label: "含 custody.json 的目录",
+                  type: "directory",
+                  pickerTitle: "选择含 custody.json 的目录",
+                  defaultValue: outputDir || "",
+                  hint: "通常是之前「生成保管链」用的输出目录",
+                  required: true,
+                },
+              ],
+              submitLabel: "校验",
+              onSubmit: async (vals) => {
+                const probs = await wailsApp?.VerifyCustody?.(vals.dir);
+                if (!probs || probs.length === 0) return "✅ 保管链完整 —— 所有文件 SHA-256 都与 custody.json 记录一致";
+                return "⚠️ 发现 " + probs.length + " 处问题：\n" + probs.join("\n");
+              },
+            });
+          })}
           {item("📥 载入 NSRL hash 库", () => {
-            // v2.8.18 Issue 1: ToolDialog 替代 prompt
+            // v2.8.29: 支持系统文件选择器（之前要求手贴绝对路径）
             setOpen(false);
             onToolDialog?.({
               title: "📥 载入 NSRL hash 库",
@@ -2016,10 +2171,13 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
               fields: [
                 {
                   key: "path",
-                  label: "NSRL hash 文件路径（.txt）",
-                  type: "text",
-                  placeholder: "例：D:\\NSRL\\NSRLFile.txt",
-                  hint: "暂不支持文件选择对话框；直接粘贴绝对路径",
+                  label: "NSRL hash 文件",
+                  type: "file",
+                  pickerTitle: "选择 NSRL hash 库（NSRLFile.txt）",
+                  fileFilterName: "NSRL hash 库",
+                  fileFilterExt: "*.txt;*.csv;*.tsv",
+                  placeholder: "点右边「选文件」打开系统文件选择器",
+                  hint: "支持 NSRL 官方格式（SHA-1/MD5 每行一个）和 SleuthKit hashdb 格式",
                   required: true,
                 },
               ],
@@ -2066,8 +2224,13 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
           })}
           {item("📸 APFS 时光快照", () => runAsync(
             () => wailsApp?.ListAPFSSnapshots?.(drivePath || ""),
-            (list) => list.length === 0 ? "未发现 APFS snapshot" :
-              list.map((c) => `容器 0x${c.containerOffset.toString(16)}: ${c.snapshots.length} 个 snapshot`).join("\n")
+            (list) => list.length === 0
+              ? "✅ 已扫描，未发现 APFS 时光快照\n\n" +
+                "这是正常的：APFS 是 macOS 的文件系统（HFS+ 的后继），只有 macOS 内置 Time\n" +
+                "Machine 备份盘 / 用户手动 tmutil 创建 snapshot 才会有这些快照。\n" +
+                "Windows / Linux 盘上不会有 APFS 快照。\n\n" +
+                "对扫描和恢复无影响，本工具只是给 macOS 用户挖「删除前的 snapshot 时点」。"
+              : list.map((c) => `容器 0x${c.containerOffset.toString(16)}: ${c.snapshots.length} 个 snapshot`).join("\n")
           ), true /* needsDisk */)}
 
           {/* ==================== 移动端 / 备份 / 云端 / NAS（v2.4 解锁）  ==================== */}
@@ -2214,7 +2377,11 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
           {item("🎯 RAID 阵列检测", () => runAsync(
             () => wailsApp?.DetectRAIDArrays?.(),
             (arrays) => {
-              if (!arrays || arrays.length === 0) return "未检测到 RAID 阵列";
+              if (!arrays || arrays.length === 0) {
+                // v2.8.29: 之前文案"未检测到 RAID 阵列"让用户以为是"工具失败"。
+                // 改成正面表达："已扫描，没发现 RAID 成员盘"（说明是单盘环境，不需要重组）
+                return "✅ 已扫描所有盘，未发现 mdadm / LVM / Storage Spaces 等 RAID 成员标记。\n这是正常的（说明你的盘是单盘环境，不需要 RAID 重组）。";
+              }
               return `检测到 ${arrays.length} 个 RAID：\n` +
                 arrays.map((a) => `  • ${a.type} (${a.devices?.length || 0} 盘) - 健康: ${a.healthy ? "✅" : "⚠️"}`).join("\n");
             }

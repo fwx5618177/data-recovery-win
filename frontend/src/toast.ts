@@ -86,6 +86,15 @@ export function dismissToast(id: number) {
   if (toasts.length !== before) emit();
 }
 
+// v2.8.29: 按 dedupeKey 关闭 toast。给"长时间运行 + 结果出来时关掉提示 toast"的
+// 模式用，比如查找重复图片：开始时 toast.info(...) 提示扫描中，结果出来时关掉。
+export function dismissToastByKey(key: string) {
+  if (!key) return;
+  const before = toasts.length;
+  toasts = toasts.filter((t) => t.dedupeKey !== key);
+  if (toasts.length !== before) emit();
+}
+
 export function dismissAllToasts() {
   if (!toasts.length) return;
   toasts = [];
@@ -133,5 +142,6 @@ export const toast = {
   error: makeShortcut("error"),
   show: showToast,
   dismiss: dismissToast,
+  dismissByKey: dismissToastByKey,
   dismissAll: dismissAllToasts,
 };

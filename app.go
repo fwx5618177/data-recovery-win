@@ -1986,6 +1986,36 @@ func (a *App) SelectDirectory(title string) (string, error) {
 	return dir, nil
 }
 
+// SelectFile 通用文件选择对话框，给 NSRL 库 / 任意第三方 hash list / 镜像文件等用。
+//
+// title       对话框标题（"选择 NSRL hash 库" / "选择 .ab 备份"等）
+// filterName  过滤器显示名（"NSRL hash 库" / "Android 备份"等）
+// filterExt   过滤器扩展名（"*.txt" / "*.ab" / "*.txt;*.csv"）；为空则不限类型
+//
+// v2.8.29 加 —— 之前 NSRL / 部分工具要求用户手动粘贴绝对路径，没有系统文件选择器。
+// Wails 已有 OpenFileDialog，只是没暴露给前端通用 IPC。
+func (a *App) SelectFile(title, filterName, filterExt string) (string, error) {
+	if title == "" {
+		title = "选择文件"
+	}
+	opts := wailsRuntime.OpenDialogOptions{Title: title}
+	if filterExt != "" {
+		if filterName == "" {
+			filterName = "文件"
+		}
+		opts.Filters = []wailsRuntime.FileFilter{
+			{DisplayName: filterName, Pattern: filterExt},
+			{DisplayName: "全部文件 (*.*)", Pattern: "*.*"},
+		}
+	}
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, opts)
+	if err != nil {
+		appLogger.Warn("打开文件选择对话框失败", "err", err, "title", title)
+		return "", fmt.Errorf("打开文件选择对话框失败: %w", err)
+	}
+	return path, nil
+}
+
 // SelectImageSavePath 让用户选"把镜像保存到哪"的目标路径。
 // 单独一个入口，默认 .img 后缀；后端自己不该猜路径。
 func (a *App) SelectImageSavePath() (string, error) {
