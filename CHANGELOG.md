@@ -4,6 +4,43 @@
 
 ---
 
+## v2.8.36 (2026-05-15)
+
+**契约测试覆盖面再扩 — 47 个 struct + 防御性 tag**
+
+### 反射契约扩到 47 个 struct
+
+v2.8.35 覆盖 39 个。这次新增 9 个：
+
+```
++ recovery.SMBScanRequest / NFSScanRequest  (NAS 扫描请求)
++ recovery.IOSBackupInfo / AndroidBackupInfo (移动备份元数据)
++ recovery.ManifestEntry / Manifest / ManifestSummary (manifest.json 三层结构)
++ disk.FreeSpace (GetFreeSpace IPC 返回)
++ disk.CacheStats (加密卷缓存命中率)
+```
+
+### 防御性 JSON tag 补完
+
+`SMBScanRequest` / `NFSScanRequest` 现在虽然只在 Go 内部用（app.go 用单独的
+`SMBScanRequestWails` DTO 接收前端请求再转换），但加上 tag 保持跟所有 IPC-邻近类型
+一致 —— 免得未来谁扩成 IPC 直接暴露时撞 JSON-tag 缺失 bug。
+
+### Files Changed
+
+- `internal/recovery/nas_scan.go` — SMBScanRequest / NFSScanRequest 加 JSON tag
+- `json_dto_contract_test.go` — 反射 samples 名单 39 → 47
+
+### 测试
+
+```
+go test -race -count=1 ./...              ✅ 全绿
+TestIPCStructsHaveJSONTags                ✅ 47 个 struct 全 pass
+GOOS=windows go build ./...               ✅
+```
+
+---
+
 ## v2.8.35 (2026-05-15)
 
 **再扩契约测试覆盖面 — 又抓出 2 个 `types.ScanOptions` 缺 tag**

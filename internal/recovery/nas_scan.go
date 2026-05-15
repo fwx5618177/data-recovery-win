@@ -53,28 +53,30 @@ type nasNFSRef struct {
 	Size    int64
 }
 
-// SMBScanRequest 一次 SMB 扫描任务的参数
+// SMBScanRequest 一次 SMB 扫描任务的参数。
+// v2.8.36: 加 json tag —— 当前虽然只在 Go 内部用，但加上保持跟所有 IPC-邻近类型
+// 一致，免得未来扩成 IPC 直接暴露时撞 JSON-tag 缺失 bug。
 type SMBScanRequest struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	Domain   string
-	Shares   []string // 空 = 全部 share
-	MaxDepth int
-	MaxFiles int
+	Host     string   `json:"host"`
+	Port     int      `json:"port"`
+	User     string   `json:"user"`
+	Password string   `json:"password"`
+	Domain   string   `json:"domain"`
+	Shares   []string `json:"shares"` // 空 = 全部 share
+	MaxDepth int      `json:"maxDepth"`
+	MaxFiles int      `json:"maxFiles"`
 }
 
-// NFSScanRequest 一次 NFS 扫描任务的参数
+// NFSScanRequest 一次 NFS 扫描任务的参数。
 type NFSScanRequest struct {
-	Host     string
-	NFSPort  uint32
-	MountPort uint32
-	UID      uint32
-	GID      uint32
-	Exports  []string // 空 = 全部 export
-	MaxDepth int
-	MaxFiles int
+	Host      string   `json:"host"`
+	NFSPort   uint32   `json:"nfsPort"`
+	MountPort uint32   `json:"mountPort"`
+	UID       uint32   `json:"uid"`
+	GID       uint32   `json:"gid"`
+	Exports   []string `json:"exports"` // 空 = 全部 export
+	MaxDepth  int      `json:"maxDepth"`
+	MaxFiles  int      `json:"maxFiles"`
 }
 
 // ScanSMBShare 扫描 SMB 共享。整个会话由 Engine 持有直到 Shutdown / 用户取消。
