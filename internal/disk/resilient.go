@@ -42,10 +42,14 @@ type ResilientReader struct {
 	badSectors                  []BadSector
 }
 
+// BadSector 单个被跳过的坏扇区记录，供"坏扇区清单"UI / 取证报告展示。
+//
+// v2.8.34 加 JSON tag —— 之前裸字段被前端读 sector.offset / sector.size 全
+// undefined，扫描后"坏扇区清单"对话框全空。
 type BadSector struct {
-	Offset int64
-	Size   int64
-	Err    string
+	Offset int64  `json:"offset"`
+	Size   int64  `json:"size"`
+	Err    string `json:"err"`
 }
 
 // NewResilientReader 默认值：sectorSize=512，maxRetry=1（v2.8.9 从 2 降到 1，避免坏扇区死亡螺旋）。

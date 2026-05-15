@@ -19,11 +19,14 @@ import (
 	"strings"
 )
 
-// MountAdvice 给用户看：怎么挂载远程文件系统让本工具能读
+// MountAdvice 给用户看：怎么挂载远程文件系统让本工具能读。
+//
+// v2.8.34 加 JSON tag —— 之前裸字段，前端读 advice.method / advice.steps 全 undefined，
+// "🌐 网络镜像挂载建议"工具的对话框显示"undefined / undefined" 一片空白。
 type MountAdvice struct {
-	Method string
-	OS     string
-	Steps  []string
+	Method string   `json:"method"`
+	OS     string   `json:"os"`
+	Steps  []string `json:"steps"`
 }
 
 // SuggestMount 根据 URL 协议返回挂载步骤

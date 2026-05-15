@@ -4,6 +4,87 @@
 
 ---
 
+## v2.8.34 (2026-05-15)
+
+**再扫一轮 JSON-tag 缺失 — 又找到 5 个**
+
+v2.8.33 找到 3 个（gpt.Partition / DetectedArray / Snapshot）后我做了完整审计，
+但只覆盖了 `RecoverGPTPartitions` 路径上的几个 struct。这次系统性扫遍**所有**
+返回给前端的 IPC struct + 事件 payload struct，又揪出 5 个：
+
+### 又揪出的 5 个 JSON-tag 缺失 ✅
+
+| Struct | 用在哪 | 用户能看到的症状 |
+|---|---|---|
+| `netfs.MountAdvice` | 🌐 网络镜像挂载建议工具 | 对话框 "undefined / undefined" 空白 |
+| `disk.BadSector` | 扫描后坏扇区清单 | UI 列表全 undefined |
+| `parallel.DiskJob` | 多盘扫描请求 + parallel:diskStart 事件 | TasksSidebar 任务标签丢字段 |
+| `parallel.JobResult` | parallel:allDone 事件 | 多盘扫描完成后无结果 |
+| `disk.ImageProgress` | imaging:progress 事件 | 整盘 dump 进度条不动 |
+
+`JobResult.Err` 是 `error` 接口不能 JSON 序列化 → 加 `json:"-"` 显式排除（应用层
+应该自己转字符串再 emit）。
+
+### 反射型契约测试 — 防御所有未来回归
+
+之前的契约测试只针对具体 struct 一一断言。这次升级成反射枚举 + 通用断言：
+
+```go
+func TestIPCStructsHaveJSONTags(t *testing.T) {
+    samples := []sample{
+        {"GPTPartitionInfo", GPTPartitionInfo{}},
+        {"EncryptedVolumeInfo", EncryptedVolumeInfo{}},
+        // ... 15 个 IPC struct 全部覆盖
+    }
+    for _, s := range samples {
+        typ := reflect.TypeOf(s.val)
+        for i := 0; i < typ.NumField(); i++ {
+            f := typ.Field(i)
+            if !f.IsExported() { continue }
+            tag, ok := f.Tag.Lookup("json")
+            if !ok {
+                t.Errorf("%s.%s 缺 json tag — 前端会读到 undefined",
+                    s.name, f.Name)
+            }
+            // 也禁 PascalCase tag
+            tagName := strings.SplitN(tag, ",", 2)[0]
+            if tagName != "" && tagName != "-" && tagName[0] >= 'A' && tagName[0] <= 'Z' {
+                t.Errorf("%s.%s json tag 是 PascalCase %q — 前端约定 camelCase",
+                    s.name, f.Name, tagName)
+            }
+        }
+    }
+}
+```
+
+任何**导出**字段缺 json tag → 立刻 fail。tag 是 PascalCase → 也 fail。
+
+这把"undefined-undefined"类 bug 用一条契约钉死，所有现存 IPC struct 一次性
+扫一遍 + 任何新加 struct 加进 samples 名单就自动保护。
+
+### Files Changed
+
+- `internal/netfs/netfs.go` — MountAdvice 加 JSON tag
+- `internal/disk/resilient.go` — BadSector 加 JSON tag
+- `internal/disk/imager.go` — ImageProgress 加 JSON tag
+- `internal/parallel/multidisk.go` — DiskJob / JobResult 加 JSON tag (Err 用 json:"-")
+- `json_dto_contract_test.go` — 新增 5 个具体测试 + 1 个反射型枚举测试
+
+### 测试
+
+```
+go test -race -count=1 ./...                        ✅ 全绿
+TestIPCStructsHaveJSONTags                          ✅ 反射枚举 15 个 struct 全 pass
+TestNetFSMountAdvice_JSONTags                       ✅
+TestDiskBadSector_JSONTags                          ✅
+TestParallelDiskJobAndJobResult_JSONTags            ✅
+TestDiskImageProgress_JSONTags                      ✅
+GOOS=windows go build ./...                         ✅
+pnpm run build                                       ✅
+```
+
+---
+
 ## v2.8.33 (2026-05-15)
 
 **真实未修的 bug 一类 — Go IPC 结构体没 JSON tag 导致前端读 undefined**

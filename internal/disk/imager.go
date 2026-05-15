@@ -9,15 +9,18 @@ import (
 )
 
 // ImageProgress 是镜像过程的实时状态，供 UI 更新进度条。
+//
+// v2.8.34 加 JSON tag —— 之前裸字段，作为 "imaging:progress" 事件 payload 时
+// 前端读 p.bytesTotal / p.speed 全 undefined，整盘 dump 进度条不动。
 type ImageProgress struct {
-	BytesTotal    int64 // 源盘总字节数
-	BytesRead     int64 // 已尝试读取的字节数（含坏道跳过部分）
-	BytesOK       int64 // 读取成功的字节数
-	BytesBad      int64 // 坏道/读取失败被填零的字节数
-	ElapsedSec    float64
-	Speed         int64 // bytes/sec（基于最近区间）
-	ETASec        float64
-	CurrentOffset int64
+	BytesTotal    int64   `json:"bytesTotal"`    // 源盘总字节数
+	BytesRead     int64   `json:"bytesRead"`     // 已尝试读取的字节数（含坏道跳过部分）
+	BytesOK       int64   `json:"bytesOK"`       // 读取成功的字节数
+	BytesBad      int64   `json:"bytesBad"`      // 坏道/读取失败被填零的字节数
+	ElapsedSec    float64 `json:"elapsedSec"`
+	Speed         int64   `json:"speed"`         // bytes/sec（基于最近区间）
+	ETASec        float64 `json:"etaSec"`
+	CurrentOffset int64   `json:"currentOffset"`
 }
 
 // ImageOptions 镜像选项。默认值就已经是行业合理做法。

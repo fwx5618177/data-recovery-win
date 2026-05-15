@@ -2,10 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"data-recovery/internal/apfs"
+	"data-recovery/internal/disk"
+	"data-recovery/internal/netfs"
+	"data-recovery/internal/parallel"
 	"data-recovery/internal/volmgr"
 )
 
@@ -67,6 +71,57 @@ func TestVolmgrDetectedArray_JSONKeysAreCamelCase(t *testing.T) {
 	// 嵌套 DetectedMember 也得 camelCase
 	if !strings.Contains(string(raw), `"path":"/dev/sda"`) {
 		t.Errorf("DetectedMember.path 字段缺失或大小写不对: %s", raw)
+	}
+}
+
+// TestNetFSMountAdvice_JSONTags v2.8.34 修复
+func TestNetFSMountAdvice_JSONTags(t *testing.T) {
+	a := netfs.MountAdvice{Method: "macOS Finder", OS: "darwin", Steps: []string{"step1"}}
+	raw, _ := json.Marshal(a)
+	for _, k := range []string{`"method":"macOS Finder"`, `"os":"darwin"`, `"steps":[`} {
+		if !strings.Contains(string(raw), k) {
+			t.Errorf("MountAdvice 缺字段 %s: %s", k, raw)
+		}
+	}
+}
+
+// TestDiskBadSector_JSONTags v2.8.34 修复
+func TestDiskBadSector_JSONTags(t *testing.T) {
+	bs := disk.BadSector{Offset: 1024, Size: 512, Err: "read fail"}
+	raw, _ := json.Marshal(bs)
+	for _, k := range []string{`"offset":1024`, `"size":512`, `"err":"read fail"`} {
+		if !strings.Contains(string(raw), k) {
+			t.Errorf("BadSector 缺字段 %s: %s", k, raw)
+		}
+	}
+}
+
+// TestParallelDiskJobAndJobResult_JSONTags v2.8.34 修复
+func TestParallelDiskJobAndJobResult_JSONTags(t *testing.T) {
+	j := parallel.DiskJob{DrivePath: "/dev/sda", Mode: "deep"}
+	raw, _ := json.Marshal(j)
+	if !strings.Contains(string(raw), `"drivePath":"/dev/sda"`) || !strings.Contains(string(raw), `"mode":"deep"`) {
+		t.Errorf("DiskJob 字段不对: %s", raw)
+	}
+	r := parallel.JobResult{DrivePath: "/dev/sdb", Result: nil}
+	raw2, _ := json.Marshal(r)
+	if !strings.Contains(string(raw2), `"drivePath":"/dev/sdb"`) {
+		t.Errorf("JobResult.drivePath 字段不对: %s", raw2)
+	}
+	// JobResult.Err 是 error 接口，标 json:"-" 不应该出现在输出里
+	if strings.Contains(string(raw2), `"Err"`) || strings.Contains(string(raw2), `"err"`) {
+		t.Errorf("JobResult.Err 应该被 json:\"-\" 排除：%s", raw2)
+	}
+}
+
+// TestDiskImageProgress_JSONTags v2.8.34 修复
+func TestDiskImageProgress_JSONTags(t *testing.T) {
+	p := disk.ImageProgress{BytesTotal: 1 << 30, BytesRead: 1 << 28, BytesOK: 1 << 28, Speed: 100 * 1024 * 1024}
+	raw, _ := json.Marshal(p)
+	for _, k := range []string{`"bytesTotal":`, `"bytesRead":`, `"bytesOK":`, `"speed":`} {
+		if !strings.Contains(string(raw), k) {
+			t.Errorf("ImageProgress 缺字段 %s: %s", k, raw)
+		}
 	}
 }
 
@@ -151,6 +206,69 @@ func TestFormatGPTGUID_StandardLayout(t *testing.T) {
 	want := "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
 	if got != want {
 		t.Errorf("formatGPTGUID: got %q, want %q", got, want)
+	}
+}
+
+// TestIPCStructsHaveJSONTags 反射检查"返回给前端的所有结构体"必须给每个**导出**
+// 字段写 json tag。
+//
+// 历史教训：连着 3 版才发现 gpt.Partition / DetectedArray / Snapshot 字段名
+// PascalCase 被前端读 undefined。本测试枚举每个 IPC 关键 struct，反射拿字段，
+// 任何导出字段没 json tag → fail。
+//
+// 不能覆盖所有 struct（Go 内部 struct 不该都加 tag），所以维护一份 IPC 名单。
+// 新加 IPC struct 时在这里加一行（一次性 cost, 永久防御）。
+func TestIPCStructsHaveJSONTags(t *testing.T) {
+	type sample struct {
+		name string
+		val  interface{}
+	}
+	samples := []sample{
+		// 已修
+		{"GPTPartitionInfo", GPTPartitionInfo{}},
+		{"EncryptedVolumeInfo", EncryptedVolumeInfo{}},
+		{"APFSSnapshotInfo", APFSSnapshotInfo{}},
+		{"DiscoveredNAS", DiscoveredNAS{}},
+		{"CloudSyncRootInfo", CloudSyncRootInfo{}},
+		{"CloudBackupFinding", CloudBackupFinding{}},
+		{"MTPDeviceInfo", MTPDeviceInfo{}},
+		{"MTPStatus", MTPStatus{}},
+		{"AndroidPartitionInfo", AndroidPartitionInfo{}},
+		{"PTPStatus", PTPStatus{}},
+		{"PTPDeviceInfo", PTPDeviceInfo{}},
+		{"IOSDirectStatus", IOSDirectStatus{}},
+		{"IOSDeviceInfo", IOSDeviceInfo{}},
+		{"EncryptedReaderCacheStatsResp", EncryptedReaderCacheStatsResp{}},
+		{"RAIDScanRequest", RAIDScanRequest{}},
+	}
+
+	for _, s := range samples {
+		typ := reflect.TypeOf(s.val)
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			tag, ok := f.Tag.Lookup("json")
+			if !ok {
+				t.Errorf("%s.%s 缺 json tag —— 前端会读到 undefined。\n"+
+					"  Go field %q → JS expected %q\n"+
+					"  历史同类 bug：v2.8.33 修了 gpt.Partition / DetectedArray / Snapshot；\n"+
+					"  v2.8.34 修了 MountAdvice / BadSector / DiskJob / JobResult / ImageProgress。\n"+
+					"  请给字段加合适的 `json:\"camelCaseName\"` tag",
+					s.name, f.Name, f.Name, strings.ToLower(string(f.Name[0]))+f.Name[1:])
+				continue
+			}
+			// 也检查 tag 不是 PascalCase（除 "-" 跳过外，必须 lowerCamelCase）
+			tagName := strings.SplitN(tag, ",", 2)[0]
+			if tagName == "" || tagName == "-" {
+				continue
+			}
+			if tagName[0] >= 'A' && tagName[0] <= 'Z' {
+				t.Errorf("%s.%s 的 json tag 是 PascalCase %q —— 前端约定 camelCase",
+					s.name, f.Name, tagName)
+			}
+		}
 	}
 }
 

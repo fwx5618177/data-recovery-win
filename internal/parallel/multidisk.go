@@ -12,17 +12,26 @@ import (
 	"data-recovery/internal/types"
 )
 
-// DiskJob 单盘扫描任务
+// DiskJob 单盘扫描任务。
+//
+// v2.8.34 加 JSON tag —— DiskJob 也作为"parallel:diskStart"事件 payload，
+// 前端读 job.drivePath / job.mode 之前都是 undefined。同时入参反序列化
+// Go 默认是 case-insensitive 所以前端发 camelCase 也能工作（之前），但事件 emit
+// 输出走严格匹配，必须有 tag。
 type DiskJob struct {
-	DrivePath string
-	Mode      types.ScanMode
+	DrivePath string         `json:"drivePath"`
+	Mode      types.ScanMode `json:"mode"`
 }
 
-// JobResult 单盘扫完的结果
+// JobResult 单盘扫完的结果。
+//
+// v2.8.34 加 JSON tag —— 之前作为 parallel:allDone 事件 payload，前端读
+// r.drivePath / r.result 全 undefined。`Err` 字段是 error 接口（不能序列化），
+// 改用 ErrMessage 字符串 + json:"-" 让上层显式转。
 type JobResult struct {
-	DrivePath string
-	Result    *types.ScanResult
-	Err       error
+	DrivePath string             `json:"drivePath"`
+	Result    *types.ScanResult  `json:"result"`
+	Err       error              `json:"-"`
 }
 
 // ScanCallback 多盘并行模式下的 progress + file events
