@@ -26,10 +26,10 @@ var logger = logging.L().With("component", "carver")
 // matcher.Search 返回的 Pattern 是引用 AC 树里的常量字节，不是 Data 的切片，
 // 因此归还 Data 不会让后续 Collector 用到悬空引用。
 type chunk struct {
-	Data    []byte     // 池化的数据缓冲区（归还前 worker 会用 Data[:Size] 做匹配）
-	Offset  int64      // 在磁盘上的起始偏移
-	Size    int        // 有效数据长度（可能比 cap(Data) 小，因为 overlap 不足或到达末尾）
-	release func()     // 把 Data 归还到 Engine.chunkPool
+	Data    []byte // 池化的数据缓冲区（归还前 worker 会用 Data[:Size] 做匹配）
+	Offset  int64  // 在磁盘上的起始偏移
+	Size    int    // 有效数据长度（可能比 cap(Data) 小，因为 overlap 不足或到达末尾）
+	release func() // 把 Data 归还到 Engine.chunkPool
 }
 
 // rawMatch 是 AC 匹配器的原始匹配结果
@@ -56,14 +56,27 @@ type Config struct {
 	DisabledExtensions []string
 }
 
-// DefaultConfig 返回默认配置
+// DefaultConfig 返回默认配置。
+//
+// v2.8.37 perf 调优：
+//   - ChunkSize 从 4MB 提到 8MB：现代盘（NVMe 7 GB/s / SATA SSD 500 MB/s）单次 ReadAt
+//     的内核 syscall + 锁开销是固定成本（~100μs）。4MB → 8MB 把单次读的 I/O 摊销时间
+//     从 ~570μs（4MB / 7 GB/s）翻倍到 ~1.1ms，syscall 占比从 ~15% 降到 ~8%。每 GB 盘
+//     的读 syscall 次数减半。对 SATA SSD 影响更明显（4MB / 500 MB/s = 8ms，syscall 占比小，
+//     但单次 IO 时间更稳定，下游 worker 等待 jitter 更小）。
+//   - Overlap 由签名长度自动算（在 NewEngine 里），跟 ChunkSize 无关 → 改 ChunkSize 安全。
+//   - MaxFileSize 4GB 保留，最大恢复单文件足够。
+//
+// 内存代价：chunkPool 池子里同时存在的 chunk 数 ≈ Workers + chanBuf；8MB × 32 ≈ 256MB
+// 峰值池占用（v2.8.37 实际是 Workers*4 = 32 个）。家用机器 16GB+ 内存可接受。
+// 资源紧张机器可以调小 Workers 或 ChunkSize；这是上限，不是常驻。
 func DefaultConfig() Config {
 	workers := runtime.NumCPU()
 	if workers < 2 {
 		workers = 2
 	}
 	return Config{
-		ChunkSize:          4 * 1024 * 1024, // 4MB
+		ChunkSize:          8 * 1024 * 1024, // v2.8.37: 4MB → 8MB
 		Workers:            workers,
 		MaxFileSize:        4 * 1024 * 1024 * 1024, // 4GB
 		DisabledExtensions: []string{"ico", "exe", "elf"},
@@ -273,7 +286,12 @@ func (e *Engine) Scan(
 	}
 
 	// ---- 创建流水线 channel ----
-	chunkCh := make(chan *chunk, e.config.Workers*2) // IO → Workers
+	// v2.8.37 perf: chunkCh 缓冲 Workers*2 → Workers*4。让 IO goroutine 能领先 worker
+	// 池更远，吸收 worker AC 搜索的 jitter（AC 搜索时间在不同 chunk 上波动可达 2-3 倍 ——
+	// 含很多签名头字节的 chunk 比纯零字节 chunk 慢得多）。
+	// 内存代价：chunkCh 容量 × ChunkSize ≈ 32 × 8MB = 256MB（仅"in-flight 上限"，
+	// 实际峰值常远低于此 —— 慢 worker 会让池子退还慢，但 chunkCh 不会无限堆积）。
+	chunkCh := make(chan *chunk, e.config.Workers*4) // IO → Workers
 	matchCh := make(chan *rawMatch, 1000)            // Workers → Collector
 
 	var wgWorkers sync.WaitGroup

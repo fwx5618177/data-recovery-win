@@ -64,13 +64,13 @@ type FileRecoveryRecord struct {
 
 // RecoveryResult 恢复操作的结果汇总。
 type RecoveryResult struct {
-	Succeeded     int `json:"success"`       // 完整恢复 + validator 判 valid
-	LowConfidence int `json:"lowConfidence"` // 走 _low_confidence/ 子目录（validator 判不完全可靠）
-	Partial       int `json:"partial"`       // 大小不完整恢复
-	Failed        int `json:"failed"`        // 写盘失败 / 读源盘出错
-	Skipped       int `json:"skipped"`       // validator 判 invalid → 拒绝交付
-	Duplicates    int `json:"duplicates"`    // 跨源 SHA-256 去重数量
-	Total         int `json:"total"`
+	Succeeded     int                   `json:"success"`       // 完整恢复 + validator 判 valid
+	LowConfidence int                   `json:"lowConfidence"` // 走 _low_confidence/ 子目录（validator 判不完全可靠）
+	Partial       int                   `json:"partial"`       // 大小不完整恢复
+	Failed        int                   `json:"failed"`        // 写盘失败 / 读源盘出错
+	Skipped       int                   `json:"skipped"`       // validator 判 invalid → 拒绝交付
+	Duplicates    int                   `json:"duplicates"`    // 跨源 SHA-256 去重数量
+	Total         int                   `json:"total"`
 	Records       []*FileRecoveryRecord `json:"records"`
 }
 
@@ -692,6 +692,14 @@ func (e *Engine) validateAll(
 	total := len(files)
 	validCount := 0
 
+	// v2.8.37 perf: progress 节流。之前每个文件 emit 一次 ScanProgress，10 万文件 =
+	// 10 万次 wailsRuntime.EventsEmit。Wails 走 JSON marshal → IPC → 前端 React render，
+	// 单次 ~50μs，10 万次累计 ~5 秒 CPU + render 抖动让用户体验差。
+	// 节流：每 500 文件 OR 每 200ms emit 一次（首次和最后一次永远 emit）。
+	const progressBatchSize = 500
+	const progressMinInterval = 200 * time.Millisecond
+	lastEmit := time.Now()
+
 	for i, file := range files {
 		var result validator.Result
 		residentHandled := false
@@ -726,15 +734,22 @@ func (e *Engine) validateAll(
 			validCount++
 		}
 
-		// 更新进度 (0-100% 映射由调用者处理)
+		// 节流过的进度上报
 		if onProgress != nil {
-			percent := float64(i+1) / float64(total) * 100.0
-			onProgress(types.ScanProgress{
-				Phase:       "validating",
-				Percent:     percent,
-				FilesFound:  total,
-				CurrentFile: fmt.Sprintf("验证文件 %d/%d", i+1, total),
-			})
+			isFirst := i == 0
+			isLast := i == total-1
+			countThresholdHit := (i+1)%progressBatchSize == 0
+			timeThresholdHit := time.Since(lastEmit) >= progressMinInterval
+			if isFirst || isLast || countThresholdHit || timeThresholdHit {
+				percent := float64(i+1) / float64(total) * 100.0
+				onProgress(types.ScanProgress{
+					Phase:       "validating",
+					Percent:     percent,
+					FilesFound:  total,
+					CurrentFile: fmt.Sprintf("验证文件 %d/%d", i+1, total),
+				})
+				lastEmit = time.Now()
+			}
 		}
 	}
 
@@ -870,8 +885,8 @@ func (e *Engine) RecoverWithOptions(
 	successCount := 0
 	partialCount := 0
 	failedCount := 0
-	skippedCount := 0       // validator 判 invalid 的被拒文件
-	lowConfCount := 0       // 走 _low_confidence/ 的被保留但标低可靠
+	skippedCount := 0 // validator 判 invalid 的被拒文件
+	lowConfCount := 0 // 走 _low_confidence/ 的被保留但标低可靠
 	duplicateCount := 0
 	bytesWritten := int64(0)
 	records := make([]*FileRecoveryRecord, 0, total)
@@ -1315,7 +1330,6 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 // 然后使用 WriteNTFSFile 按 DataRuns 读取。若缓存缺失则直接失败，
 // 不再回退到按 Offset 的 WriteFile——因为碎片化文件的后续段在那里会被忽略。
 
-
 // BadSectors 返回本次扫描期间 ResilientReader 跳过的坏扇区清单
 // （没扫描过或 Scan 用自定义 reader 时返回 nil）。
 func (e *Engine) BadSectors() []disk.BadSector {
@@ -1532,6 +1546,7 @@ func (e *Engine) Shutdown() {
 
 	logger.Info("引擎已关闭")
 }
+
 // categorizeByExtension 根据文件扩展名推断分类
 func categorizeByExtension(ext string) types.FileCategory {
 	switch ext {
