@@ -21,13 +21,16 @@ import (
 // 提示"重装前的旧数据可能在 snap-xxxxx 里"。
 
 // Snapshot 是单个 APFS 快照的元数据。
+//
+// v2.8.33 加 JSON tag —— 之前裸字段，前端读 snapshot.xid/name/createTime 全 undefined，
+// "📸 APFS 时光快照"工具的 toast 显示"容器 0xXXX: undefined 个 snapshot"。
 type Snapshot struct {
-	XID         uint64 // 快照创建时的 transaction id
-	CreateTime  uint64 // ns 单位（Unix epoch + 0）
-	ChangeTime  uint64
-	Name        string // 快照名（"com.apple.TimeMachine.2026-04-21-..." 或用户自定义）
-	InodeNum    uint64 // SnapMetadata 的关联 inode
-	Flags       uint32
+	XID        uint64 `json:"xid"`        // 快照创建时的 transaction id
+	CreateTime uint64 `json:"createTime"` // ns 单位（Unix epoch + 0）
+	ChangeTime uint64 `json:"changeTime"`
+	Name       string `json:"name"` // 快照名（"com.apple.TimeMachine.2026-04-21-..." 或用户自定义）
+	InodeNum   uint64 `json:"inodeNum"` // SnapMetadata 的关联 inode
+	Flags      uint32 `json:"flags"`
 }
 
 // EnumerateSnapshots 把 fs tree 里所有 SnapMetadata + SnapName 记录关联起来。

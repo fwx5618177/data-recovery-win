@@ -195,22 +195,25 @@ func tryParseAt(reader disk.DiskReader, off int64) (*MDADMSuperblockV1, error) {
 	return sb, nil
 }
 
-// DetectedArray 多盘扫描后匹配出的 RAID 阵列
+// DetectedArray 多盘扫描后匹配出的 RAID 阵列。
+//
+// v2.8.33 加 JSON tag —— 之前裸字段 (PascalCase) 被前端 (camelCase) 读出全部
+// undefined，"🎯 RAID 阵列检测"工具的 toast 显示 "undefined (0 盘)"。
 type DetectedArray struct {
-	UUID        string
-	Name        string
-	Level       string     // "raid0" / "raid1" / "raid5" / "raid6" / "raid10"
-	ChunkBytes  int64      // 条带大小（字节）
-	RaidDisks   int        // 理论成员盘数
-	OrderedPaths []string  // 按 role 排好序的成员盘路径；缺失成员对应位置为 ""
-	DataOffset  int64      // 成员盘上数据起点（字节）
-	Members     []DetectedMember
+	UUID         string           `json:"uuid"`
+	Name         string           `json:"name"`
+	Level        string           `json:"level"`        // "raid0" / "raid1" / "raid5" / "raid6" / "raid10"
+	ChunkBytes   int64            `json:"chunkBytes"`   // 条带大小（字节）
+	RaidDisks    int              `json:"raidDisks"`    // 理论成员盘数
+	OrderedPaths []string         `json:"orderedPaths"` // 按 role 排好序的成员盘路径；缺失成员对应位置为 ""
+	DataOffset   int64            `json:"dataOffset"`   // 成员盘上数据起点（字节）
+	Members      []DetectedMember `json:"members"`
 }
 
 type DetectedMember struct {
-	Path    string
-	Role    int
-	DevUUID string
+	Path    string `json:"path"`
+	Role    int    `json:"role"`
+	DevUUID string `json:"devUUID"`
 }
 
 // DetectRAIDArrays 扫描一组盘，按 mdadm array UUID 聚合，返回可组装的阵列清单。

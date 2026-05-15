@@ -4,6 +4,115 @@
 
 ---
 
+## v2.8.33 (2026-05-15)
+
+**真实未修的 bug 一类 — Go IPC 结构体没 JSON tag 导致前端读 undefined**
+
+### Issue 7 ✅ 真根因找到 — `gpt.Partition` 缺 JSON tag
+
+用户截图里 GPT 备份表恢复结果显示「未命名 (undefined-undefined)」—— 我之前以为是
+"工具引导不清楚"，多版本都在改 toast 文案。**这次盯着截图字面读出真相**：
+"undefined" 是 JS 的字面值，意味着前端读 `p.firstLBA / p.lastLBA / p.name / p.typeGUID`
+全部读到 undefined。
+
+**本质问题**：`gpt.Partition` struct 字段是 PascalCase 裸字段，**无 json tag**：
+
+```go
+type Partition struct {
+    TypeGUID  [16]byte    // 序列化成 "TypeGUID":"AAAA..." (base64) — 前端读 typeGUID 必然 undefined
+    StartLBA  uint64      // 序列化成 "StartLBA"
+    EndLBA    uint64
+    Name      string
+}
+```
+
+前端代码 `${p.firstLBA}–${p.lastLBA}` → "undefined–undefined"。**这是 4 个版本里
+所有"GPT 工具引导改善"都没碰到的真根因。**
+
+**修复**：新增 `GPTPartitionInfo` DTO 带 camelCase JSON tag + 人类可读字段：
+
+```go
+type GPTPartitionInfo struct {
+    Index     int    `json:"index"`
+    Name      string `json:"name"`
+    TypeGUID  string `json:"typeGUID"`  // 标准 GUID 字符串 "EBD0A0A2-..."
+    TypeName  string `json:"typeName"`  // "Microsoft Basic Data (NTFS / FAT32 / exFAT)"
+    FirstLBA  uint64 `json:"firstLBA"`
+    LastLBA   uint64 `json:"lastLBA"`
+    SizeBytes uint64 `json:"sizeBytes"`
+    SizeHuman string `json:"sizeHuman"` // "488.3 MB"
+}
+```
+
+`RecoverGPTPartitions` 现在返回 `[]GPTPartitionInfo`，并：
+1. 用 `formatGPTGUID` 把 mixed-endian 字节转标准 GUID 字符串
+2. 用 `gptTypeNameByGUID` 翻译 17 个常见 GUID（EFI / NTFS / APFS / Linux / ZFS / ...）
+   成人类名
+
+前端 toast 现在显示「1. Microsoft Data · 488.3 MB · LBA 2048–1000000」而不是
+「未命名 (undefined-undefined)」。
+
+### 顺手审计其它 IPC struct — 又发现 2 个
+
+同模式的另外两个：
+
+**`volmgr.DetectedArray`** — RAID 阵列检测的返回类型，所有字段裸 PascalCase。
+前端 `arr.type / arr.devices` 全 undefined → 用户看到 "undefined (0 盘)"。
+
+**`apfs.Snapshot`** — APFS 快照元数据，同样问题。前端 `snapshot.xid / snapshot.name`
+读 undefined → "📸 APFS 时光快照" toast 显示 "容器 0xXX: undefined 个 snapshot"。
+
+两个都加完 JSON tag。前端的 RAID toast 也改成读新字段（`a.level / a.members.length /
+a.uuid`）+ 提示用户用 mdadm 把阵列组装起来。
+
+### 防御性回归测试
+
+新文件 `json_dto_contract_test.go` 锁住 IPC 序列化字段名契约 —— 5 个测试：
+
+```go
+// 反向断言不能含 PascalCase 字段（=没加 tag 的回归信号）
+forbidden := []string{`"UUID":`, `"Level":`, `"ChunkBytes":`, `"RaidDisks":`}
+for _, k := range forbidden {
+    if strings.Contains(string(raw), k) {
+        t.Errorf("回归到 PascalCase！发现 %s，前端会读不到", k)
+    }
+}
+```
+
+将来谁加新 IPC struct 忘了写 json tag → 这个测试模式 + CI 立刻爆，避免再有
+"undefined-undefined" 类 bug 流到用户。
+
+### 教训
+
+我连续 5 版都没看出来的关键线索：**截图里 "undefined" 三个字本身就是诊断信息**。
+任何 UI 里出现字面的 "undefined" / "null" / "[object Object]" 都是 JS 的"我拿
+到了一个东西但属性不对劲"的强信号。下次看到 UI 里有 undefined 应该立刻去找
+JSON tag 不匹配，而不是改 UI 引导文案。
+
+### Files Changed
+
+- `app.go` — 新增 `GPTPartitionInfo` DTO + `formatGPTGUID` + `gptTypeNameByGUID`；
+  `RecoverGPTPartitions` 返回类型换成 DTO
+- `internal/volmgr/mdadm.go` — `DetectedArray` / `DetectedMember` 加 JSON tag
+- `internal/apfs/snapshot.go` — `Snapshot` 加 JSON tag
+- `json_dto_contract_test.go` — 新增（5 个回归测试）
+- `frontend/src/App.tsx` — GPT toast 用新字段 + RAID toast 用新字段
+
+### 测试
+
+```
+go test -race -count=1 ./...                         ✅ 全绿
+TestVolmgrDetectedArray_JSONKeysAreCamelCase         ✅ (反向断言不含 PascalCase)
+TestAPFSSnapshot_JSONKeysAreCamelCase                ✅
+TestGPTPartitionInfo_JSONKeysAndDecoding             ✅
+TestFormatGPTGUID_StandardLayout                     ✅
+TestGPTTypeNameByGUID_KnownPartitions                ✅
+GOOS=windows go build ./...                          ✅
+pnpm run build                                        ✅
+```
+
+---
+
 ## v2.8.32 (2026-05-15)
 
 **Issue 0 + Issue 10 真根因修复 — 之前都是表面补**

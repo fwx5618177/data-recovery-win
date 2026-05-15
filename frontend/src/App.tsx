@@ -1929,11 +1929,13 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 });
                 return;
               }
-              // v2.8.29: 加更详细的解释 —— 这是"诊断"工具，光读出来不会自动写回
-              const lines = parts.slice(0, 6).map((p: any, i: number) =>
-                `${i + 1}. ${p.name || p.typeGUID || "未命名"}（LBA ${p.firstLBA}–${p.lastLBA}）`
-              );
-              const more = parts.length > 6 ? `\n…还有 ${parts.length - 6} 个` : "";
+              // v2.8.33: 用 GPTPartitionInfo DTO（含 typeName/sizeHuman 等已解码字段），
+              // 不再读裸字段（之前没 JSON tag 全部 undefined）。
+              const lines = parts.slice(0, 8).map((p: any) => {
+                const name = (p.name && p.name.trim()) || p.typeName || "(未命名)";
+                return `${p.index}. ${name} · ${p.sizeHuman || "?"} · LBA ${p.firstLBA}–${p.lastLBA}`;
+              });
+              const more = parts.length > 8 ? `\n…还有 ${parts.length - 8} 个` : "";
               toast.success({
                 title: `✅ 从备份 GPT 读出 ${parts.length} 个分区`,
                 description:
@@ -1943,7 +1945,7 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                   "  · Linux: sgdisk --backup-from-backup\n" +
                   "  · Windows: TestDisk（开源）→ Advanced → Boot → Repair GPT\n" +
                   "本工具不直接改盘（设计原则：源盘只读），以免误操作。",
-                duration: 20000,
+                duration: 25000,
               });
             } catch (err: any) {
               toast.error({
@@ -2411,8 +2413,16 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 // 改成正面表达："已扫描，没发现 RAID 成员盘"（说明是单盘环境，不需要重组）
                 return "✅ 已扫描所有盘，未发现 mdadm / LVM / Storage Spaces 等 RAID 成员标记。\n这是正常的（说明你的盘是单盘环境，不需要 RAID 重组）。";
               }
-              return `检测到 ${arrays.length} 个 RAID：\n` +
-                arrays.map((a) => `  • ${a.type} (${a.devices?.length || 0} 盘) - 健康: ${a.healthy ? "✅" : "⚠️"}`).join("\n");
+              // v2.8.33: 字段名对齐 v2.8.33 加的 JSON tag — DetectedArray.{level, raidDisks, members}
+              return `检测到 ${arrays.length} 个 RAID 阵列：\n` +
+                arrays.map((a: any) => {
+                  const memberCount = a.members?.length || a.raidDisks || 0;
+                  const label = a.level || "未知 level";
+                  const name = a.name ? ` "${a.name}"` : "";
+                  return `  • ${label}${name} · ${memberCount} 盘 · UUID ${(a.uuid || "").slice(0, 8)}…`;
+                }).join("\n") +
+                "\n\n下一步：用 mdadm --assemble（Linux）/ Storage Spaces 管理器（Windows）\n" +
+                "把阵列组装起来后，再选拼好的 /dev/mdX 设备扫描即可。";
             }
           ))}
 
