@@ -1849,21 +1849,29 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
                 return;
               }
               if (!r.available) {
-                // v2.8.17 Issue 6: SMART 不可用是 USB 桥接 / 虚拟盘等场景的物理限制
-                // （USB-SATA 桥接芯片大多不透传 SMART 命令；这是硬件层限制不是 bug）。
-                // 改善文案：明确说明原因 + 给出替代方案，而不只是冷冰冰一句"不可用"。
+                // v2.8.42: title 改成 source-aware —— NVMe 被驱动拦截时不能说
+                // "硬件限制非软件 bug"（明明 CrystalDiskInfo 能读，是我们这边权限 / 驱动）。
+                // 把判断逻辑挪到这里：source 含 "blocked" / "nvme" 的走 NVMe 文案；
+                // 其它（U 盘 / 虚拟盘等真物理限制）保留旧文案。
                 const reason = r.notes || "未知原因";
-                const desc = `${reason}\n\n常见原因：\n` +
-                  `· U 盘 / SD 卡 / USB 移动硬盘（USB-SATA 桥不透传 SMART 命令，业界普遍限制）\n` +
-                  `· 虚拟磁盘 / 镜像文件 / 网络盘（无物理 SMART 数据）\n` +
-                  `· 部分 NVMe 走 nvme-cli 而非 SATA SMART\n\n` +
-                  `不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。\n` +
-                  `如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；` +
-                  `或用 CrystalDiskInfo / smartctl --scan 等专业工具。`;
+                const isNVMeBlocked = typeof r.source === "string" &&
+                  (r.source.includes("nvme") && r.source.includes("blocked"));
+                const title = isNVMeBlocked
+                  ? "S.M.A.R.T. 不可用（NVMe 盘需排查权限 / 驱动）"
+                  : "S.M.A.R.T. 不可用（硬件限制，非软件 bug）";
+                const desc = isNVMeBlocked
+                  ? reason  // NVMe 的 notes 已经写得很全（含 1 / 2 / 3 步排查建议）
+                  : `${reason}\n\n常见原因：\n` +
+                    `· U 盘 / SD 卡 / USB 移动硬盘（USB-SATA 桥不透传 SMART 命令，业界普遍限制）\n` +
+                    `· 虚拟磁盘 / 镜像文件 / 网络盘（无物理 SMART 数据）\n` +
+                    `· 部分 NVMe 走 nvme-cli 而非 SATA SMART\n\n` +
+                    `不影响数据扫描和恢复 —— 直接选源盘开始扫描即可。\n` +
+                    `如需健康检测：把硬盘装回主机直连 SATA / NVMe 后重试；` +
+                    `或用 CrystalDiskInfo / smartctl --scan 等专业工具。`;
                 // v2.8.20 Issue 20: toast 加 id 防止重复触发时叠加。
                 // v2.8.28 Issue 5: duration 从 0（永不自动关闭）改为 15s。
                 // 之前用户反馈"不会自动关闭很烦"——文字虽然多但 15s 够看完且能手动关。
-                toast.warning({ title: "S.M.A.R.T. 不可用（硬件限制，非软件 bug）", description: desc, duration: 15000, dedupeKey: "smart-unavailable" });
+                toast.warning({ title, description: desc, duration: 15000, dedupeKey: "smart-unavailable" });
                 return;
               }
               // 拼装多行 description：型号 / 通电时长 / 温度 / 坏扇区

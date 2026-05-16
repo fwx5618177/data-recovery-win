@@ -4,6 +4,62 @@
 
 ---
 
+## v2.8.42 (2026-05-16)
+
+**SMART toast 标题 source-aware — NVMe 不再误导"硬件限制"**
+
+v2.8.40 后端 NVMe SMART 失败会返回 `Source="native-nvme-blocked" + Notes=具体排查指引`，
+前端把 Notes 写进 toast description 没问题，但 **title 还是死写 "S.M.A.R.T. 不可用（硬件限制，非软件 bug）"** —— 对 NVMe 场景明显误导：
+CrystalDiskInfo 等工具能读，说明不是硬件限制，是我们这边权限 / 驱动问题。
+
+**Fix（frontend/src/App.tsx）：**
+
+```js
+const isNVMeBlocked = typeof r.source === "string" &&
+  (r.source.includes("nvme") && r.source.includes("blocked"));
+const title = isNVMeBlocked
+  ? "S.M.A.R.T. 不可用（NVMe 盘需排查权限 / 驱动）"
+  : "S.M.A.R.T. 不可用（硬件限制，非软件 bug）";
+const desc = isNVMeBlocked
+  ? reason  // NVMe Notes 自带 1/2/3 排查建议，不再追加 USB 桥 / 虚拟盘等无关原因
+  : `${reason}\n\n常见原因：...USB 桥接 / 虚拟盘 / 网络盘...`;
+```
+
+NVMe 用户看到的现在是：
+
+```
+S.M.A.R.T. 不可用（NVMe 盘需排查权限 / 驱动）
+
+这是 NVMe SSD 盘，但本工具的 NVMe SMART 请求被驱动 / 权限拦截了。
+常见原因（按优先级）：
+  1. 没以管理员权限运行 —— 右键应用 → 「以管理员身份运行」再试
+  2. 笔记本预装的 OEM NVMe 驱动屏蔽了 IOCTL_STORAGE_PROTOCOL_COMMAND
+     —— 装 Microsoft 标准 NVMe 驱动（stornvme.sys）通常可解
+  3. Windows 版本太低 —— 该 IOCTL 需要 Windows 10 1709 或更新
+```
+
+U 盘 / SD 卡 / 虚拟盘等真物理限制场景仍走旧文案，不变。
+
+### Files Changed
+
+```
+M  frontend/src/App.tsx     (SMART toast title/desc source-aware 分支)
+M  CHANGELOG.md
+```
+
+### 6 bug 状态
+
+| # | Bug | 状态 |
+|---|------|-----|
+| 1 | SMART NVMe | ✅ v2.8.40 修 + v2.8.42 文案打磨 |
+| 2 | 查重 cancel | ✅ v2.8.39 |
+| 3 | 计划任务 Description | ✅ v2.8.39 |
+| 4 | APFS 快照点击 | ✅ v2.8.40 |
+| 5 | 保管链 walk | ✅ v2.8.39 |
+| 6 | 恢复完默认 tab | ✅ v2.8.39 |
+
+---
+
 ## v2.8.41 (2026-05-16)
 
 **CI 修复 — v2.8.40 staticcheck 红了**
