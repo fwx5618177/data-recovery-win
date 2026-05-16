@@ -431,7 +431,15 @@ export default function App() {
         return merged;
       });
     });
-    const offFound = wailsRuntime.EventsOn("scan:fileFound", (f) => queueFile(f));
+    // v2.8.40: backend 改成批量 emit。payload 现在是 []RecoveredFile（200 文件 / 100ms 一批），
+    // 但要兼容老 backend 发的单 RecoveredFile（升级期 / 第三方手动 emit）。
+    const offFound = wailsRuntime.EventsOn("scan:fileFound", (payload) => {
+      if (Array.isArray(payload)) {
+        for (const f of payload) queueFile(f);
+      } else if (payload) {
+        queueFile(payload);
+      }
+    });
     const offDone = wailsRuntime.EventsOn("scan:completed", (result) => {
       setScanActive(false);
       flushPending();
@@ -1701,20 +1709,31 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
 
   const drivePath = selectedDrive?.path || "";
 
-  // v2.8.39: 之前 `if (msg && r)` 在 r 是 null/undefined/空数组时跳过 toast ——
-  // 用户点击如 "📸 APFS 时光快照" 等工具，在没有 APFS 的盘上 backend 返回 nil
-  // (= JS null) → 整个调用静默无反应。用户报"点击无效果"。
-  // 修：只要 msg 在就一定调用，让 msg 自己判定空数据 → 回退"未发现 X"提示。
-  // 所有 msg callback 实测都已经做了 !list / list.length===0 检查，安全。
+  // v2.8.40: runAsync 现在 null-safe —— Wails 把 Go nil slice/map 序列化为 JS null，
+  // 不少 msg callback 写成 `(list) => list.length === 0 ? ...` 在 null 上会抛
+  // TypeError。之前 (v2.8.39) 这个错被外层 catch 吃成 "失败: TypeError..."，
+  // 用户感觉"点击没反应"（错误吐司很难注意到）。
+  //
+  // 新策略：
+  //   - r 是 null/undefined → 归一化成 []（最常见 callback 处理的是数组）
+  //   - msg 抛错也包成"工具返回数据异常"，不让 stack 弹给用户
   async function runAsync(fn, msg) {
     setOpen(false);
     try {
       const r = await fn();
       if (msg) {
-        const out = msg(r);
-        if (out) toast.info(out);
+        // null/undefined 归一化为 []，让 callback 里 `list.length === 0` 永远安全
+        const normalized = r == null ? [] : r;
+        try {
+          const out = msg(normalized);
+          if (out) toast.info(out);
+        } catch (msgErr: any) {
+          // eslint-disable-next-line no-console
+          console.warn("runAsync 的 msg callback 抛错", msgErr, "原始数据:", r);
+          toast.error("工具返回的数据格式无法处理：" + (msgErr?.message || msgErr));
+        }
       }
-    } catch (err) {
+    } catch (err: any) {
       toast.error("失败: " + (err?.message || err));
     }
   }
@@ -2270,7 +2289,8 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
           })}
           {item("📸 APFS 时光快照", () => runAsync(
             () => wailsApp?.ListAPFSSnapshots?.(drivePath || ""),
-            (list) => list.length === 0
+            // v2.8.40: defense-in-depth —— 即使 runAsync 没归一化，自己也 null-safe
+            (list) => (!list || list.length === 0)
               ? "✅ 已扫描，未发现 APFS 时光快照\n\n" +
                 "这是正常的：APFS 是 macOS 的文件系统（HFS+ 的后继），只有 macOS 内置 Time\n" +
                 "Machine 备份盘 / 用户手动 tmutil 创建 snapshot 才会有这些快照。\n" +

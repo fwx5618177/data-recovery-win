@@ -4,7 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+
+	"data-recovery/internal/logging"
 )
+
+// smartLogger 让 SMART 子系统在所有平台都能写诊断日志（Windows IOCTL 失败、
+// macOS diskutil 输出、Linux ioctl 错误等）。不带 build tag，所有 _windows /
+// _darwin / _linux 文件都能复用。
+var smartLogger = logging.L().With("component", "smart")
 
 // SMART 是磁盘的 Self-Monitoring, Analysis and Reporting Technology —— 现代盘自带
 // 健康状态汇报。我们用它在用户开始扫描前，告诉他"这盘是不是要崩了"，避免在垂死的
@@ -48,15 +55,21 @@ func (h *SmartHealth) HasCriticalIssue() bool {
 
 // QuerySmart 是对外唯一入口。先尝试 OS 原生路径，失败再退化到 smartctl，
 // 都失败时返回 Available=false + Notes 解释为什么。永远不抛错（除非 path 空）。
+//
+// v2.8.40: 原生路径返回 Available=false + Notes 非空 时，**优先保留这条
+// 具体提示**（而不是用泛泛的 unavailableHint）。NVMe 探到但 IOCTL 被拦截
+// 这种情况，用户能直接看到"NVMe SSD，但是被驱动拦截 → 试管理员权限"等
+// 可行动指引，比泛泛的"硬件限制"有用得多。
 func QuerySmart(ctx context.Context, devicePath string) (*SmartHealth, error) {
 	if devicePath == "" {
 		return nil, fmt.Errorf("devicePath 为空")
 	}
 
 	// 1. OS 原生（platform-specific 文件实现的 querySmartNative）
-	if h := querySmartNative(ctx, devicePath); h != nil && h.Available {
-		writeNotes(h)
-		return h, nil
+	nativeResult := querySmartNative(ctx, devicePath)
+	if nativeResult != nil && nativeResult.Available {
+		writeNotes(nativeResult)
+		return nativeResult, nil
 	}
 
 	// 2. smartctl 退路（如果用户碰巧装了）
@@ -66,7 +79,10 @@ func QuerySmart(ctx context.Context, devicePath string) (*SmartHealth, error) {
 		return h, nil
 	}
 
-	// 3. 都不行 —— 给一条解释清楚的提示，不再说"装个 smartmontools"
+	// 3. 都不行 —— 优先用原生路径给的具体 Notes，否则才走泛 hint
+	if nativeResult != nil && nativeResult.Notes != "" {
+		return nativeResult, nil
+	}
 	return &SmartHealth{
 		Available: false,
 		Source:    "unavailable",

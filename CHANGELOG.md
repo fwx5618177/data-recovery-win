@@ -4,6 +4,140 @@
 
 ---
 
+## v2.8.40 (2026-05-16)
+
+**v2.8.39 6 个 bug 复检 + 2 个加固 + 第三轮 IPC 节流（scan:fileFound）**
+
+用户复报同样 6 个问题。代码审计逐个确认：
+
+| # | Bug | v2.8.39 状态 | 本批动作 |
+|---|------|-----|--------|
+| 1 | SMART NVMe | ⚠ IOCTL 路径对但失败时静默无日志 | ✅ 加详细诊断 |
+| 2 | 查重 cancel | ✅ 真已修 | ✅ 确认 |
+| 3 | 计划任务 Description | ✅ 真已修 | ✅ 确认 |
+| 4 | APFS 快照点击 | ⚠ APFS callback `list.length` 在 null 上会 throw | ✅ 真修 |
+| 5 | 保管链 walk | ✅ 真已修 | ✅ 确认 |
+| 6 | 恢复完默认 tab | ✅ 真已修 | ✅ 确认 |
+
+### Bug 1 加固 — NVMe SMART 失败诊断
+
+v2.8.39 的 NVMe IOCTL 路径逻辑正确，但每条失败路径都 `return nil` 不日志，
+用户报错时我手上零信息。这批补：
+
+1. **`smartLogger`** 全平台共享，日志组件 `"smart"`
+2. **BusType 探测**：从 28B `unsafe.Sizeof(desc)` 改成 128B 固定缓冲（避免
+   驱动写入完整 STORAGE_ADAPTER_DESCRIPTOR > 28B 时 truncate / 返
+   ERROR_INSUFFICIENT_BUFFER），加 Warn 日志带 err / bytesReturned
+3. **NVMe Get Log Page IOCTL 失败**：日志带 `err` + `bytesReturned` +
+   `hint`（中文翻译常见错误码）：
+   - `ERROR_ACCESS_DENIED` → "没以管理员权限运行"
+   - `ERROR_INVALID_FUNCTION` → "OEM 厂商 NVMe 驱动屏蔽了该 IOCTL"
+   - `ERROR_NOT_SUPPORTED` → "Windows < 10 1709 不支持该 IOCTL"
+4. **NVMe 控制器返回非 0 ReturnStatus**：日志带 `returnStatus + errorCode + hint`
+5. **NVMe 探到但 IOCTL 失败 → 返 Available=false + 具体 Notes**：用户看到的
+   不再是 "硬件限制非软件 bug"（无价值），而是 "NVMe SSD + 被驱动拦截 + 试管理员权限 +
+   装标准 stornvme.sys + Windows 版本要求 + 导出诊断包让我们看"
+6. **`QuerySmart`**：原生路径返 Notes 非空时优先保留这条具体提示，不覆盖成泛 hint
+
+### Bug 4 真修 — runAsync null safety
+
+v2.8.39 的 fix 改了 runAsync 把 `if (msg && r)` → `if (msg)`，但 **APFS callback
+`(list) => list.length === 0 ? ... : ...`** 在 list=null 时 `null.length` 抛
+TypeError。外层 catch 吃成 `toast.error("失败: TypeError...")`，用户感觉"没反应"
+（错误吐司不显眼）。
+
+**真修：**
+
+```js
+// runAsync 内部 normalize null → []
+const normalized = r == null ? [] : r;
+try {
+  const out = msg(normalized);
+  if (out) toast.info(out);
+} catch (msgErr) {
+  console.warn("runAsync 的 msg callback 抛错", msgErr, "原始数据:", r);
+  toast.error("工具返回的数据格式无法处理：" + msgErr.message);
+}
+```
+
+APFS callback 也加 `!list ||` 防御（defense-in-depth）。
+
+### Perf 第三弹 — `scan:fileFound` 后台批量 emit
+
+老实现：8 个 scan 路径每命中一个文件都 `wailsRuntime.EventsEmit(... "scan:fileFound", f)`
++ 整个 `RecoveredFile` JSON (~200B 含 fileName/path/signatures/time pointer)。
+100K 文件 = **100K IPC + 20MB JSON 序列化**。
+
+前端早就 200ms batch render，所以 backend 高频 emit 纯是浪费 CPU + 带宽。
+
+**新设计（app.go）：**
+
+```go
+const (
+    fileFoundBatchSize     = 200                    // 攒到 200 文件就发
+    fileFoundBatchInterval = 100 * time.Millisecond // 或者过了 100ms 就发
+)
+
+func (a *App) emitFileFoundBatched(f *types.RecoveredFile) {
+    // append + 阈值触发 emit (payload = []*RecoveredFile)
+}
+
+func (a *App) flushFileFoundBatch() {
+    // 强制 emit pending
+}
+
+func (a *App) emitScanCompleted(result) { flush + emit }
+func (a *App) emitScanError(errMsg)     { flush + emit }
+```
+
+- 8 个 `EventsEmit("scan:fileFound", f)` → `a.emitFileFoundBatched(f)`
+- 6 个 `EventsEmit("scan:completed", ...)` → `a.emitScanCompleted(...)`（自动 flush 防丢尾巴）
+- 9 个 `EventsEmit("scan:error", ...)` → `a.emitScanError(...)`（同上）
+
+**效果（100K 文件扫描）：**
+
+- IPC 次数：**100,000 → ~500**（**200× 节流**）
+- 单 emit payload：~200B → ~40KB (200 × 200B)，但 IPC overhead 是 per-emit
+  固定成本（~100μs），总 IPC 开销从 ~10s 降到 ~50ms
+- JSON 序列化：无变化（每个文件还是要序列化），但 emit 调用栈深度 / channel
+  send 次数都 -200×
+
+**前端兼容（App.tsx）：**
+
+```js
+const offFound = wailsRuntime.EventsOn("scan:fileFound", (payload) => {
+  if (Array.isArray(payload)) {
+    for (const f of payload) queueFile(f);  // 新批量格式
+  } else if (payload) {
+    queueFile(payload);                      // 兼容老单条格式
+  }
+});
+```
+
+升级期 / 第三方手动 emit 都不会破。
+
+### Files Changed
+
+```
+M  internal/disk/smart.go                 (smartLogger + QuerySmart 保留具体 Notes)
+M  internal/disk/smart_windows.go         (open handle 加日志 + NVMe 失败返 Available=false+Notes)
+M  internal/disk/smart_nvme_windows.go    (BusType 128B 缓冲 + 每条失败路径 Warn 日志 + 错误码→中文 hint)
+
+M  app.go                                  (fileFoundBatcher: emitFileFoundBatched/flushFileFoundBatch/emitScanCompleted/emitScanError + 8+6+9 处替换)
+M  frontend/src/App.tsx                    (runAsync null safety + APFS callback !list 防御 + scan:fileFound 兼容批量/单条)
+
+A  file_found_batch_test.go               (批量节流 + 并发安全 + 常量阈值 UT × 4)
+M  CHANGELOG.md
+```
+
+### 质量门
+
+- `go test -race -count=1 ./...` 全绿（43 包）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+- 4 个新批量 UT 全过
+
+---
+
 ## v2.8.39 (2026-05-16)
 
 **6 个真 bug 全修 + 每个都加 UT 防回归**

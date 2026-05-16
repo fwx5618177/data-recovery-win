@@ -83,27 +83,40 @@ type storageAdapterDescriptorPrefix struct {
 
 // isNVMeDrive 通过 IOCTL_STORAGE_QUERY_PROPERTY 查 BusType。
 // 仅当确凿是 NVMe 返回 true；查不到 / 出错都返回 false（保守，走 ATA fallback）。
+//
+// v2.8.40: 用 128 字节 ouput 缓冲，避免某些驱动写入完整 STORAGE_ADAPTER_DESCRIPTOR
+// （>28 字节）时 BytesReturned 被截断或被报 ERROR_INSUFFICIENT_BUFFER。
+// 加日志：失败时把 Windows error code + bytesReturned + BusType 都打出来，
+// 让用户排错时能告诉我们究竟发生了什么。
 func isNVMeDrive(hFile windows.Handle) bool {
 	q := storagePropertyQuery{
 		PropertyID: storagePropertyIDAdapter,
 		QueryType:  storageQueryStandard,
 	}
-	var desc storageAdapterDescriptorPrefix
+	// 128B 足够容纳全 STORAGE_ADAPTER_DESCRIPTOR（实际 ~36–48B），buffer 大点不亏。
+	var out [128]byte
 	var bytesReturned uint32
 	if err := windows.DeviceIoControl(
 		hFile,
 		ioctlStorageQueryProperty,
 		(*byte)(unsafe.Pointer(&q)), uint32(unsafe.Sizeof(q)),
-		(*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)),
+		&out[0], uint32(len(out)),
 		&bytesReturned, nil,
 	); err != nil {
+		smartLogger.Warn("BusType 探测失败（IOCTL_STORAGE_QUERY_PROPERTY）",
+			"err", err, "bytesReturned", bytesReturned)
 		return false
 	}
-	// 至少读到 BusType 才算
-	if bytesReturned < uint32(unsafe.Offsetof(desc.BusType))+1 {
+	// BusType 是 STORAGE_ADAPTER_DESCRIPTOR 的第 25 字节（offset 24）
+	const busTypeOffset = 24
+	if bytesReturned < busTypeOffset+1 {
+		smartLogger.Warn("BusType 探测返回数据过短", "bytesReturned", bytesReturned)
 		return false
 	}
-	return desc.BusType == busTypeNvme
+	bt := out[busTypeOffset]
+	smartLogger.Debug("BusType 探测", "busType", bt, "isNVMe", bt == busTypeNvme,
+		"bytesReturned", bytesReturned)
+	return bt == busTypeNvme
 }
 
 // buildNVMeGetLogPageBuffer 按 STORAGE_PROTOCOL_COMMAND + NVMe Admin
@@ -155,6 +168,13 @@ func buildNVMeGetLogPageBuffer(lid byte, nsid uint32) []byte {
 
 // querySmartNVMeWindows 用 NVMe Get Log Page 拿 SMART/Health。
 // hFile 必须是物理盘 handle（不能是逻辑卷）。
+//
+// v2.8.40: 每条失败路径都打 Warn 日志（IOCTL 错误码 / ReturnStatus / 缓冲不足），
+// 让用户排错时能把日志贴回来定位问题。常见失败：
+//   - 0x00000005 (ERROR_ACCESS_DENIED) → 没以管理员运行
+//   - 0x00000001 (ERROR_INVALID_FUNCTION) → 驱动不支持 protocol-specific 命令
+//   - 0x00000031 (ERROR_NOT_SUPPORTED) → 老 Windows 内核不支持该 IOCTL（< Win 10 1709）
+//   - ReturnStatus != 0 → 驱动转发但 NVMe 控制器拒绝命令
 func querySmartNVMeWindows(hFile windows.Handle) *SmartHealth {
 	buf := buildNVMeGetLogPageBuffer(nvmeLIDSmartHealth, nvmeNSIDBroadcast)
 
@@ -166,18 +186,28 @@ func querySmartNVMeWindows(hFile windows.Handle) *SmartHealth {
 		&buf[0], uint32(len(buf)),
 		&bytesReturned, nil,
 	); err != nil {
+		smartLogger.Warn("NVMe Get Log Page IOCTL 失败",
+			"err", err,
+			"bytesReturned", bytesReturned,
+			"hint", nvmeIOCTLErrorHint(err))
 		return nil
 	}
 
 	// ReturnStatus 在 header offset 16 —— 非 0 表示 NVMe 命令失败（CRC / NSID / etc.）
 	returnStatus := binary.LittleEndian.Uint32(buf[16:20])
 	if returnStatus != 0 {
+		errorCode := binary.LittleEndian.Uint32(buf[20:24])
+		smartLogger.Warn("NVMe 控制器拒绝 Get Log Page",
+			"returnStatus", returnStatus,
+			"errorCode", errorCode,
+			"hint", "驱动转发但控制器拒绝；可能是 LSP / NSID 不被该控制器支持")
 		return nil
 	}
 
 	// 数据从 DataFromDeviceBufferOffset 开始（80 + 64 = 144）
 	dataOff := nvmeStorageProtoHeaderSize + nvmeAdminCmdSize
 	if len(buf) < dataOff+nvmeLogSmartSize {
+		smartLogger.Warn("NVMe SMART log 返回数据不足", "len", len(buf), "expected", dataOff+nvmeLogSmartSize)
 		return nil
 	}
 	log := buf[dataOff : dataOff+nvmeLogSmartSize]
@@ -186,6 +216,30 @@ func querySmartNVMeWindows(hFile windows.Handle) *SmartHealth {
 	if h != nil {
 		h.Available = true
 		h.Source = "native-nvme"
+		smartLogger.Info("NVMe SMART 读取成功",
+			"healthy", h.Healthy,
+			"temp", h.Temperature,
+			"powerOnHours", h.PowerOnHours,
+			"mediaErrors", h.UncorrectableErrors)
 	}
 	return h
+}
+
+// nvmeIOCTLErrorHint 把常见 Windows 错误码翻译成"用户能看懂的中文原因"，
+// 写进日志方便用户贴回来排错。日志比 toast 详细 —— 这里专给开发者看。
+func nvmeIOCTLErrorHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch err {
+	case windows.ERROR_ACCESS_DENIED:
+		return "没以管理员权限运行（必须 elevated 才能调 PhysicalDrive IOCTL）"
+	case windows.ERROR_INVALID_FUNCTION:
+		return "驱动不支持 IOCTL_STORAGE_PROTOCOL_COMMAND（多见于 OEM 笔记本预装的厂商 NVMe 驱动）"
+	case windows.ERROR_NOT_SUPPORTED:
+		return "Windows 内核不支持该 IOCTL（需 Windows 10 1709 以上）"
+	case windows.ERROR_INSUFFICIENT_BUFFER:
+		return "输出缓冲过小（理论不应发生 —— 我们传了 656B 远超 NVMe SMART log 所需）"
+	}
+	return ""
 }

@@ -93,6 +93,9 @@ func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
 		0,
 	)
 	if err != nil {
+		smartLogger.Warn("打开物理盘 handle 失败",
+			"path", winPath, "err", err,
+			"hint", "通常是没用管理员权限运行；右键→以管理员身份运行")
 		return nil
 	}
 	defer windows.CloseHandle(hFile)
@@ -107,10 +110,20 @@ func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
 			}
 			return h
 		}
-		// NVMe 探到了但 SMART 读失败 —— 不再 fall through 到 ATA（NVMe 盘根本不支持 ATA SMART，
-		// 继续尝试只会浪费 IOCTL + 让用户看到误导性的 "硬件限制" 消息）。返回不可用，
-		// 上层 QuerySmart 会拿到 nil → 走 unavailableHint。
-		return nil
+		// v2.8.40: NVMe 探到了但 SMART 读失败 —— 返回 Available=false + 具体 Notes，
+		// 让 QuerySmart 上层能直接展示给用户。之前返 nil → 上层 fallthrough smartctl
+		// → 用户看到的还是泛泛的 "硬件限制" 消息，对 NVMe 用户没价值。
+		return &SmartHealth{
+			Available: false,
+			Source:    "native-nvme-blocked",
+			Notes: "这是 NVMe SSD 盘，但本工具的 NVMe SMART 请求被驱动 / 权限拦截了。\n" +
+				"常见原因（按优先级）：\n" +
+				"  1. 没以管理员权限运行 —— 右键应用 → 「以管理员身份运行」再试\n" +
+				"  2. 笔记本预装的 OEM NVMe 驱动屏蔽了 IOCTL_STORAGE_PROTOCOL_COMMAND\n" +
+				"     —— 装 Microsoft 标准 NVMe 驱动（stornvme.sys）通常可解\n" +
+				"  3. Windows 版本太低 —— 该 IOCTL 需要 Windows 10 1709 或更新\n\n" +
+				"如果 CrystalDiskInfo 等工具能读 SMART，本工具理论上也能；请把日志（导出诊断包）发给我们。",
+		}
 	}
 
 	// ATA / SATA 路径 —— 旧 PREDICT_FAILURE 实现

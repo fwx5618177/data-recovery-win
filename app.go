@@ -121,6 +121,15 @@ type App struct {
 	dedupMu     sync.Mutex
 	dedupCancel context.CancelFunc
 
+	// scan:fileFound 后台批量发送（v2.8.40）—— 之前每文件一次 IPC + 整个
+	// RecoveredFile JSON (~200B)。100K 文件 = 100K IPC + 20MB 序列化，纯浪费
+	// （前端早就 200ms batch render）。新方案：积攒到 200 条 OR 100ms 触发
+	// 一次 EventsEmit，payload 是 []*RecoveredFile（前端兼容单条/数组）。
+	// 取消 / 完成时强制 flush 剩余。
+	fileFoundMu      sync.Mutex
+	fileFoundPending []*types.RecoveredFile
+	fileFoundLast    time.Time
+
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
 
@@ -553,7 +562,7 @@ func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mo
 			a.scanSnapshotMu.Lock()
 			a.scanFiles = append(a.scanFiles, f)
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			a.emitFileFoundBatched(f)
 		},
 	}
 
@@ -581,12 +590,12 @@ func (a *App) UnlockBitLockerAndScan(drivePath, volumeOffsetHex, recoveryKey, mo
 
 		if err != nil {
 			appLogger.Warn("BitLocker 卷扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		appLogger.Info("BitLocker 卷扫描完成", "files", len(scanResult.Files))
 		a.saveSnapshot(true)
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+		a.emitScanCompleted(scanResult)
 	}()
 
 	return nil
@@ -784,7 +793,7 @@ func (a *App) startScanWithUnlockedReader(reader *bitlocker.DecryptingReader, dr
 			a.scanSnapshotMu.Lock()
 			a.scanFiles = append(a.scanFiles, f)
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			a.emitFileFoundBatched(f)
 		},
 	}
 
@@ -803,11 +812,11 @@ func (a *App) startScanWithUnlockedReader(reader *bitlocker.DecryptingReader, dr
 		a.scanActive = false
 		a.scanSnapshotMu.Unlock()
 		if err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		a.saveSnapshot(true)
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+		a.emitScanCompleted(scanResult)
 	}()
 }
 
@@ -956,7 +965,7 @@ func (a *App) StartRAIDScan(req RAIDScanRequest) error {
 			a.scanSnapshotMu.Lock()
 			a.scanFiles = append(a.scanFiles, f)
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			a.emitFileFoundBatched(f)
 		},
 	}
 
@@ -973,11 +982,11 @@ func (a *App) StartRAIDScan(req RAIDScanRequest) error {
 		a.scanActive = false
 		a.scanSnapshotMu.Unlock()
 		if err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		a.saveSnapshot(true)
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", scanResult)
+		a.emitScanCompleted(scanResult)
 	}()
 	return nil
 }
@@ -1572,7 +1581,7 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 			a.scanSnapshotMu.Lock()
 			a.scanFiles = append(a.scanFiles, f)
 			a.scanSnapshotMu.Unlock()
-			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+			a.emitFileFoundBatched(f)
 		},
 	}
 
@@ -1619,7 +1628,7 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 
 		if err != nil {
 			appLogger.Warn("扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		appLogger.Info("扫描结果已发送", "files", len(result.Files))
@@ -1627,7 +1636,7 @@ func (a *App) startScanInternal(drivePath, mode string, includeDeletedPartitions
 		// 扫描完成后也存一次快照（completed = true），用户下次打开可以看到上次的结果
 		a.saveSnapshot(true)
 
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+		a.emitScanCompleted(result)
 	}()
 
 	// 等扫描注册完成（最多 1s），确保后续 StopScan 能看到 scanCancel/scanDone
@@ -2301,6 +2310,70 @@ func (a *App) CancelFindDuplicateImages() {
 		a.dedupCancel()
 		a.dedupCancel = nil
 	}
+}
+
+// 批量阈值常量 —— 抽到顶层方便 UT 锁，未来调参也只改一处
+const (
+	fileFoundBatchSize     = 200                    // 攒到这么多文件就发
+	fileFoundBatchInterval = 100 * time.Millisecond // 或者过了这么久就发
+)
+
+// emitFileFoundBatched 是 scan:fileFound 的批量入口。所有扫描代码不再直接
+// EventsEmit("scan:fileFound", f)，统一走这个 helper。
+//
+// 工作方式：
+//   - 文件追加到 pending 队列
+//   - pending 达到 200 条 OR 距上次发送超过 100ms → 立即 emit 一批
+//   - payload 类型是 []*RecoveredFile（前端兼容单条 / 数组两种格式）
+//
+// 完成 / 取消时务必调 flushFileFoundBatch(true) 把剩余的发出去，否则前端
+// 看不到最后几十条文件。所有 scan:completed / scan:error 路径都加了。
+func (a *App) emitFileFoundBatched(f *types.RecoveredFile) {
+	if f == nil {
+		return
+	}
+	a.fileFoundMu.Lock()
+	a.fileFoundPending = append(a.fileFoundPending, f)
+	needEmit := len(a.fileFoundPending) >= fileFoundBatchSize ||
+		time.Since(a.fileFoundLast) >= fileFoundBatchInterval
+	if !needEmit {
+		a.fileFoundMu.Unlock()
+		return
+	}
+	batch := a.fileFoundPending
+	a.fileFoundPending = nil
+	a.fileFoundLast = time.Now()
+	a.fileFoundMu.Unlock()
+	wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+}
+
+// flushFileFoundBatch 把 pending 里的剩余文件都发出去。
+// scan:completed / scan:error / cancel 路径必须调一次以免丢尾巴文件。
+// force=true 时连"距离阈值时间不到"也强制发；扫描结束时总是 force。
+func (a *App) flushFileFoundBatch() {
+	a.fileFoundMu.Lock()
+	if len(a.fileFoundPending) == 0 {
+		a.fileFoundMu.Unlock()
+		return
+	}
+	batch := a.fileFoundPending
+	a.fileFoundPending = nil
+	a.fileFoundLast = time.Now()
+	a.fileFoundMu.Unlock()
+	wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+}
+
+// emitScanCompleted / emitScanError 是 scan 结束事件的包装，保证 fileFound
+// 批量队列在结束前 flush 干净（否则用户最后几十条文件看不到）。所有 scan
+// 结束的代码统一走这俩 helper，不再直接 EventsEmit。
+func (a *App) emitScanCompleted(result any) {
+	a.flushFileFoundBatch()
+	wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+}
+
+func (a *App) emitScanError(errMsg string) {
+	a.flushFileFoundBatch()
+	wailsRuntime.EventsEmit(a.ctx, "scan:error", errMsg)
 }
 
 // ExportTimeline 时间线 mactime/JSON 输出。
@@ -3161,16 +3234,16 @@ func (a *App) StartSMBScan(req SMBScanRequestWails) error {
 				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 			},
 			func(f *types.RecoveredFile) {
-				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+				a.emitFileFoundBatched(f)
 			},
 		)
 		if err != nil {
 			appLogger.Warn("SMB 扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		result := a.engine.Results()
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+		a.emitScanCompleted(result)
 	}()
 	return nil
 }
@@ -3214,16 +3287,16 @@ func (a *App) StartNFSScan(req NFSScanRequestWails) error {
 				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 			},
 			func(f *types.RecoveredFile) {
-				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+				a.emitFileFoundBatched(f)
 			},
 		)
 		if err != nil {
 			appLogger.Warn("NFS 扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
 		result := a.engine.Results()
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
+		a.emitScanCompleted(result)
 	}()
 	return nil
 }
@@ -3282,7 +3355,7 @@ func (a *App) StartIOSBackupScan(backupPath, password string) error {
 				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 			},
 			func(f *types.RecoveredFile) {
-				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+				a.emitFileFoundBatched(f)
 			},
 		)
 		if err != nil {
@@ -3292,10 +3365,10 @@ func (a *App) StartIOSBackupScan(backupPath, password string) error {
 				return
 			}
 			appLogger.Warn("iOS 备份扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", a.engine.Results())
+		a.emitScanCompleted(a.engine.Results())
 	}()
 	return nil
 }
@@ -3360,7 +3433,7 @@ func (a *App) StartAndroidBackupScan(backupPath, password string) error {
 				wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 			},
 			func(f *types.RecoveredFile) {
-				wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", f)
+				a.emitFileFoundBatched(f)
 			},
 		)
 		if err != nil {
@@ -3369,10 +3442,10 @@ func (a *App) StartAndroidBackupScan(backupPath, password string) error {
 				return
 			}
 			appLogger.Warn("Android 备份扫描出错", "err", err)
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 			return
 		}
-		wailsRuntime.EventsEmit(a.ctx, "scan:completed", a.engine.Results())
+		a.emitScanCompleted(a.engine.Results())
 	}()
 	return nil
 }
@@ -3545,7 +3618,7 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 
 		// pull 完成后用普通目录扫描接续
 		if err := a.StartScan(destDir, mode); err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 		}
 	}()
 	return nil
@@ -3645,7 +3718,7 @@ func (a *App) AndroidDumpPartitionAndScan(serial, blockNode, outImgPath, mode st
 		appLogger.Info("Android 块级 dump 完成，开始扫 image", "path", outImgPath, "bytes", written)
 		// dump 完成后扫这个 image 文件 — Engine.StartScan 对 .img 原生支持
 		if err := a.StartScan(outImgPath, mode); err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "scan:error", err.Error())
+			a.emitScanError(err.Error())
 		}
 	}()
 	return nil
