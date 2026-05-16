@@ -4,6 +4,56 @@
 
 ---
 
+## v2.8.41 (2026-05-16)
+
+**CI 修复 — v2.8.40 staticcheck 红了**
+
+GitHub Actions Build job 跑 `staticcheck ./...` 在 Linux 报：
+
+```
+internal/disk/smart.go:14:5: var smartLogger is unused (U1000)
+```
+
+根因：`smartLogger` 在 v2.8.40 加在 `smart.go`（无 build tag, 跨平台），
+但**只有 `smart_windows.go` / `smart_nvme_windows.go` 用它**。Linux/macOS 编译时
+看不到 Windows 文件 → 该 var 真不被引用 → staticcheck 红。
+
+同时 `GOOS=windows staticcheck ./...` 又报：
+
+```
+internal/disk/smart_nvme_windows.go:69:6: type storageAdapterDescriptorPrefix is unused
+```
+
+v2.8.40 把 `isNVMeDrive` 改用固定 128B `[128]byte` 缓冲后这个 struct 没人用了，
+但忘删 → Windows staticcheck 红。
+
+**Fix：**
+
+1. `QuerySmart` 加 `smartLogger.Debug / Info` 跨平台诊断日志（让 var 全平台都被引用 + 顺手给 SMART 通用流程加诊断）
+2. 删除未用的 `storageAdapterDescriptorPrefix` struct
+
+**质量门（本地复跑 CI 全部步骤）：**
+
+- `staticcheck ./...` 干净（Linux）
+- `GOOS=windows GOARCH=amd64 staticcheck ./...` 干净（Windows）
+- `gosec -severity=medium -exclude=...` 0 issues
+- `go test -race -count=3 -timeout=10m -short ./...` 全绿（43 包）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+
+### Files Changed
+
+```
+M  internal/disk/smart.go                 (smartLogger 用在 QuerySmart 三个分支日志)
+M  internal/disk/smart_nvme_windows.go    (删 storageAdapterDescriptorPrefix 死代码)
+M  CHANGELOG.md
+```
+
+### 6 bug 状态（仍同 v2.8.40 ✅ 全修）
+
+NVMe SMART 日志在 v2.8.41 仍生效 —— 用户装上后失败会写日志带具体原因。
+
+---
+
 ## v2.8.40 (2026-05-16)
 
 **v2.8.39 6 个 bug 复检 + 2 个加固 + 第三轮 IPC 节流（scan:fileFound）**

@@ -64,11 +64,14 @@ func QuerySmart(ctx context.Context, devicePath string) (*SmartHealth, error) {
 	if devicePath == "" {
 		return nil, fmt.Errorf("devicePath 为空")
 	}
+	smartLogger.Debug("QuerySmart 启动", "devicePath", devicePath)
 
 	// 1. OS 原生（platform-specific 文件实现的 querySmartNative）
 	nativeResult := querySmartNative(ctx, devicePath)
 	if nativeResult != nil && nativeResult.Available {
 		writeNotes(nativeResult)
+		smartLogger.Debug("QuerySmart 成功（原生路径）",
+			"source", nativeResult.Source, "healthy", nativeResult.Healthy)
 		return nativeResult, nil
 	}
 
@@ -76,13 +79,18 @@ func QuerySmart(ctx context.Context, devicePath string) (*SmartHealth, error) {
 	if h := querySmartViaSmartctl(ctx, devicePath); h != nil && h.Available {
 		h.Source = "smartctl"
 		writeNotes(h)
+		smartLogger.Debug("QuerySmart 成功（smartctl 回退）", "healthy", h.Healthy)
 		return h, nil
 	}
 
 	// 3. 都不行 —— 优先用原生路径给的具体 Notes，否则才走泛 hint
 	if nativeResult != nil && nativeResult.Notes != "" {
+		smartLogger.Info("QuerySmart 失败 但有具体 Notes",
+			"source", nativeResult.Source, "notes", nativeResult.Notes)
 		return nativeResult, nil
 	}
+	smartLogger.Info("QuerySmart 全部路径失败 → 返回泛 hint",
+		"devicePath", devicePath)
 	return &SmartHealth{
 		Available: false,
 		Source:    "unavailable",

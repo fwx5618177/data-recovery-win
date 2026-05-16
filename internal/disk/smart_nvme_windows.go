@@ -61,26 +61,6 @@ type storagePropertyQuery struct {
 	AdditionalParameters [1]byte
 }
 
-// storageAdapterDescriptorPrefix —— 我们只关心前面几个字段（BusType）
-//
-// 完整结构体很长（包含 SrbType / AddressType / BusMajorVersion / 等），
-// 但我们只读到 BusType 就够了。Windows 会写入实际大小到 Size 字段，
-// 我们 read partial 不影响后续字段。
-type storageAdapterDescriptorPrefix struct {
-	Version               uint32
-	Size                  uint32
-	MaximumTransferLength uint32
-	MaximumPhysicalPages  uint32
-	AlignmentMask         uint32
-	AdapterUsesPio        byte
-	AdapterScansDown      byte
-	CommandQueueing       byte
-	AcceleratedTransfer   byte
-	BusType               byte
-	// 后面还有 BusMajorVersion / BusMinorVersion / SrbType / AddressType
-	// —— 我们用不上，所以这里截断。
-}
-
 // isNVMeDrive 通过 IOCTL_STORAGE_QUERY_PROPERTY 查 BusType。
 // 仅当确凿是 NVMe 返回 true；查不到 / 出错都返回 false（保守，走 ATA fallback）。
 //
