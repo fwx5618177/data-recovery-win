@@ -115,6 +115,12 @@ type App struct {
 	parallelMu     sync.Mutex
 	parallelCancel context.CancelFunc
 
+	// 查找重复图片的 cancel（v2.8.39）—— 用户关闭"正在扫描"toast 时调
+	// CancelFindDuplicateImages，让后台 filepath.Walk + hash 立刻退出，
+	// 不再继续吃 IO。
+	dedupMu     sync.Mutex
+	dedupCancel context.CancelFunc
+
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
 
@@ -2214,10 +2220,35 @@ func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, 
 	if threshold <= 0 {
 		threshold = 5
 	}
+
+	// v2.8.39: 注册可取消的 context。前端关闭"正在扫描"toast 时调
+	// CancelFindDuplicateImages —— 触发本 ctx，让 Walk 回调和 hash 循环
+	// 立刻 return ErrCanceled，停止吃 IO。
+	a.dedupMu.Lock()
+	if a.dedupCancel != nil {
+		a.dedupCancel() // 上一次还没结束就被新任务抢走 → 老任务先结束
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.dedupCancel = cancel
+	a.dedupMu.Unlock()
+	defer func() {
+		a.dedupMu.Lock()
+		if a.dedupCancel != nil {
+			// 自然结束：清空状态，Cancel 已无效
+			a.dedupCancel = nil
+		}
+		a.dedupMu.Unlock()
+		cancel() // 释放 ctx 资源
+	}()
+
 	// 收集 outputDir 下所有图片文件
 	var paths []string
 	var hashes []dedup.AverageHash
 	err := filepath.Walk(outputDir, func(p string, info os.FileInfo, err error) error {
+		// 用户取消 → 立刻退出 Walk
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -2240,7 +2271,14 @@ func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, 
 		return nil
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("查重已取消")
+		}
 		return nil, err
+	}
+	// SimilarityGroup 是纯 CPU O(n²)；大目录可能要几秒。再 check 一次。
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("查重已取消")
 	}
 	groups := dedup.SimilarityGroup(hashes, threshold)
 	out := make([][]string, 0, len(groups))
@@ -2252,6 +2290,17 @@ func (a *App) FindDuplicateImages(outputDir string, threshold int) ([][]string, 
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// CancelFindDuplicateImages 让正在跑的 FindDuplicateImages 立刻退出
+// （用户关闭"正在扫描重复图片"toast 时调）。幂等：没在跑就 no-op。
+func (a *App) CancelFindDuplicateImages() {
+	a.dedupMu.Lock()
+	defer a.dedupMu.Unlock()
+	if a.dedupCancel != nil {
+		a.dedupCancel()
+		a.dedupCancel = nil
+	}
 }
 
 // ExportTimeline 时间线 mactime/JSON 输出。
@@ -2357,7 +2406,19 @@ func (a *App) ExportDFXML(outputDir string) (string, error) {
 	return path, forensics.WriteDFXMLWithSource(f, "DataRecovery", updater.Version, source, files)
 }
 
-// BuildCustody 把 outputDir 下的所有恢复文件打保管链 manifest.json
+// BuildCustody 把本次恢复出来的文件打成保管链 manifest.json。
+//
+// v2.8.39 修："手动点保管链工具" 路径回归了 v2.8.21 的整盘 walk bug。
+// 之前调 forensics.BuildAndWrite(outputDir, c) —— 内部 filepath.Walk 整个
+// outputDir，用户截图显示 process 在读 F:\desktop 下大量 MP4 视频，
+// 但其实只恢复了 1 个文件。和 runForensicsPostProcess (v2.8.30 已修) 不一致。
+//
+// 新策略：
+//   - 如果有上次恢复记录 → 只 hash 那些实际写盘的文件路径（BuildAndWriteFromPaths）
+//   - 没有恢复记录（罕见：用户独立用本工具）→ 回退到 BuildAndWrite walk 整个 dir
+//
+// 这样既不变向后兼容（独立模式还工作），又把"用户做了恢复又想要保管链"的
+// 典型路径修对，磁盘 IO 从几分钟变成几毫秒。
 func (a *App) BuildCustody(outputDir, sourceDevice, operator string) (string, error) {
 	c := forensics.Custody{
 		ToolName:     "DataRecovery",
@@ -2366,6 +2427,24 @@ func (a *App) BuildCustody(outputDir, sourceDevice, operator string) (string, er
 		OperatorUser: operator,
 		StartedAt:    time.Now().UTC(),
 	}
+
+	// 优先用上次恢复记录的文件路径列表
+	if records := a.engine.GetLastRecoveryResult(); len(records) > 0 {
+		var paths []string
+		for _, r := range records {
+			if r == nil || r.OutputPath == "" {
+				continue
+			}
+			if r.State == recovery.RecoveryStateSuccess || r.State == recovery.RecoveryStatePartial {
+				paths = append(paths, r.OutputPath)
+			}
+		}
+		if len(paths) > 0 {
+			return forensics.BuildAndWriteFromPaths(outputDir, c, paths)
+		}
+	}
+
+	// 兜底：没有恢复记录 → 用户独立调用本工具，按旧逻辑 walk outputDir
 	return forensics.BuildAndWrite(outputDir, c)
 }
 

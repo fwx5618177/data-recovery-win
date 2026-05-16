@@ -57,15 +57,35 @@ func (s Schedule) GenerateInstallCommand() (string, error) {
 // 路径里的单引号要双写成 ”（PowerShell 单引号字符串转义规则）。
 //
 // 暴露成包级函数方便单元测试（runtime 在测试机上可能不是 Windows）。
+//
+// v2.8.39: 加 -Description 让用户在 "任务计划程序" 里能看清"这任务是干啥的"
+// （之前描述字段全空，用户半年后看到 DataRecoveryBackup 任务不知道为什么有这玩意）。
+// 描述也写入源 / 目标路径 + 创建时间 / 工具名，事后审计也用得上。
 func buildWindowsRegisterTaskPS(srcDir, dstDir string, hour int) string {
 	escSrc := strings.ReplaceAll(srcDir, "'", "''")
 	escDst := strings.ReplaceAll(dstDir, "'", "''")
+	desc := buildScheduledTaskDescription(srcDir, dstDir, hour)
+	escDesc := strings.ReplaceAll(desc, "'", "''")
 	return fmt.Sprintf(
 		`$Action = New-ScheduledTaskAction -Execute 'robocopy.exe' -Argument '"%s" "%s" /MIR';`+
 			`$Trigger = New-ScheduledTaskTrigger -Daily -At %02d:00;`+
 			`$Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries;`+
-			`Register-ScheduledTask -TaskName 'DataRecoveryBackup' -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null`,
-		escSrc, escDst, hour)
+			`Register-ScheduledTask -TaskName 'DataRecoveryBackup' -Description '%s' -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null`,
+		escSrc, escDst, hour, escDesc)
+}
+
+// buildScheduledTaskDescription 拼一段人类可读的描述，写进 Windows
+// 任务计划程序的 "描述" 字段。用户半年后看任务列表能知道这是哪个工具
+// 在哪天为啥装的、备份哪到哪。抽出独立函数方便 UT 覆盖。
+func buildScheduledTaskDescription(srcDir, dstDir string, hour int) string {
+	return fmt.Sprintf(
+		"由 数据恢复大师 (DataRecoveryMaster) 创建。\n"+
+			"每天 %02d:00 用 robocopy /MIR 把恢复出来的数据镜像到备份目录。\n"+
+			"源目录: %s\n"+
+			"目标目录: %s\n"+
+			"如需停用请右键 → 禁用；如需卸载请运行 PowerShell:\n"+
+			"  Unregister-ScheduledTask -TaskName 'DataRecoveryBackup' -Confirm:$false",
+		hour, srcDir, dstDir)
 }
 
 // Install 真的执行安装命令（需要用户确认 — 调用方应弹 confirm）

@@ -1289,6 +1289,15 @@ func (e *Engine) GetLastRecoveryResult() []*FileRecoveryRecord {
 	return out
 }
 
+// SetLastRecoveryForTesting 仅供单元测试使用 —— 让上层（如 app 层）的
+// "拿上次恢复记录、走某条路径" 集成测试不用真跑一次完整恢复就能构造前置状态。
+// 名字带 ForTesting 后缀 + godoc 直说"仅测试" 是 Go 社区标准做法，避免误用。
+func (e *Engine) SetLastRecoveryForTesting(records []*FileRecoveryRecord) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastRecovery = records
+}
+
 // FailedRecoveryFileIDs 返回最近一次恢复中状态为 failed / partial / skipped 的文件 ID。
 func (e *Engine) FailedRecoveryFileIDs() []string {
 	e.mu.RLock()

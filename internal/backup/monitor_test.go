@@ -86,3 +86,36 @@ func TestBuildWindowsRegisterTaskPS_PathWithSingleQuote(t *testing.T) {
 		t.Errorf("路径里的单引号必须双写成 ''，实际：%s", script)
 	}
 }
+
+// TestBuildWindowsRegisterTaskPS_HasDescription v2.8.39 新增 —— 脚本必须
+// 在 Register-ScheduledTask 里带 -Description 参数。之前用户在任务计划程序
+// 看到 DataRecoveryBackup 但描述全空，半年后完全不知道这是干啥的。
+func TestBuildWindowsRegisterTaskPS_HasDescription(t *testing.T) {
+	script := buildWindowsRegisterTaskPS(`C:\src`, `D:\dst`, 2)
+	if !strings.Contains(script, "-Description") {
+		t.Errorf("Register-ScheduledTask 必须带 -Description（让用户事后看得懂任务用途）：%s", script)
+	}
+	// 描述应包含工具名 + 两端路径，让审计时能秒懂
+	if !strings.Contains(script, "数据恢复大师") {
+		t.Errorf("描述应含工具名 数据恢复大师：%s", script)
+	}
+	if !strings.Contains(script, `C:\src`) || !strings.Contains(script, `D:\dst`) {
+		t.Errorf("描述应含源 + 目标路径：%s", script)
+	}
+}
+
+// TestBuildScheduledTaskDescription_Content 直接锁描述文案。
+func TestBuildScheduledTaskDescription_Content(t *testing.T) {
+	d := buildScheduledTaskDescription("/tmp/recovered", "/Volumes/Backup", 3)
+	// 必含元素：工具名、时间、源/目标路径、卸载提示
+	mustContain := []string{
+		"数据恢复大师", "DataRecoveryMaster", "03:00",
+		"/tmp/recovered", "/Volumes/Backup",
+		"Unregister-ScheduledTask", "DataRecoveryBackup",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(d, s) {
+			t.Errorf("描述应含 %q：%s", s, d)
+		}
+	}
+}

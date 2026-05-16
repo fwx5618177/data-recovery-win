@@ -1701,11 +1701,19 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
 
   const drivePath = selectedDrive?.path || "";
 
+  // v2.8.39: 之前 `if (msg && r)` 在 r 是 null/undefined/空数组时跳过 toast ——
+  // 用户点击如 "📸 APFS 时光快照" 等工具，在没有 APFS 的盘上 backend 返回 nil
+  // (= JS null) → 整个调用静默无反应。用户报"点击无效果"。
+  // 修：只要 msg 在就一定调用，让 msg 自己判定空数据 → 回退"未发现 X"提示。
+  // 所有 msg callback 实测都已经做了 !list / list.length===0 检查，安全。
   async function runAsync(fn, msg) {
     setOpen(false);
     try {
       const r = await fn();
-      if (msg && r) toast.info(msg(r));
+      if (msg) {
+        const out = msg(r);
+        if (out) toast.info(out);
+      }
     } catch (err) {
       toast.error("失败: " + (err?.message || err));
     }
@@ -1959,15 +1967,22 @@ function ToolsMenu({ wailsApp, outputDir, selectedDrive, onOpenMobileModal, onDu
           {item("🖼 查找重复图片", async () => {
             // v2.8.29 Issue 8: 加进度提示 toast。之前查重期间静默几十秒甚至几分钟，
             // 用户不知道有没有在跑，体验差。dedupeKey 保证不会叠多条 toast。
+            // v2.8.39: toast.onDismiss → CancelFindDuplicateImages —— 用户关闭
+            // toast 时让后台 Walk + hash 立刻退出，不再继续吃 IO。
             try {
               const dir = await wailsApp?.SelectDirectory?.("选择要查重的目录");
               if (!dir) return; // 用户取消
 
               toast.info({
                 title: "🖼 正在扫描重复图片",
-                description: `目录：${dir}\n\n每张图片算 perceptual hash 后两两比对，目录里图越多越慢。\n大目录（>1 万张）可能要 1-3 分钟，请等待...`,
+                description: `目录：${dir}\n\n每张图片算 perceptual hash 后两两比对，目录里图越多越慢。\n大目录（>1 万张）可能要 1-3 分钟，请等待...\n\n💡 提示：点 × 关闭此提示会同时停止后台扫描`,
                 duration: 60000,
                 dedupeKey: "dup-scan-running",
+                onDismiss: () => {
+                  // 自然结束时（结果到了主动调 dismissByKey）已 no-op；
+                  // 用户主动关 toast 时真正取消 backend。
+                  wailsApp?.CancelFindDuplicateImages?.();
+                },
               });
 
               const groups = await wailsApp?.FindDuplicateImages?.(dir, 5);

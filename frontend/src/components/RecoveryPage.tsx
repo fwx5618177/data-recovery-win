@@ -36,7 +36,10 @@ export default function RecoveryPage({
   onBackToWorkbench,
   onNewScan,
 }) {
-  const [filter, setFilter] = useState("failed"); // all | success | failed
+  // v2.8.39: 之前默认 "failed"，恢复 100% 成功时用户看到"未成功 (0)"
+  // 空表，以为啥也没恢复。改成 "all" 默认 —— 用户先看到全部结果，
+  // 再按需切到 "成功" 或 "未成功" tab。
+  const [filter, setFilter] = useState("all"); // all | success | failed
 
   const counts = useMemo(() => {
     const c = {
@@ -263,11 +266,12 @@ export default function RecoveryPage({
             <div className="file-table-toolbar">
               <div className="file-table-toolbar__left">
                 <div className="tab-bar" role="tablist" aria-label="按状态过滤恢复结果">
+                  {/* v2.8.39: tab 顺序调成 全部 → 成功 → 未成功，跟默认 active=全部 一致 */}
                   {[
-                    { v: "failed", label: `未成功 (${counts.failed + counts.skipped})` },
-                    ...(counts.partial > 0 ? [{ v: "partial", label: `部分恢复 (${counts.partial})` }] : []),
-                    { v: "success", label: `成功 (${counts.success})` },
                     { v: "all", label: `全部 (${records.length})` },
+                    { v: "success", label: `成功 (${counts.success})` },
+                    ...(counts.partial > 0 ? [{ v: "partial", label: `部分恢复 (${counts.partial})` }] : []),
+                    { v: "failed", label: `未成功 (${counts.failed + counts.skipped})` },
                   ].map((opt) => (
                     <button
                       key={opt.v}

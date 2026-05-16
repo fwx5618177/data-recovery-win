@@ -68,6 +68,11 @@ type storagePredictFailure struct {
 //   - `disk0` / `0`         —— 索引数字补成 PhysicalDrive
 //
 // SMART IOCTL 只能在物理盘 handle 上跑，逻辑卷会失败 —— 所以必须先解析。
+//
+// v2.8.39 路由：先用 IOCTL_STORAGE_QUERY_PROPERTY 探 BusType，**NVMe 走
+// NVMe Get Log Page，ATA/SATA 走旧 PREDICT_FAILURE 路径**。之前所有盘都走
+// ATA SMART，NVMe SSD 100% 失败，CrystalDiskInfo 能读但本工具说"硬件限制"。
+//
 // USB 桥接 SATA 盘多数不透传 SMART，会得到失败错误，写入 Notes 让用户知情。
 func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
 	winPath := resolveToPhysicalDriveWindows(devicePath)
@@ -92,7 +97,23 @@ func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
 	}
 	defer windows.CloseHandle(hFile)
 
-	// 1) PREDICT_FAILURE —— PASS/FAIL + 512 字节 vendor data
+	// v2.8.39: NVMe 路径
+	if isNVMeDrive(hFile) {
+		if h := querySmartNVMeWindows(hFile); h != nil && h.Available {
+			// NVMe 没有 IDENTIFY DEVICE (ATA) —— Model/Serial 走 STORAGE_DEVICE_DESCRIPTOR
+			if model, serial := readNVMeModelSerial(hFile); model != "" || serial != "" {
+				h.Model = model
+				h.Serial = serial
+			}
+			return h
+		}
+		// NVMe 探到了但 SMART 读失败 —— 不再 fall through 到 ATA（NVMe 盘根本不支持 ATA SMART，
+		// 继续尝试只会浪费 IOCTL + 让用户看到误导性的 "硬件限制" 消息）。返回不可用，
+		// 上层 QuerySmart 会拿到 nil → 走 unavailableHint。
+		return nil
+	}
+
+	// ATA / SATA 路径 —— 旧 PREDICT_FAILURE 实现
 	var pf storagePredictFailure
 	var bytesReturned uint32
 	if err := windows.DeviceIoControl(
@@ -113,12 +134,56 @@ func querySmartNative(_ context.Context, devicePath string) *SmartHealth {
 	}
 	h.Source = "native"
 
-	// 2) IDENTIFY DEVICE 拿 model / serial
+	// IDENTIFY DEVICE 拿 model / serial
 	if model, serial := readIdentifyWindows(hFile); model != "" || serial != "" {
 		h.Model = model
 		h.Serial = serial
 	}
 	return h
+}
+
+// readNVMeModelSerial 通过 IOCTL_STORAGE_QUERY_PROPERTY 拿 NVMe 盘的 Model / Serial。
+//
+// 用 StorageDeviceProperty (= 0) 拿 STORAGE_DEVICE_DESCRIPTOR，
+// 里头有 ProductIdOffset / SerialNumberOffset 指向字符串。
+//
+// 用 1KB 缓冲区接收（descriptor 主体 + trailing 字符串）。
+func readNVMeModelSerial(hFile windows.Handle) (string, string) {
+	q := storagePropertyQuery{
+		PropertyID: 0, // StorageDeviceProperty
+		QueryType:  storageQueryStandard,
+	}
+	var buf [1024]byte
+	var bytesReturned uint32
+	if err := windows.DeviceIoControl(
+		hFile,
+		ioctlStorageQueryProperty,
+		(*byte)(unsafe.Pointer(&q)), uint32(unsafe.Sizeof(q)),
+		&buf[0], uint32(len(buf)),
+		&bytesReturned, nil,
+	); err != nil {
+		return "", ""
+	}
+	if bytesReturned < 36 {
+		return "", ""
+	}
+	// STORAGE_DEVICE_DESCRIPTOR 字段偏移：
+	//   ProductIdOffset    @ offset 8 (DWORD)
+	//   SerialNumberOffset @ offset 24 (DWORD)
+	productOff := uint32(buf[8]) | uint32(buf[9])<<8 | uint32(buf[10])<<16 | uint32(buf[11])<<24
+	serialOff := uint32(buf[24]) | uint32(buf[25])<<8 | uint32(buf[26])<<16 | uint32(buf[27])<<24
+
+	readCString := func(off uint32) string {
+		if off == 0 || off >= bytesReturned {
+			return ""
+		}
+		end := off
+		for end < bytesReturned && buf[end] != 0 {
+			end++
+		}
+		return strings.TrimSpace(string(buf[off:end]))
+	}
+	return readCString(productOff), readCString(serialOff)
 }
 
 // readIdentifyWindows 通过 SMART_RCV_DRIVE_DATA 发 IDENTIFY DEVICE (0xEC)

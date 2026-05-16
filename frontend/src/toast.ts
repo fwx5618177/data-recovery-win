@@ -30,6 +30,10 @@ export interface ToastInput {
   /** v2.8.20: 去重 key —— 同 key 的 toast 已存在时不重复弹（避免叠了 N 条相同提示）。
    * 例如 SMART 不可用提示，用户重复点击工具菜单不该叠 5 条相同弹窗。 */
   dedupeKey?: string;
+  /** v2.8.39: dismiss 钩子。toast 因任何原因消失（用户关闭 / 超时 / dismissByKey）
+   * 都会调一次。用于"长任务进度 toast，关闭即取消"的模式 ——
+   * 比如查重 toast 配 onDismiss: cancelDedup，关 toast 真停后台扫描。 */
+  onDismiss?: () => void;
 }
 
 export interface ToastEntry extends Required<Pick<ToastInput, "level">> {
@@ -40,6 +44,7 @@ export interface ToastEntry extends Required<Pick<ToastInput, "level">> {
   action?: ToastInput["action"];
   createdAt: number;
   dedupeKey?: string;
+  onDismiss?: () => void;
 }
 
 type Listener = (toasts: ToastEntry[]) => void;
@@ -70,6 +75,7 @@ export function showToast(input: ToastInput | string): number {
     action: obj.action,
     createdAt: Date.now(),
     dedupeKey: obj.dedupeKey,
+    onDismiss: obj.onDismiss,
   };
   // 队列上限：超过 5 个时丢最早的（避免 toast 风暴塞屏）
   toasts = [...toasts, entry].slice(-5);
@@ -82,8 +88,19 @@ export function showToast(input: ToastInput | string): number {
 
 export function dismissToast(id: number) {
   const before = toasts.length;
+  const dismissed = toasts.find((t) => t.id === id);
   toasts = toasts.filter((t) => t.id !== id);
-  if (toasts.length !== before) emit();
+  if (toasts.length !== before) {
+    // v2.8.39: 调 onDismiss 钩子。包 try/catch 防一个 toast 的回调抛错影响后续。
+    if (dismissed?.onDismiss) {
+      try {
+        dismissed.onDismiss();
+      } catch {
+        /* 钩子内部错误不影响 toast 系统 */
+      }
+    }
+    emit();
+  }
 }
 
 // v2.8.29: 按 dedupeKey 关闭 toast。给"长时间运行 + 结果出来时关掉提示 toast"的
@@ -91,13 +108,35 @@ export function dismissToast(id: number) {
 export function dismissToastByKey(key: string) {
   if (!key) return;
   const before = toasts.length;
+  const dismissed = toasts.filter((t) => t.dedupeKey === key);
   toasts = toasts.filter((t) => t.dedupeKey !== key);
-  if (toasts.length !== before) emit();
+  if (toasts.length !== before) {
+    for (const t of dismissed) {
+      if (t.onDismiss) {
+        try {
+          t.onDismiss();
+        } catch {
+          /* 钩子内部错误不影响 toast 系统 */
+        }
+      }
+    }
+    emit();
+  }
 }
 
 export function dismissAllToasts() {
   if (!toasts.length) return;
+  const dismissed = toasts;
   toasts = [];
+  for (const t of dismissed) {
+    if (t.onDismiss) {
+      try {
+        t.onDismiss();
+      } catch {
+        /* 钩子内部错误不影响 toast 系统 */
+      }
+    }
+  }
   emit();
 }
 
