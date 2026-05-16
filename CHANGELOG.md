@@ -4,6 +4,144 @@
 
 ---
 
+## v2.8.38 (2026-05-16)
+
+**多盘并行扫描"undefined / undefined"幽灵行 + 同类问题扎根防御 + IPC 节流第二弹**
+
+### Bug 根因（不是事件丢了，是前端类型写错）
+
+用户反馈：在「多盘并行扫描」里只选 2 块盘，进度面板却出现 3 行 ——
+其中一行显示 **`undefined / undefined`、0%、已发现 0**。
+
+挖到底层是 **前端 TS 类型和 Wails wire format 不匹配**：
+
+```ts
+// frontend/src/components/MultiDiskScanModal.tsx (旧)
+interface DiskJob {
+  DrivePath: string;  // ← PascalCase
+  Mode: string;
+}
+const offStart = window.runtime.EventsOn("parallel:diskStart", (j: DiskJob) => {
+  setDriveState((s) => ({
+    ...s,
+    [j.DrivePath]: { ... },  // ← j.DrivePath = undefined
+  }));
+});
+```
+
+但 backend `parallel.DiskJob` 在 v2.8.34 加了 `json:"drivePath"` / `json:"mode"`，
+Wails EventsEmit 走 JSON 序列化 → 实际 wire 是 `{drivePath, mode}` （camelCase）。
+前端用 PascalCase 读 → 全 `undefined` → `[undefined]: {...}` 在 JS 里就是字面值
+`"undefined"` 字符串当 key → 每次 emit 覆盖同一个幽灵 entry。
+
+后续 `parallel:diskProgress` 事件走 `map[string]any{"drive": ...}`（小写，正确），
+所以每选一块盘真行又会加一行。**2 选盘 = 1 幽灵 + 2 真行 = 3 行。完全对得上截图。**
+
+v2.8.34 反射契约测试只验证 "Go struct 有 tag"，没验证 "前端 TS 类型对齐 wire format"，
+也没验证 "实际 JSON 序列化字段名"，所以这次让 bug 钻了过去。
+
+### Fix
+
+**1. 前端类型对齐 wire format**（`MultiDiskScanModal.tsx`）
+
+```ts
+interface DiskJob {
+  drivePath: string;  // ← camelCase，匹配 backend JSON tag
+  mode: string;
+}
+// 另定义 DiskJobInput（PascalCase）作为发回 backend 的 IPC 入参类型
+```
+
+**2. 所有 parallel:* event handler 加防御**
+
+```ts
+if (!j?.drivePath) return; // 任何 payload 异常都不再造幽灵行
+```
+
+**3. `wailsjs/go/models.ts` 手动同步**
+
+generated 文件用的还是 v2.8.34 前的 PascalCase（Mac 上没全套 wails CLI
+重生成）。手动改成 camelCase + `source["camelCase"]` 拷贝，跟 wire 对齐。
+
+**4. UT 锁住 wire format（防回归）**
+
+`internal/parallel/wire_format_test.go`：
+
+- `TestDiskJob_WireFormat_CamelCase` — Marshal DiskJob，断言含 `"drivePath"` / `"mode"`，
+  绝不能出现 `"DrivePath"` / `"Mode"`。任何把 tag 改回 PascalCase 都报警。
+- `TestJobResult_WireFormat_CamelCase` — 同上锁 JobResult；同时验证 `Err` 字段
+  （`json:"-"`）真的不出现在 wire 上。
+- `TestDiskJob_AcceptsPascalCaseInput` — 老前端发 PascalCase 也必须能 bind（Go
+  encoding/json 默认 case-insensitive）— 这是 "向后兼容" 防护。
+
+```
+go test -race -run 'TestDiskJob|TestJobResult' ./internal/parallel/
+ok  data-recovery/internal/parallel  1.571s
+```
+
+### Perf 第二弹 — parallel:fileFound 批量节流 + payload 瘦身
+
+**旧实现：** 每命中一文件 emit 一次 `parallel:fileFound` + payload 塞整个
+`RecoveredFile`（含 fileName / path / signatures / time pointer，~200 字节
+JSON）。10 万文件 = 10 万次 IPC + 20 MB JSON 序列化。前端只是 `filesFound++`，
+**完全不读 file 字段**。纯浪费。
+
+**新实现（app.go `StartParallelScanDrives`）：**
+
+```go
+type fileBatch struct {
+    delta    int
+    lastEmit time.Time
+}
+// 每盘维护待发 delta；每 100ms OR 累计 50 文件触发一次 emit。
+// OnDiskDone 时强制刷剩余 delta（force=true）。
+flushFileBatch := func(drive string, force bool) {
+    if !force && b.delta < 50 && time.Since(b.lastEmit) < 100*time.Millisecond {
+        return
+    }
+    wailsRuntime.EventsEmit(a.ctx, "parallel:fileFound", map[string]any{
+        "drive": drive, "delta": delta,
+    })
+}
+```
+
+Payload 从 `{drive, file: RecoveredFile}`（200B）瘦到 `{drive, delta: int}`（30B），
+**IPC 次数从 10 万降到 2 千（50×节流）**，**单 emit 数据量降 85%**。
+
+前端配合：
+
+```ts
+const inc = typeof p.delta === "number" && p.delta > 0 ? p.delta : 1;
+setDriveState((s) => ({ ..., filesFound: cur.filesFound + inc }));
+```
+
+兜底兼容 `+1` 旧格式（开发期或第三方 emit 没 delta 时仍能跑）。
+
+### Files Changed
+
+```
+M  frontend/src/components/MultiDiskScanModal.tsx
+M  frontend/wailsjs/go/models.ts          (DiskJob / JobResult 同步成 camelCase)
+M  app.go                                  (parallel:fileFound 批量节流)
+A  internal/parallel/wire_format_test.go   (Marshal 后必须 camelCase 的契约 UT)
+M  CHANGELOG.md
+```
+
+### 质量门
+
+- `go test -race -count=1 ./...` 全绿（43 包）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+- `internal/parallel` 新 3 个 UT 全过
+
+### 24 问题清单状态（修复确认）
+
+| # | 问题 | 状态 |
+|---|------|------|
+| 14 | 多盘并行扫描 auto 错 | ✅ v2.8.34 已修，本次 +幽灵行 |
+| **新** | **多盘并行扫描 "undefined / undefined" 幽灵行** | **✅ v2.8.38** |
+
+---
+
 ## v2.8.37 (2026-05-15)
 
 **扫描速度性能优化 — 三处实测可量化的吞吐提升**

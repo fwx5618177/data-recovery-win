@@ -37,7 +37,18 @@ interface DriveInfo {
   fileSystem?: string;
 }
 
+// 注意：字段名必须 camelCase —— Wails EventsEmit 走 Go struct 的 JSON tag
+// (`json:"drivePath"` / `json:"mode"`)，PascalCase 读出来全 undefined。
+// v2.8.38 之前这里写成 PascalCase 导致多盘扫描出现幽灵 "undefined/undefined" 行。
 interface DiskJob {
+  drivePath: string;
+  mode: string;
+}
+
+// DiskJobInput 是发回 backend StartParallelScanDrives 的 IPC 入参类型。
+// Go 的 JSON unmarshal 默认 case-insensitive，PascalCase / camelCase 都能 bind，
+// 但保持跟事件 payload 一致用 camelCase，避免后人混淆。
+interface DiskJobInput {
   DrivePath: string;
   Mode: string;
 }
@@ -122,14 +133,29 @@ export default function MultiDiskScanModal({ wailsApp, drives, onClose }: Props)
   useEffect(() => {
     if (!running) return;
     const offStart = window.runtime?.EventsOn("parallel:diskStart", (j: DiskJob) => {
-      setDriveState((s) => ({
-        ...s,
-        [j.DrivePath]: { status: "running", progress: {}, filesFound: 0 },
-      }));
+      // 防御：payload 若没有 drivePath（理论上不该发生，但避免再出"undefined"幽灵行），
+      // 直接忽略该事件而不是用 undefined 当 key 造一行死行。
+      if (!j?.drivePath) {
+        // eslint-disable-next-line no-console
+        console.warn("parallel:diskStart 收到无 drivePath 的 payload，跳过", j);
+        return;
+      }
+      setDriveState((s) => {
+        // 已经被 progress/done 先一步建条目了 → 保留进度，只升级 status 到 running。
+        const cur = s[j.drivePath];
+        if (cur) {
+          return { ...s, [j.drivePath]: { ...cur, status: "running" } };
+        }
+        return {
+          ...s,
+          [j.drivePath]: { status: "running", progress: {}, filesFound: 0 },
+        };
+      });
     });
     const offProgress = window.runtime?.EventsOn(
       "parallel:diskProgress",
       (p: { drive: string; progress: ScanProgress }) => {
+        if (!p?.drive) return; // 防御：避免 [undefined] 幽灵行
         setDriveState((s) => ({
           ...s,
           [p.drive]: {
@@ -143,17 +169,22 @@ export default function MultiDiskScanModal({ wailsApp, drives, onClose }: Props)
     );
     const offFile = window.runtime?.EventsOn(
       "parallel:fileFound",
-      (p: { drive: string }) => {
+      // v2.8.38: backend 改成批量 emit —— payload 为 {drive, delta}（int 计数）。
+      // delta 缺省时按 +1 兜底兼容（开发 / 测试环境下手动 emit 也能跑）。
+      (p: { drive: string; delta?: number }) => {
+        if (!p?.drive) return;
+        const inc = typeof p.delta === "number" && p.delta > 0 ? p.delta : 1;
         setDriveState((s) => {
           const cur = s[p.drive];
           if (!cur) return s;
-          return { ...s, [p.drive]: { ...cur, filesFound: cur.filesFound + 1 } };
+          return { ...s, [p.drive]: { ...cur, filesFound: cur.filesFound + inc } };
         });
       },
     );
     const offDone = window.runtime?.EventsOn(
       "parallel:diskDone",
       (r: JobResultPayload) => {
+        if (!r?.drivePath) return; // 防御：避免 [undefined] 幽灵行
         setDriveState((s) => ({
           ...s,
           [r.drivePath]: {
@@ -189,7 +220,9 @@ export default function MultiDiskScanModal({ wailsApp, drives, onClose }: Props)
       toast.warning("请至少选 1 块盘");
       return;
     }
-    const jobs: DiskJob[] = Array.from(selected).map((path) => ({
+    // 入参用 PascalCase —— Wails bindings 生成的 Go 入参跟 Go 字段同名（PascalCase），
+    // 同时 Go encoding/json 默认 case-insensitive，camelCase 也能 bind。两者都安全。
+    const jobs: DiskJobInput[] = Array.from(selected).map((path) => ({
       DrivePath: path,
       Mode: mode,
     }));

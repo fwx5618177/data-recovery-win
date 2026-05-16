@@ -2677,8 +2677,54 @@ func (a *App) StartParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) 
 			a.parallelCancel = nil
 			a.parallelMu.Unlock()
 		}()
+
+		// v2.8.38 perf: 给 parallel:fileFound 加 per-disk 节流 + 批量 emit。
+		//
+		// 之前每个文件命中都 emit 一次（10 万文件 = 10 万次 IPC），并且 payload
+		// 里塞整个 RecoveredFile 结构 —— 但前端 OnFileFound 只是 filesFound++
+		// 计数，**完全不读 file 字段**。纯浪费带宽。
+		//
+		// 新策略：
+		//   - 每盘维护待发 delta + lastEmit；每 100ms OR 累计 50 文件触发一次 emit
+		//   - payload 改为 {drive, delta}（小 int），不再塞 RecoveredFile 结构
+		//   - OnDiskDone 时刷一次剩余 delta；如果还没出过 diskDone 兜底有 diskProgress
+		//     携带 progress.filesFound
+		//
+		// 前端配合：FileFound handler 读 p.delta 累加（旧版 +1，新版 +delta）。
+		type fileBatch struct {
+			delta    int
+			lastEmit time.Time
+		}
+		var batchMu sync.Mutex
+		batches := make(map[string]*fileBatch)
+		flushFileBatch := func(drive string, force bool) {
+			batchMu.Lock()
+			b, ok := batches[drive]
+			if !ok {
+				batchMu.Unlock()
+				return
+			}
+			if !force && b.delta < 50 && time.Since(b.lastEmit) < 100*time.Millisecond {
+				batchMu.Unlock()
+				return
+			}
+			delta := b.delta
+			b.delta = 0
+			b.lastEmit = time.Now()
+			batchMu.Unlock()
+			if delta > 0 {
+				wailsRuntime.EventsEmit(a.ctx, "parallel:fileFound", map[string]any{
+					"drive": drive,
+					"delta": delta,
+				})
+			}
+		}
+
 		cb := parallel.ScanCallback{
 			OnDiskStart: func(j parallel.DiskJob) {
+				batchMu.Lock()
+				batches[j.DrivePath] = &fileBatch{lastEmit: time.Now()}
+				batchMu.Unlock()
 				wailsRuntime.EventsEmit(a.ctx, "parallel:diskStart", j)
 			},
 			OnDiskProgress: func(j parallel.DiskJob, p types.ScanProgress) {
@@ -2687,11 +2733,18 @@ func (a *App) StartParallelScanDrives(jobs []parallel.DiskJob, maxParallel int) 
 				})
 			},
 			OnFileFound: func(j parallel.DiskJob, f *types.RecoveredFile) {
-				wailsRuntime.EventsEmit(a.ctx, "parallel:fileFound", map[string]any{
-					"drive": j.DrivePath, "file": f,
-				})
+				batchMu.Lock()
+				b, ok := batches[j.DrivePath]
+				if !ok {
+					b = &fileBatch{lastEmit: time.Now()}
+					batches[j.DrivePath] = b
+				}
+				b.delta++
+				batchMu.Unlock()
+				flushFileBatch(j.DrivePath, false)
 			},
 			OnDiskDone: func(res parallel.JobResult) {
+				flushFileBatch(res.DrivePath, true) // 收尾必发剩余 delta
 				// 序列化 err 让前端能拿到字符串
 				payload := map[string]any{
 					"drivePath": res.DrivePath,
