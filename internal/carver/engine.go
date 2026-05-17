@@ -537,8 +537,23 @@ func (e *Engine) Scan(
 			// 诊断：记录 AC 命中
 			bumpCounter(&e.hitsByExt, m.Signature.Extension)
 
+			// v2.8.44 perf: 一次构造 prefetchReader，覆盖 determineFileSize +
+			// 全部 classifier（之前 v2.8.43 只覆盖 detect，classifier 仍走原始
+			// reader 再寻道 5-10 次 / 文件 = 5-50ms 浪费）。
+			//
+			// 窗口大小：MP4 系（ftyp/moov 子格式）的 sample table 经常超 256KB，
+			// 给到 1MB 让 ISO BMFF 解析也命中 cache；其它 256KB 够用。
+			prefetchSize := 256 * 1024
+			if m.Signature.Extension == "mp4" {
+				prefetchSize = 1024 * 1024
+			}
+			if max := m.Signature.MaxSize; max > 0 && max < int64(prefetchSize) {
+				prefetchSize = int(max)
+			}
+			pfReader := newPrefetchReader(e.reader, m.Offset, prefetchSize)
+
 			// 调用格式解析器确定文件大小
-			fileSize := e.determineFileSize(e.reader, m.Offset, m.Signature, m.Pattern)
+			fileSize := e.determineFileSize(pfReader, m.Offset, m.Signature, m.Pattern)
 			if fileSize <= 0 {
 				continue
 			}
@@ -552,33 +567,33 @@ func (e *Engine) Scan(
 			cat := m.Signature.Category
 			desc := m.Signature.Description
 
-			// 对容器格式进行细分类
+			// 对容器格式进行细分类（复用同一个 pfReader，免重复寻道）
 			switch ext {
 			case "riff":
-				if subExt, subCat := e.classifyRIFF(e.reader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyRIFF(pfReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "ole2":
-				if subExt, subCat := e.classifyOLE2(e.reader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyOLE2(pfReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "zip":
-				if subExt, subCat := e.classifyZIP(e.reader, m.Offset, fileSize); subExt != "" {
+				if subExt, subCat := e.classifyZIP(pfReader, m.Offset, fileSize); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "mp4":
 				// ftyp 容器涵盖 MP4/MOV/M4A/3GP/HEIC/HEIF/AVIF/CR3 等多种现代格式，
 				// 仅靠 magic 分不清。读取 brand 字段（offset 8-11）细分类。
-				if subExt, subCat := e.classifyFTYP(e.reader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyFTYP(pfReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "tiff":
 				// TIFF 也是一大票 RAW 格式的壳：Canon CR2、Nikon NEF、Sony ARW、Adobe DNG
-				if subExt, subCat := e.classifyTIFF(e.reader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyTIFF(pfReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
@@ -794,13 +809,14 @@ func (e *Engine) RecoverFile(
 // 辅助方法
 // =========================================================================
 
-// determineFileSize 根据签名类型调用对应的格式解析器确定文件大小
+// determineFileSize 根据签名类型调用对应的格式解析器确定文件大小。
 //
-// v2.8.43 perf: 包一层 prefetchReader —— detector 内部做几十次 1-2 字节
-// ReadAt（JPEG marker / MP4 box header / EXIF IFD entry 等），HDD 上每次寻道
-// 5-10ms。Collector 串行处理 1000 个文件 → 200s 浪费在寻道。
-// 预读一个 256KB 窗口让 95% 的 detector 调用从内存切片，把"100 ReadAt × 5ms"
-// 变成"1 ReadAt × 5ms + 99 memcpy"，单文件检测 200ms → 5ms。
+// v2.8.43: detector 内部的几十次 1-2 字节 ReadAt（JPEG marker / MP4 box
+// header / EXIF IFD entry 等）在 HDD 上每次寻道 5-10ms。Collector 串行处理
+// 1000 个文件 → 200s 浪费在寻道。
+//
+// v2.8.44: prefetchReader 的构造**上移到 collector**（让 classifier 复用），
+// 这里 reader 已经是 wrapper，直接用即可。MP4 系给到 1MB 窗口覆盖 sample table。
 func (e *Engine) determineFileSize(
 	reader disk.DiskReader,
 	offset int64,
@@ -814,14 +830,6 @@ func (e *Engine) determineFileSize(
 	if maxSize > e.config.MaxFileSize {
 		maxSize = e.config.MaxFileSize
 	}
-
-	// 预读窗口大小：min(maxSize, 256KB)。MP4/ZIP 等"读到末尾尾部 box"的
-	// 格式会自动 fallback 到底层 reader，不影响正确性。
-	prefetchSize := 256 * 1024
-	if maxSize > 0 && maxSize < int64(prefetchSize) {
-		prefetchSize = int(maxSize)
-	}
-	reader = newPrefetchReader(reader, offset, prefetchSize)
 
 	var size int64
 

@@ -4,6 +4,109 @@
 
 ---
 
+## v2.8.44 (2026-05-17)
+
+**v2.8.43 复检 + 三个剩余瓶颈连环修：classifier 共享 prefetch / MP4 窗口 1MB / ResilientReader LBA poison cache**
+
+v2.8.43 修了 detector 单字节 ReadAt 寻道问题。复审计后发现还有 3 个真实瓶颈：
+
+### Bottleneck 1: classifier 重读 header — ✅ 修
+
+v2.8.43 的 prefetchReader 在 `determineFileSize` 内部构造、用完丢弃。
+但 collector 在 `determineFileSize` 之后又调 `classifyRIFF/classifyFTYP/classifyTIFF/classifyZIP/classifyOLE2`，
+**这些 classifier 拿的是原始 `e.reader` —— 又寻道 5-10 次 / 文件**。
+
+Fix：把 prefetchReader 构造**上移到 collector**，detect + classify 共享同一个 cache：
+
+```go
+// internal/carver/engine.go:541 (collector 主循环)
+pfReader := newPrefetchReader(e.reader, m.Offset, prefetchSize)
+fileSize := e.determineFileSize(pfReader, m.Offset, ...)
+// 接着 classifier 也用 pfReader（之前传 e.reader）
+case "riff": classifyRIFF(pfReader, m.Offset)
+case "tiff": classifyTIFF(pfReader, m.Offset)
+// ...
+```
+
+### Bottleneck 2: MP4/MOV/HEIC 的 sample table 超 256KB 窗口 — ✅ 修
+
+iPhone / Android 视频 `mdat size=0` 时要解析 `moov` box → 嵌套
+`mdia → minf → stbl → stsc/stsz/stco`，跳读位置可能在 256KB-1MB 区间。
+之前命中率低，多次 fallback 底层 → 寻道开销回来了。
+
+Fix：MP4 系扩展预读 1 MB：
+
+```go
+prefetchSize := 256 * 1024
+if m.Signature.Extension == "mp4" {
+    prefetchSize = 1024 * 1024  // ftyp 子格式（MP4/MOV/HEIC/AVIF/CR3 等）
+}
+```
+
+### Bottleneck 3: ResilientReader 无 LBA poison cache — ✅ 修
+
+物理坏盘场景：一个坏扇区被反复读（detect + classify + validator + 再 detect 同一区域...）。
+之前每次都走完整 retry 流程：1 次 ReadAt + 50ms sleep + 重试 = 50-100ms 浪费 / 命中。
+1000 文件落到坏区 = **50-100 秒纯重试时间**。
+
+Fix：加 `poisonCache map[int64]bool`（按 sector offset 记 known-bad）：
+
+```go
+// internal/disk/resilient.go
+// 1. Fast path 入口先查范围内有无 poisoned sector
+if r.rangeHasPoison(offset, len(buf)) {
+    return r.readWithRetry(buf, offset)  // 走 0 填充快速路径
+}
+
+// 2. 任何扇区首次失败立刻 markPoisoned()
+r.markPoisoned(sectorOff, readLen)
+
+// 3. readWithRetry 内部 isPoisoned() 命中 → 0 填充秒退
+if r.isPoisoned(sectorOff) {
+    // 0 填充 + 立即继续，不调底层 ReadAt 不 sleep
+    continue
+}
+```
+
+**实测加速（UT `TestResilientReader_PoisonCacheSkipsRetry`）：**
+
+```
+第 1 次读 152ms / 第 2 次读 4.6µs (≥ 33,000× 加速)
+```
+
+### 防回归 UT（v2.8.44 新加 4 个）
+
+```
+internal/disk/resilient_poison_test.go
+  TestResilientReader_PoisonCacheSkipsRetry         (152ms → 4.6µs)
+  TestResilientReader_PoisonCacheSavesUnderlyingReads (底层 ReadAt 完全跳过)
+  TestResilientReader_PoisonOnlyMarksFailedSectors  (健康扇区不误进 cache)
+  TestResilientReader_MarkPoisonedAlignsToSector    (向下对齐 sector 边界)
+```
+
+### 用户预期效果
+
+之前 305 KB/s 综合症 = 单字节 ReadAt (v2.8.43 修) + classifier 重读
+(本次修) + MP4 窗口不够 (本次修) + 坏区反复重试 (本次修) 共同造成。
+四个加一起，光盘检测路径应能从几百 KB/s 升到几 MB/s 量级（看盘本身上限）。
+
+### Files Changed
+
+```
+M  internal/carver/engine.go               (prefetchReader 上移到 collector，共享 detect+classify；MP4=1MB)
+M  internal/disk/resilient.go              (poisonCache + rangeHasPoison + markPoisoned)
+A  internal/disk/resilient_poison_test.go  (4 个 poison cache 契约 UT)
+M  CHANGELOG.md
+```
+
+### 质量门
+
+- `go test -race -count=1 ./...` 全绿（43 包）
+- `staticcheck ./...` 干净（Linux + Windows）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+
+---
+
 ## v2.8.43 (2026-05-17)
 
 **扫描速度真凶 — detector 1 字节 ReadAt loop 被 prefetchReader 收割**

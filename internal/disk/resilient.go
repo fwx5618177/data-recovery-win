@@ -40,6 +40,16 @@ type ResilientReader struct {
 	maxSkipChunkBytes           int64
 	mu                          sync.Mutex
 	badSectors                  []BadSector
+
+	// v2.8.44: LBA-level poison cache —— 已知坏扇区不再 retry / 不再 sleep。
+	// 用户场景：carver collector 串行处理 N 个文件，每个文件 detect + classify
+	// 可能反复读同一片头部区域。如果头部在坏扇区里，每次重试 1×50ms + sleep
+	// 总 100-200ms / 文件。1000 文件 = 100-200 秒纯重试浪费 + 用户感觉"卡死"。
+	// 命中 poison cache → 0 填充 + 直接返回，~微秒级。
+	//
+	// key 是扇区起始 offset（对齐 sectorSize），value 是该扇区已知不可读。
+	// 用 map 而非 sync.Map：扫描期间命中率极高但写入低频，sync.Mutex 简单够用。
+	poisonCache map[int64]bool
 }
 
 // BadSector 单个被跳过的坏扇区记录，供"坏扇区清单"UI / 取证报告展示。
@@ -69,6 +79,28 @@ func NewResilientReader(underlying DiskReader, sectorSize int64, maxRetry int) *
 		maxRetry:                    maxRetry,
 		consecutiveFailureThreshold: 4,
 		maxSkipChunkBytes:           1024 * 1024, // 1MB cap
+		poisonCache:                 make(map[int64]bool),
+	}
+}
+
+// isPoisoned 检查某 sector 是否已经在 poison cache 里。
+func (r *ResilientReader) isPoisoned(sectorOff int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.poisonCache[sectorOff]
+}
+
+// markPoisoned 把 [offset, offset+size) 范围内所有 sector 标记为 poisoned。
+// 用 sectorSize 对齐，size 不是 sector 倍数时按上取整覆盖。
+func (r *ResilientReader) markPoisoned(offset, size int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poisonCache == nil {
+		r.poisonCache = make(map[int64]bool)
+	}
+	end := offset + size
+	for off := offset - (offset % r.sectorSize); off < end; off += r.sectorSize {
+		r.poisonCache[off] = true
 	}
 }
 
@@ -97,6 +129,12 @@ func (r *ResilientReader) Cancel() error {
 // 上层不带 ctx 的紧密读循环（Collector / format detector / validateAll）困死，
 // 它们看 err==nil 就觉得读到了数据继续往下走，Cancel 信号完全失效。
 func (r *ResilientReader) ReadAt(buf []byte, offset int64) (int, error) {
+	// v2.8.44: poison cache 快路径 —— 如果请求范围内有任何已知坏扇区，
+	// 直接走 readWithRetry（它命中 cache 后秒退）。避免给底层 ReadAt 一次
+	// 注定失败的大读浪费 5-10ms 寻道 + 50ms retry。
+	if r.rangeHasPoison(offset, int64(len(buf))) {
+		return r.readWithRetry(buf, offset)
+	}
 	n, err := r.underlying.ReadAt(buf, offset)
 	if err == nil || err == io.EOF || n == len(buf) {
 		return n, err
@@ -107,6 +145,24 @@ func (r *ResilientReader) ReadAt(buf []byte, offset int64) (int, error) {
 	}
 	// 出错：按扇区切分逐块重试
 	return r.readWithRetry(buf, offset)
+}
+
+// rangeHasPoison 检查 [offset, offset+size) 范围内有没有已知坏扇区。
+// 范围典型 8MB，sector 512B → 最多 16K sector 要查。map lookup 是 O(1) ×
+// 16K = 几 ms，比一次注定失败的 IO（5-10ms 寻道 + 50ms retry）便宜得多。
+func (r *ResilientReader) rangeHasPoison(offset, size int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.poisonCache) == 0 {
+		return false // 快路径里的快路径
+	}
+	end := offset + size
+	for off := offset - (offset % r.sectorSize); off < end; off += r.sectorSize {
+		if r.poisonCache[off] {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
@@ -151,11 +207,12 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 				// v2.8.23: cancel 必须穿透；继续轮 chunk 会让循环跑完才返回
 				return int(totalRead), err
 			} else {
-				// 整 chunk 坏 —— 0 填充 + 记录 + 倍增下一轮 chunk
+				// 整 chunk 坏 —— 0 填充 + 记录 + 加入 poison cache + 倍增下一轮 chunk
 				for i := int64(0); i < chunk; i++ {
 					buf[totalRead+i] = 0
 				}
 				r.recordBad(offset+totalRead, chunk, errString(err))
+				r.markPoisoned(offset+totalRead, chunk) // v2.8.44: 下次读这片 sector 秒退
 				totalRead += chunk
 				skipChunk *= 2
 				if skipChunk > r.maxSkipChunkBytes {
@@ -170,6 +227,20 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 		readLen := r.sectorSize
 		if totalRead+readLen > totalSize {
 			readLen = totalSize - totalRead
+		}
+
+		// v2.8.44: poison cache 快路径 —— 已知坏扇区直接 0 填充，
+		// 跳过所有 retry + sleep。命中率在重复读同一坏区时极高。
+		if r.isPoisoned(sectorOff) {
+			for i := int64(0); i < readLen; i++ {
+				buf[totalRead+i] = 0
+			}
+			consecutiveFailures++
+			if consecutiveFailures >= r.consecutiveFailureThreshold {
+				inSkipMode = true
+			}
+			totalRead += readLen
+			continue
 		}
 
 		var success bool
@@ -194,11 +265,12 @@ func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {
 		if success {
 			consecutiveFailures = 0
 		} else {
-			// 用 0 填充 + 记录
+			// 用 0 填充 + 记录 + 加入 poison cache（下次读这同一扇区秒退）
 			for i := int64(0); i < readLen; i++ {
 				buf[totalRead+i] = 0
 			}
 			r.recordBad(sectorOff, readLen, errString(lastErr))
+			r.markPoisoned(sectorOff, readLen)
 			consecutiveFailures++
 			if consecutiveFailures >= r.consecutiveFailureThreshold {
 				inSkipMode = true
