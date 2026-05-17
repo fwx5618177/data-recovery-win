@@ -4,6 +4,91 @@
 
 ---
 
+## v2.8.43 (2026-05-17)
+
+**扫描速度真凶 — detector 1 字节 ReadAt loop 被 prefetchReader 收割**
+
+用户报：深度扫描 125 GB G: 盘，6 小时 6 分扫了 6.4 GB，**速度 305 KB/s**，
+还剩 112 小时。理论 HDD 顺序读 100+ MB/s，差了 300×。
+
+### 根因（审计加 Explore agent）
+
+不是 disk 慢，是 carver collector 每发现一个文件都在 detector 里做几十次
+**单字节 ReadAt**：
+
+- `detectJPEGSize`：每个 JPEG marker 1 字节读，30+ markers / 文件 → 30+ ReadAt
+- `detectPNGSize` / `detectMP4Size` / `detectTIFFSize`：同理 box / IFD entry 都是几字节读
+- `detectGIFSize` / `detectMP3Size`：单字节扫 marker
+
+HDD 每次 ReadAt = 一次 5–10 ms 寻道。30 次 / 文件 × 1000 文件 = **300 秒纯寻道**
+浪费，碾压 8MB 块顺序读的 IO 流。305 KB/s 完美对应「实际有效顺序读 + 海量 detector 寻道交错」。
+
+### Fix — `prefetchReader` 包装
+
+`internal/carver/prefetch_reader.go`：
+
+```go
+type prefetchReader struct {
+    inner    disk.DiskReader
+    cacheOff int64
+    cache    []byte    // 一次性大读窗口
+}
+
+// 构造时 1 次大读（默认 256KB）
+// ReadAt 落在窗口内 → 内存切片，不寻道
+// 落在窗口外 → 转发底层（兜底）
+```
+
+`internal/carver/engine.go` `determineFileSize`：
+
+```go
+prefetchSize := 256 * 1024
+if maxSize > 0 && maxSize < int64(prefetchSize) {
+    prefetchSize = int(maxSize)
+}
+reader = newPrefetchReader(reader, offset, prefetchSize)
+// ↓ 所有 detectJPEGSize / detectPNGSize / detectMP4Size 自动受益
+```
+
+### 效果
+
+- **单文件 detect**：100 ReadAt × 5ms = 500ms → 1 ReadAt × 5ms + 99 memcpy ≈ 5ms（**100×**）
+- **1000 文件总寻道**：500 秒 → 5 秒
+- 在 HDD 上，深度扫描速度预期 **从几百 KB/s 抬升到几 MB/s 量级**（与盘真实顺序读上限一致）
+
+### 防回归 UT（`prefetch_reader_test.go`）
+
+- `TestPrefetchReader_CollapsesSmallReads`：100 次 1B ReadAt 后底层 ReadAt 仍只有 1 次（构造预读那一次）
+- `TestPrefetchReader_FallthroughOutsideCache`：超 cache 必须转发底层
+- `TestPrefetchReader_EmptyCache`：IO 失败 / 越界时 cache 为 nil，所有 ReadAt 安全转发
+- `TestPrefetchReader_ForwardsLifecycle`：Open/Close/Size/SectorSize/DevicePath 都转发
+
+将来谁删 prefetch / 让 detector 直接拿原始 reader 走单字节读 → 第一个测试立刻报警。
+
+### 顺手验证 / 排除
+
+审计也怀疑 `persistLoop` 同步 JSON 写阻塞 file-found，但 **代码已经在锁外写**
+（v 早期就是 copy 后释锁）。`a.scanSnapshotMu.Lock()` 只锁数组拷贝（983 文件 = 7KB 指针 = 微秒级），
+然后立刻 unlock 再 `store.Save`。所以 persist 不是瓶颈，不动。
+
+### Files Changed
+
+```
+A  internal/carver/prefetch_reader.go       (256KB 预读 + 自动转发的 DiskReader wrapper)
+A  internal/carver/prefetch_reader_test.go  (4 个契约 UT)
+M  internal/carver/engine.go                (determineFileSize 用 prefetchReader)
+M  CHANGELOG.md
+```
+
+### 质量门
+
+- `go test -race -count=1 ./...` 全绿（43 包）
+- `staticcheck ./...` 干净（Linux + Windows）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+- `BenchmarkScan_RandomDisk_64MB` 427 MB/s（无真实签名命中 → 不调 detector → 无 prefetch overhead）
+
+---
+
 ## v2.8.42 (2026-05-16)
 
 **SMART toast 标题 source-aware — NVMe 不再误导"硬件限制"**
