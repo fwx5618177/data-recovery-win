@@ -129,12 +129,11 @@ func (r *ResilientReader) Cancel() error {
 // 上层不带 ctx 的紧密读循环（Collector / format detector / validateAll）困死，
 // 它们看 err==nil 就觉得读到了数据继续往下走，Cancel 信号完全失效。
 func (r *ResilientReader) ReadAt(buf []byte, offset int64) (int, error) {
-	// v2.8.44: poison cache 快路径 —— 如果请求范围内有任何已知坏扇区，
-	// 直接走 readWithRetry（它命中 cache 后秒退）。避免给底层 ReadAt 一次
-	// 注定失败的大读浪费 5-10ms 寻道 + 50ms retry。
-	if r.rangeHasPoison(offset, int64(len(buf))) {
-		return r.readWithRetry(buf, offset)
-	}
+	// v2.8.45: 之前 v2.8.44 在入口加了 rangeHasPoison 锁检查，但健康盘上
+	// 这是 0 收益、纯锁开销。4 worker + IO goroutine 并发读时 mu 抢锁
+	// 反而把吞吐拖下来。改回原始 v2.8.43 行为：直接尝试底层读，失败再
+	// 走 readWithRetry —— 那里逐扇区检查 poison cache，bad disk 上仍然
+	// 享受秒退收益，healthy disk 上零锁开销。
 	n, err := r.underlying.ReadAt(buf, offset)
 	if err == nil || err == io.EOF || n == len(buf) {
 		return n, err
@@ -143,26 +142,8 @@ func (r *ResilientReader) ReadAt(buf []byte, offset int64) (int, error) {
 	if IsCancelled(err) {
 		return 0, err
 	}
-	// 出错：按扇区切分逐块重试
+	// 出错：按扇区切分逐块重试（内部查 poison cache 秒退已知坏区）
 	return r.readWithRetry(buf, offset)
-}
-
-// rangeHasPoison 检查 [offset, offset+size) 范围内有没有已知坏扇区。
-// 范围典型 8MB，sector 512B → 最多 16K sector 要查。map lookup 是 O(1) ×
-// 16K = 几 ms，比一次注定失败的 IO（5-10ms 寻道 + 50ms retry）便宜得多。
-func (r *ResilientReader) rangeHasPoison(offset, size int64) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.poisonCache) == 0 {
-		return false // 快路径里的快路径
-	}
-	end := offset + size
-	for off := offset - (offset % r.sectorSize); off < end; off += r.sectorSize {
-		if r.poisonCache[off] {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *ResilientReader) readWithRetry(buf []byte, offset int64) (int, error) {

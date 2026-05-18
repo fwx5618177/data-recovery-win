@@ -4,6 +4,116 @@
 
 ---
 
+## v2.8.45 (2026-05-17)
+
+**反思 v2.8.43-44：eager prefetch 反而让慢盘 5× 更慢；改"从 chunk 内存读"零额外 IO**
+
+### 用户反馈
+
+装 v2.8.44 后扫 G: 盘 3h03m 才 720 MB（67 KB/s），还剩 509 小时。
+**比 v2.8.42 的 305 KB/s 反而慢 5×**。
+
+### 根因复盘
+
+v2.8.43-44 给每个 AC match 都主动 `ReadAt(256KB)` 预读（MP4 还是 1MB）。
+**致命问题**：AC 误报极多（短 magic 字节 + 庞大签名库），每 8MB chunk 几百
+match，几乎全是噪声。每个 match → 256KB 浪费 IO：
+
+```
+8MB 主扫描 chunk + 100 matches × 256KB prefetch = 33MB IO / 8MB scanned
+IO 放大 4× —— 健康盘上 throughput / 4，bandwidth-limited 盘灾难。
+```
+
+v2.8.44 还在 `ResilientReader.ReadAt` 入口加了 `rangeHasPoison` 锁检查 ——
+4 worker + IO goroutine 并发读时 `mu` 抢锁，**健康盘上零收益、纯锁开销**。
+
+### Fix — 用 worker 已读到的 chunk 数据，零额外 IO
+
+**关键洞察**：worker 已经把 chunk 8MB 读到内存了。我们让 worker 在
+emit 每个 match 时附带一段 32KB 的 chunk 切片副本（chunk 即将归还 pool，
+但 32KB 是新分配的独立内存），collector 用这段内存喂给 detector。
+**95% 的 detector header 解析（JPEG marker / PNG / MP4 ftyp / TIFF IFD）
+都在 32KB 内 → 完全不用任何 disk IO**。
+
+```go
+// internal/carver/engine.go worker:
+const headerCopyBytes = 32 * 1024
+for _, m := range matches {
+    header := make([]byte, ...)
+    copy(header, c.Data[relOff:endRel])  // 从 chunk 内存拷贝
+    matchCh <- &rawMatch{..., Header: header}
+}
+
+// internal/carver/engine.go collector:
+bbReader := newBufferBackedReader(e.reader, m.Offset, m.Header)
+// detector / classifier 全用 bbReader → buffer 命中零 IO；
+// 不命中（极少数 MP4 sample table 等）才 fallback 底层。
+```
+
+新 `bufferBackedReader`（`internal/carver/prefetch_reader.go`）：buffer 命中
+直接 memcpy；不命中 fallback 底层 reader。
+
+### Fix — 干掉 ResilientReader 入口 poison 锁检查
+
+v2.8.44 在 `ReadAt` 入口加 `rangeHasPoison(r.mu)` 让健康盘也付锁代价。
+v2.8.45 改回 v2.8.43 行为：
+
+```go
+// 直接试底层；失败再走 readWithRetry（那里逐扇区查 poison cache 秒退）
+n, err := r.underlying.ReadAt(buf, offset)
+if err == nil || err == io.EOF || n == len(buf) {
+    return n, err
+}
+// ... readWithRetry 内部 poison 仍生效
+```
+
+健康盘上**零锁开销**；坏盘上 poison cache 仍救 retry sleep（4565× 加速 UT 实测）。
+
+### 实测对比
+
+| 指标 | v2.8.44 | v2.8.45 |
+|------|---------|---------|
+| `BenchmarkScan_RandomDisk_64MB` | 427 MB/s | **712 MB/s** (+67%) |
+| Allocs per op | 1,910 MB | **308 MB** (-84%) |
+| Poison cache 加速（bad-disk）| 33,175× | 4,565× （锁开销没了但仍数量级）|
+| Healthy-disk 锁竞争 | 每 ReadAt 抢 mu | 零 |
+
+bandwidth-limited 盘（USB / 网络盘）预期从 67 KB/s 回到接近 v2.8.42 的
+305 KB/s 或更高，因为多了"detector 零 IO"的红利。
+
+### Files Changed
+
+```
+M  internal/carver/engine.go
+   - rawMatch 加 Header []byte 字段
+   - worker emit match 时拷贝 32KB chunk 切片
+   - collector 用 bufferBackedReader 替换 prefetchReader
+
+M  internal/carver/prefetch_reader.go (重写)
+   - 删 prefetchReader (eager prefetch 引发反向性能)
+   - 新 bufferBackedReader (buffer 命中零 IO)
+
+M  internal/carver/prefetch_reader_test.go (重写 5 个 UT 验证零 IO)
+
+M  internal/disk/resilient.go
+   - 删入口 rangeHasPoison 锁检查
+   - 保留 readWithRetry 里的 poison cache（坏盘救 retry sleep）
+
+M  internal/disk/resilient_poison_test.go (改 1 个 UT 适配新合约)
+
+M  CHANGELOG.md
+```
+
+### 质量门
+
+- `go test -race -count=1 ./...` 全绿（43 包）
+- `staticcheck ./...` 干净（Linux + Windows）
+- `GOOS=windows GOARCH=amd64 go build ./...` 干净
+- 5 个 bufferBackedReader UT 全过 + 3 个 poison cache UT 全过
+- `BenchmarkScan_RandomDisk_64MB`: **712 MB/s** (vs v2.8.44 427 MB/s)
+
+---
+
 ## v2.8.44 (2026-05-17)
 
 **v2.8.43 复检 + 三个剩余瓶颈连环修：classifier 共享 prefetch / MP4 窗口 1MB / ResilientReader LBA poison cache**

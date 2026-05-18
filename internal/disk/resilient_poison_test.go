@@ -60,9 +60,17 @@ func TestResilientReader_PoisonCacheSkipsRetry(t *testing.T) {
 		float64(firstReadTime)/float64(secondReadTime+1))
 }
 
-// TestResilientReader_PoisonCacheSavesUnderlyingReads 验证底层 ReadAt 次数：
-// 第 1 次 = maxRetry 次重试；第 N 次 = 0 次（全走 poison cache）。
-func TestResilientReader_PoisonCacheSavesUnderlyingReads(t *testing.T) {
+// TestResilientReader_PoisonCacheSavesRetrySleeps v2.8.45 合约：
+// v2.8.44 之前在 ReadAt 入口加 rangeHasPoison 锁检查，让 poisoned 读零底层 IO，
+// 但代价是每次 ReadAt 都抢 mu 锁 —— 在 4 worker + IO goroutine 并发场景下
+// 反而把吞吐拖下来（健康盘上空转浪费）。
+//
+// v2.8.45 改回乐观策略：入口直接试底层，失败再走 readWithRetry（那里查 poison
+// cache 秒退）。所以每次 poisoned 读：1 次底层 ReadAt（失败）+ 0 次 retry sleep。
+// 比 v2.8.43 的 maxRetry × sleep（50-150ms）快很多，仍是数量级提速。
+//
+// 健康盘上零锁开销 —— 这才是 carver 高并发场景的主要瓶颈。
+func TestResilientReader_PoisonCacheSavesRetrySleeps(t *testing.T) {
 	disk := make([]byte, 4096)
 	mock := &unstableMock{
 		data:      disk,
@@ -71,20 +79,25 @@ func TestResilientReader_PoisonCacheSavesUnderlyingReads(t *testing.T) {
 	r := NewResilientReader(mock, 512, 3) // maxRetry=3
 
 	buf := make([]byte, 512)
-	// 第 1 次：1 次失败 + 1 次进 retry 路径 = 3 次（每次 retry 调底层）
+	// 第 1 次：入口 1 次 + readWithRetry 里 retry maxRetry 次 = 4 次底层
 	mock.readCount.Store(0)
 	_, _ = r.ReadAt(buf, 1024)
 	firstCount := mock.readCount.Load()
 	if firstCount < 2 {
-		t.Errorf("第 1 次读应至少调底层 2 次（首读 + 1 次 retry），实得 %d", firstCount)
+		t.Errorf("第 1 次读应至少调底层 2 次（首读 + retry），实得 %d", firstCount)
 	}
 
-	// 第 2 次：poison cache 命中 → 0 次底层调用
+	// 第 2 次：poison cache 已含此 sector。入口尝试 1 次（失败）→ readWithRetry
+	// 查 cache 命中 → 0 填充秒退，无 retry sleep。
 	mock.readCount.Store(0)
 	_, _ = r.ReadAt(buf, 1024)
 	secondCount := mock.readCount.Load()
-	if secondCount != 0 {
-		t.Errorf("poison cache 命中后底层调用应为 0，实得 %d", secondCount)
+	if secondCount > 1 {
+		t.Errorf("poison cache 命中后底层调用应 <= 1（入口 1 次 + retry 0 次），实得 %d", secondCount)
+	}
+	// 关键：必须比第 1 次少很多（说明 retry 真被跳过）
+	if secondCount >= firstCount {
+		t.Errorf("poison cache 没生效：第 2 次 %d 不少于第 1 次 %d", secondCount, firstCount)
 	}
 }
 

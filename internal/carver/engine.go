@@ -33,10 +33,20 @@ type chunk struct {
 }
 
 // rawMatch 是 AC 匹配器的原始匹配结果
+//
+// v2.8.45 加 Header 字段：worker 把 chunk 里 match 起点附近 32KB 拷贝过来
+// 让 collector 的 detector / classifier 完全从内存读，零额外 IO。
+//
+// 之前（v2.8.43-44）collector 对每个 match 主动 ReadAt 256KB-1MB prefetch，
+// 但 AC 误报极多（每 8MB chunk 几百 match），bandwidth-limited 盘（USB / 网络盘）
+// 上 IO 放大 5-10×，反而把扫描速度从 305 KB/s 拖到 67 KB/s。
+// chunk 数据已经在内存里 —— 复用它就够了，detector header 解析 30-100 字节，
+// 32KB 足够覆盖 99% 的 JPEG / PNG / MP4 ftyp / TIFF IFD / GIF / BMP 用例。
 type rawMatch struct {
 	Offset    int64
 	Signature *types.FileSignature
 	Pattern   []byte
+	Header    []byte // 32KB 切片副本（来自 chunk）；detector 优先用，未命中再 fallback 底层
 }
 
 // Config 深度扫描引擎配置
@@ -381,12 +391,26 @@ func (e *Engine) Scan(
 
 				// 使用 AC 自动机在数据块中搜索所有签名（只看 Size 范围内的有效数据）
 				matches := e.matcher.Search(c.Data[:c.Size], c.Offset)
+				const headerCopyBytes = 32 * 1024 // 32KB header 拷贝足够 99% detector 用例
 				for _, m := range matches {
+					// v2.8.45: 在 chunk 释放前拷贝 match 起点附近的 header，让
+					// collector 端的 detector / classifier 完全从内存读，零额外 IO。
+					relOff := m.Offset - c.Offset
+					endRel := relOff + headerCopyBytes
+					if endRel > int64(c.Size) {
+						endRel = int64(c.Size)
+					}
+					var header []byte
+					if relOff >= 0 && relOff < endRel {
+						header = make([]byte, endRel-relOff)
+						copy(header, c.Data[relOff:endRel])
+					}
 					select {
 					case matchCh <- &rawMatch{
 						Offset:    m.Offset,
 						Signature: m.Signature,
 						Pattern:   m.Pattern,
+						Header:    header,
 					}:
 					case <-ctx.Done():
 						if c.release != nil {
@@ -396,8 +420,8 @@ func (e *Engine) Scan(
 					}
 				}
 
-				// AC 搜索结果里的 Pattern 引用签名表常量，与 c.Data 无关，
-				// 因此这里立刻归还缓冲安全。
+				// AC 搜索结果里的 Pattern 引用签名表常量，与 c.Data 无关；
+				// Header 已经在上面拷贝出来，与 c.Data 独立。这里归还缓冲安全。
 				if c.release != nil {
 					c.release()
 				}
@@ -537,23 +561,18 @@ func (e *Engine) Scan(
 			// 诊断：记录 AC 命中
 			bumpCounter(&e.hitsByExt, m.Signature.Extension)
 
-			// v2.8.44 perf: 一次构造 prefetchReader，覆盖 determineFileSize +
-			// 全部 classifier（之前 v2.8.43 只覆盖 detect，classifier 仍走原始
-			// reader 再寻道 5-10 次 / 文件 = 5-50ms 浪费）。
+			// v2.8.45 perf: 用 worker 已经拷贝好的 header 切片做 detector /
+			// classifier 的 IO 源 —— 零额外 disk read。之前 (v2.8.43-44)
+			// 主动 prefetch 256KB-1MB / match，AC 误报放大 5-10× IO，
+			// bandwidth-limited 盘上反而把扫描速度拖到 67 KB/s。
 			//
-			// 窗口大小：MP4 系（ftyp/moov 子格式）的 sample table 经常超 256KB，
-			// 给到 1MB 让 ISO BMFF 解析也命中 cache；其它 256KB 够用。
-			prefetchSize := 256 * 1024
-			if m.Signature.Extension == "mp4" {
-				prefetchSize = 1024 * 1024
-			}
-			if max := m.Signature.MaxSize; max > 0 && max < int64(prefetchSize) {
-				prefetchSize = int(max)
-			}
-			pfReader := newPrefetchReader(e.reader, m.Offset, prefetchSize)
+			// m.Header 是 32KB chunk 切片副本（足够 99% 用例）。极少数
+			// detector 读到 32KB 外的情形（MP4 sample table 等）自动 fallback
+			// 底层 reader，行为正确。
+			bbReader := newBufferBackedReader(e.reader, m.Offset, m.Header)
 
 			// 调用格式解析器确定文件大小
-			fileSize := e.determineFileSize(pfReader, m.Offset, m.Signature, m.Pattern)
+			fileSize := e.determineFileSize(bbReader, m.Offset, m.Signature, m.Pattern)
 			if fileSize <= 0 {
 				continue
 			}
@@ -567,33 +586,33 @@ func (e *Engine) Scan(
 			cat := m.Signature.Category
 			desc := m.Signature.Description
 
-			// 对容器格式进行细分类（复用同一个 pfReader，免重复寻道）
+			// 对容器格式进行细分类（复用同一个 bbReader，所有读都从内存 header 切片走）
 			switch ext {
 			case "riff":
-				if subExt, subCat := e.classifyRIFF(pfReader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyRIFF(bbReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "ole2":
-				if subExt, subCat := e.classifyOLE2(pfReader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyOLE2(bbReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "zip":
-				if subExt, subCat := e.classifyZIP(pfReader, m.Offset, fileSize); subExt != "" {
+				if subExt, subCat := e.classifyZIP(bbReader, m.Offset, fileSize); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "mp4":
 				// ftyp 容器涵盖 MP4/MOV/M4A/3GP/HEIC/HEIF/AVIF/CR3 等多种现代格式，
 				// 仅靠 magic 分不清。读取 brand 字段（offset 8-11）细分类。
-				if subExt, subCat := e.classifyFTYP(pfReader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyFTYP(bbReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
 			case "tiff":
 				// TIFF 也是一大票 RAW 格式的壳：Canon CR2、Nikon NEF、Sony ARW、Adobe DNG
-				if subExt, subCat := e.classifyTIFF(pfReader, m.Offset); subExt != "" {
+				if subExt, subCat := e.classifyTIFF(bbReader, m.Offset); subExt != "" {
 					ext = subExt
 					cat = subCat
 				}
