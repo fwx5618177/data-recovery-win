@@ -130,6 +130,20 @@ type RecoveredFile struct {
 	IsValid       bool         `json:"isValid"`
 	ValidationMsg string       `json:"validationMsg"`
 	SHA256        string       `json:"sha256,omitempty"` // 写入完成后回填，用于 manifest 与跨源去重
+
+	// FragHint 是 carver 在主扫描后做的延迟碎片化检测结果。
+	// 空字符串 = 未检测 / 看起来连续；非空 = 中段采样发现碎片信号。
+	//
+	// v2.8.46 重构：之前 (≤v2.8.45) DetectFragmentation 在 collector 主循环里
+	// 串行调用，对每个 ≥64KB 的候选都做一次 offset+size/2 的随机 ReadAt(64KB)。
+	// 真实盘上 AC 误报多 → 几百次随机 seek/chunk → collector 卡死 → IO 阻塞 →
+	// 整盘扫描速度被压到几百 KB/s。
+	//
+	// 现在 (≥v2.8.46) 主扫描跑完后单独跑 fragmentation pass：候选按 offset 升序
+	// 排序 → 顺序读 → 命中写入 file.FragHint。需要拿 hint 的调用方注册
+	// Engine.SetOnFragmentation(cb)；不注册时 hint 仅落 file.FragHint 字段，
+	// 供后续 manifest / UI 主动读取。
+	FragHint string `json:"fragHint,omitempty"`
 }
 
 // ScanProgress 扫描进度（实时推送到前端）

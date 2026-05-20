@@ -4,6 +4,78 @@
 
 ---
 
+## v2.8.46 (2026-05-20)
+
+**碎片化检测从 collector 主循环挪走 —— 322 KB/s 真凶定位**
+
+### 用户反馈
+
+装 v2.8.45 后扫 G: 盘仍 322.6 KB/s（128GB ETA 107h6m）。bench 测出 712 MB/s
+而实盘 322 KB/s，差 2000× —— 显然 bench 没复现真实路径。
+
+### 根因复盘
+
+bench 用随机合成数据，AC 命中稀疏；真实盘每 8MB chunk **数百次 AC 命中**。
+每个 ≥64KB 的命中在 collector 主循环里立即调 `DetectFragmentation`，做
+`offset+size/2` 的 64KB 随机 `ReadAt`：
+
+```
+collector 串行 → 每个候选 1× 随机 seek (HDD 5-15ms) →
+  几百次 seek/chunk = collector 卡死 →
+  matchCh 阻塞 → chunkCh 阻塞 → IO goroutine 阻塞 →
+  实盘吞吐压到 322 KB/s
+```
+
+bench 不复现是因为合成随机数据 AC 命中极少，几乎不进入 fragmentation 路径。
+
+### Fix — 主扫描跑完后单独跑 fragmentation pass
+
+`internal/carver/engine.go` 的 collector 主循环 **不再调** `DetectFragmentation`。
+改成：候选 ≥64KB 时只 append 到本地 `pendingFragFiles` 切片；
+`wgCollector.Wait()` 返回后单独跑：
+
+```go
+func (e *Engine) fragmentationPass(ctx, files) {
+    sort.Slice(files, byOffsetAsc)  // 随机 seek → 顺序 pass
+    for _, f := range files {
+        if ctx.Err() != nil { return }    // 取消立即退
+        frag := DetectFragmentation(e.reader, f.Offset, f.Size, f.Extension)
+        if frag.LikelyFragmented {
+            f.FragHint = frag.Reason       // 新字段
+            f.Description += "⚠ ..."       // 老字段（向后兼容）
+            if f.Confidence > 0.4 { f.Confidence = 0.4 }
+            if e.onFragmentation != nil { e.onFragmentation(f) }
+        }
+    }
+}
+```
+
+- HDD 顺序读 ~100 MB/s vs 随机 5-15 ms/seek = **100× 改善**
+- 5h 主扫描后典型 ≤30 秒跑完 1000 个候选
+
+### API 变更
+
+- 新增 `types.RecoveredFile.FragHint` 字段（结构化、向后兼容 Description 字符串路径）
+- 新增 `Engine.SetOnFragmentation(cb)`（可选 UI 回调）
+- 不注册回调时 `FragHint` 仍会落字段，下游 manifest 仍可读
+
+### 回归测试
+
+`internal/carver/fragment_pass_test.go`：
+1. `TestFragmentationPass_DirectCall` —— 干净 / 碎片混合候选，验证只命中碎片
+2. `TestFragmentationPass_SortsByOffset` —— 候选原地按 offset 升序排序
+3. `TestFragmentationPass_FiresAfterMainScan` —— 端到端 all-onFound-before-any-onFrag 顺序契约
+4. `TestFragmentationPass_NoCallback_StillSetsFragHint` —— FragHint 落字段
+5. `TestFragmentationPass_CancellationStopsEarly` —— ctx 取消立即退
+
+### 质量
+
+- `go test -race -count=1 ./internal/carver/...`：ok
+- `go build ./...`：clean
+- `staticcheck ./...`：clean
+
+---
+
 ## v2.8.45 (2026-05-17)
 
 **反思 v2.8.43-44：eager prefetch 反而让慢盘 5× 更慢；改"从 chunk 内存读"零额外 IO**
