@@ -273,7 +273,10 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const appMod = await import("../wailsjs/go/main/App");
+        // v2.8.48: App 从 package main 搬到 package appcore (cmd/data-recovery/)，
+        // wails 生成的 bindings 路径从 wailsjs/go/main/ 改到 wailsjs/go/appcore/。
+        // CI 会在 vite build 前重新生成，所以这里直接指向新路径。
+        const appMod = await import("../wailsjs/go/appcore/App");
         const rtMod = await import("../wailsjs/runtime/runtime");
         if (cancelled) return;
         setWailsApp(appMod);
