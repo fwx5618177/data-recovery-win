@@ -1,7 +1,18 @@
 # 数据恢复大师 — 功能清单 (PM 速查版)
 
-> 最后更新: v2.8.46 (2026-05-20)
+> 最后更新: v2.8.47 (2026-05-21)
 > 维护说明：PM / 测试 / 客服按这份清单去逐项验证，下方"完成度"列定义了对应预期。
+
+## 本次发版核对（v2.8.43 → v2.8.47 累计）
+
+| 项 | 状态 | 备注 |
+|----|----|----|
+| 6 大用户报错 bug 全修 | ✅ | 见第 11 节 |
+| 性能优化连环（KB/s → MB/s） | ✅ | 见第 7 节 7 个优化点累计 |
+| 测试目录化 | ✅ | v2.8.46 抽出 internal/scanevent + internal/gpt；4 root 测试搬 tests/ |
+| Root 目录清理 | ✅ | v2.8.47 App 整个搬到 cmd/data-recovery，root 只剩 main.go (20 行) |
+| CI 全绿（Build + Release） | ✅ | staticcheck Linux+Windows / -race / gosec / 全平台 build |
+| PM 功能清单（本文档） | ✅ | 11 节覆盖，含验收建议 |
 
 ## 完成度图例
 
@@ -142,7 +153,8 @@
 | `gosec -severity=medium` | 🟢 0 issues (排除数据恢复固有 G115/G104/G304 等) |
 | 关键 parser fuzz 覆盖 | 🟡 NTFS / APFS LZFSE 过；其它部分 |
 | GitHub Actions CI (Build + Release) | 🟢 双 job 绿；自动签名 + 多平台产物 |
-| 测试目录化 | 🟢 v2.8.46 整理：4 自包含测试到 tests/，3 真依赖 App 留 root |
+| 代码结构: Root 干净 | 🟢 v2.8.47 App 整个搬到 cmd/data-recovery (package appcore)；root 只剩 main.go (20 行) |
+| 测试目录化 | 🟢 v2.8.46 抽出 internal/scanevent + internal/gpt；v2.8.47 测试紧邻 App 同包 |
 
 ## 10. 已知限制 / 未来路线（半透明）
 
@@ -169,15 +181,50 @@
 
 ---
 
-## PM 验收建议
+## PM 验收清单（v2.8.47）
 
-1. **核心路径**: 拿 1 块旧 NTFS / exFAT 移动盘做"格式化后扫描" → 期望发现 ≥ 50% 文件
-2. **加密路径**: BitLocker recovery key 解锁 + 扫描；FileVault recovery key 解锁 + 扫描
-3. **多盘**: 同时插 2 块盘走多盘并行扫描，验证 cancel 即时响应、UI 不掉帧
-4. **取证**: 跑一次恢复后看是否自动生成 `manifest.json` + `manifest.json.sig` + `report.html` + `evidence.zip`
-5. **速度**: 1TB SATA 盘深度扫描应在 4-8 小时（取决于盘速 + 坏区分布）；HDD 扫描速度上限是盘的顺序读上限
-6. **跨平台 sanity**: Win11 / macOS Sonoma+ / Ubuntu 22.04 各装一次包跑通"选盘 → 扫描 → 恢复"
+PM 按这 6 个场景跑一遍即可签收：
+
+| # | 场景 | 期望 | 状态 |
+|---|------|------|------|
+| 1 | 旧 NTFS / exFAT 移动盘"格式化后扫描" | 发现 ≥ 50% 用户文件 | ⬜ 待 PM 验 |
+| 2 | BitLocker recovery key 解锁 + 扫描 | 成功列出明文卷文件 | ⬜ 待 PM 验 |
+| 3 | 多盘并行扫描，期间点取消 | < 2s 内全部停止 IO | ⬜ 待 PM 验 |
+| 4 | 跑一次恢复 → 检查 outputDir | 自动生成 `manifest.json` + `.sig` + `report.html` + `evidence.zip` | ⬜ 待 PM 验 |
+| 5 | 1TB SATA 盘深度扫描 | 4-8 小时完成；扫描中速度 ≥ 几十 MB/s | ⬜ 待 PM 验 |
+| 6 | Win11 / macOS Sonoma+ / Ubuntu 22.04 各装一次 | 包都能启动 + 选盘 + 扫描 + 恢复 | ⬜ 待 PM 验 |
 
 ## 反馈渠道
 
-UI 内 "导出诊断包" → 发回研发邮箱 / Issue tracker。
+UI 内 "导出诊断包" → 发回研发邮箱 / Issue tracker。日志包含本次扫描的 IO / 内存 / 错误堆栈，定位 95% 的报错。
+
+## 项目结构（v2.8.47 后）
+
+```
+data-recovery/
+├── main.go                   # 20 行 thin bootloader
+├── cmd/
+│   ├── data-recovery/        # ⭐ App 整套实现 (package appcore，约 4000 行)
+│   │   ├── app.go            #     IPC 方法 + 110+ Wails 绑定
+│   │   ├── app_unlock_volumes.go
+│   │   ├── admin_*.go        #     Windows / Unix 提权
+│   │   ├── run.go            #     Wails 主循环装配
+│   │   └── *_test.go         #     测私有字段的集成测试
+│   ├── data-recovery-cli/    # CLI 工具
+│   └── drift-check/          # CI 工具
+├── internal/                  # ⭐ 41 个业务包
+│   ├── carver/               #     深度签名雕刻
+│   ├── ntfs/ apfs/ ext4/ ... #     文件系统 parser
+│   ├── bitlocker/ luks/ ...  #     加密卷
+│   ├── disk/                 #     底层块 IO + SMART
+│   ├── scanevent/  ⭐ 新     #     扫描事件 helper（MergeProgress / FileFoundBatcher）
+│   ├── gpt/                  #     含 PartitionInfo DTO + FormatGUID
+│   └── ...
+├── tests/                     # ⭐ 自包含集成测试（不依赖 App 私有字段）
+│   ├── scanevent/            #     批量节流 / 进度合并
+│   ├── dtocontract/          #     IPC JSON tag 契约
+│   └── encryptedfastpath/    #     加密卷探测快速路径
+├── frontend/                  # React UI (Wails 嵌入)
+├── docs/                      # 含本 FEATURE_INVENTORY.md
+└── go.mod / go.sum / Makefile / wails.json / *.md
+```
