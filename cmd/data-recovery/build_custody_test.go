@@ -1,4 +1,4 @@
-package main
+package appcore
 
 import (
 	"encoding/json"

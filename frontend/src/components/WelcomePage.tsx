@@ -577,8 +577,11 @@ function BitLockerUnlockModal({ volume, wailsApp, onCancel, onSubmit }) {
     let cancelled = false;
     (async () => {
       try {
-        if (typeof window !== "undefined" && window.go?.main?.App?.SummarizeBitLockerProtectors) {
-          const list = await window.go.main.App.SummarizeBitLockerProtectors(
+        // v2.8.47 重构：App 从 package main 搬到 package appcore，wails 生成的
+        // 全局命名空间也变；优先 appcore，向后兼容 main（旧版本未重新生成 bindings）。
+        const ns: any = (window as any).go?.appcore?.App ?? (window as any).go?.main?.App;
+        if (typeof window !== "undefined" && ns?.SummarizeBitLockerProtectors) {
+          const list = await ns.SummarizeBitLockerProtectors(
             volume.drivePath,
             Number(volume.offset || 0).toString(16),
           );

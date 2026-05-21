@@ -1,4 +1,4 @@
-package main
+package appcore
 
 // ============================================================================
 // LUKS / VeraCrypt / TrueCrypt 卷解锁的 Wails IPC 入口
