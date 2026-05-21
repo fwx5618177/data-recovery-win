@@ -1,8 +1,9 @@
-package main
+package scanevent_test
 
 import (
 	"testing"
 
+	"data-recovery/internal/scanevent"
 	"data-recovery/internal/types"
 )
 
@@ -10,6 +11,8 @@ import (
 // 不应清掉 TotalBytes / FilesFound / Speed / BytesScanned 等累计字段。
 //
 // 失败 = 用户 UI 显示 "0 B / 0 B / 速度 0"（v2.8.11 之前的 bug）。
+// v2.8.46 测试从 root（package main）搬到 tests/scanevent 子目录，
+// 配合 mergeScanProgress 抽到 internal/scanevent 包。
 func TestMergeScanProgress_PreservesTotalBytes(t *testing.T) {
 	prev := types.ScanProgress{
 		Phase:      "ntfs",
@@ -22,7 +25,7 @@ func TestMergeScanProgress_PreservesTotalBytes(t *testing.T) {
 		CurrentFile: "正在查找 exFAT 分区...",
 		// TotalBytes 故意 0 —— dispatcher emit 时常如此
 	}
-	merged := mergeScanProgress(prev, incoming)
+	merged := scanevent.MergeProgress(prev, incoming)
 	if merged.TotalBytes != prev.TotalBytes {
 		t.Errorf("TotalBytes 没保留：got %d, want %d", merged.TotalBytes, prev.TotalBytes)
 	}
@@ -46,7 +49,7 @@ func TestMergeScanProgress_PreservesAccumulated(t *testing.T) {
 		Phase:   "validating",
 		Percent: 96.0,
 	}
-	merged := mergeScanProgress(prev, incoming)
+	merged := scanevent.MergeProgress(prev, incoming)
 
 	if merged.BytesScanned != prev.BytesScanned {
 		t.Errorf("BytesScanned 没保留：got %d, want %d", merged.BytesScanned, prev.BytesScanned)
@@ -74,7 +77,7 @@ func TestMergeScanProgress_IncomingNonZeroWins(t *testing.T) {
 		FilesFound:   20,
 		Speed:        2000,
 	}
-	merged := mergeScanProgress(prev, incoming)
+	merged := scanevent.MergeProgress(prev, incoming)
 
 	if merged.TotalBytes != incoming.TotalBytes {
 		t.Errorf("TotalBytes 应用 incoming：got %d", merged.TotalBytes)

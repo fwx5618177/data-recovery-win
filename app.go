@@ -34,6 +34,7 @@ import (
 	"data-recovery/internal/raid"
 	"data-recovery/internal/recovery"
 	"data-recovery/internal/refs"
+	"data-recovery/internal/scanevent"
 	"data-recovery/internal/sed"
 	"data-recovery/internal/session"
 	"data-recovery/internal/types"
@@ -121,14 +122,12 @@ type App struct {
 	dedupMu     sync.Mutex
 	dedupCancel context.CancelFunc
 
-	// scan:fileFound 后台批量发送（v2.8.40）—— 之前每文件一次 IPC + 整个
-	// RecoveredFile JSON (~200B)。100K 文件 = 100K IPC + 20MB 序列化，纯浪费
-	// （前端早就 200ms batch render）。新方案：积攒到 200 条 OR 100ms 触发
-	// 一次 EventsEmit，payload 是 []*RecoveredFile（前端兼容单条/数组）。
-	// 取消 / 完成时强制 flush 剩余。
-	fileFoundMu      sync.Mutex
-	fileFoundPending []*types.RecoveredFile
-	fileFoundLast    time.Time
+	// scan:fileFound 后台批量发送（v2.8.40 加 / v2.8.46 抽到 scanevent 包）。
+	// 之前每文件一次 IPC + 整个 RecoveredFile JSON (~200B)，100K 文件 = 100K
+	// IPC + 20MB 序列化纯浪费（前端早就 200ms batch render）。
+	// 新方案：积攒到 200 条 OR 100ms 触发一次 EventsEmit，payload 是
+	// []*RecoveredFile（前端兼容单条/数组）。取消 / 完成时强制 flush 剩余。
+	fileFoundBatcher *scanevent.FileFoundBatcher
 
 	// Android backup 扫描 cancel（Batch 4）
 	androidScanCancel context.CancelFunc
@@ -221,31 +220,10 @@ func (a *App) emitScanHeartbeat(stopCh <-chan struct{}, startTime time.Time) {
 	}
 }
 
-// mergeScanProgress 把新的 ScanProgress 合并进既有快照。
-//
-// 关键：dispatcher 创建新的 ScanProgress 时只设置自己关心的字段（Phase / Percent /
-// CurrentFile），其余字段是 zero value。如果直接覆盖 a.scanProgress，已经从底层拿到
-// 的 TotalBytes / FilesFound / Speed 会被重置为 0。
-//
-// 合并策略：incoming 设了非零 → 用 incoming（最新值）；incoming 为零 → 保留 prev。
-//
-// 例外：Percent 必须用 incoming（即使是 0，可能是有意从某 phase 重置进度的开头）。
-// 但前端 App.tsx 已有单调 guard 兜底，所以这里直接用 incoming 安全。
+// mergeScanProgress 已抽到 internal/scanevent.MergeProgress（v2.8.46）。
+// 这个名字保留是为了减小本次重构 diff 噪音；新代码直接用 scanevent.MergeProgress。
 func mergeScanProgress(prev, incoming types.ScanProgress) types.ScanProgress {
-	out := incoming
-	if out.TotalBytes == 0 && prev.TotalBytes > 0 {
-		out.TotalBytes = prev.TotalBytes
-	}
-	if out.BytesScanned == 0 && prev.BytesScanned > 0 {
-		out.BytesScanned = prev.BytesScanned
-	}
-	if out.FilesFound == 0 && prev.FilesFound > 0 {
-		out.FilesFound = prev.FilesFound
-	}
-	if out.Speed == 0 && prev.Speed > 0 {
-		out.Speed = prev.Speed
-	}
-	return out
+	return scanevent.MergeProgress(prev, incoming)
 }
 
 // heartbeatState 心跳间复用的状态：用来从 BytesScanned 增量算 speed。
@@ -2312,67 +2290,33 @@ func (a *App) CancelFindDuplicateImages() {
 	}
 }
 
-// 批量阈值常量 —— 抽到顶层方便 UT 锁，未来调参也只改一处
-const (
-	fileFoundBatchSize     = 200                    // 攒到这么多文件就发
-	fileFoundBatchInterval = 100 * time.Millisecond // 或者过了这么久就发
-)
-
-// emitFileFoundBatched 是 scan:fileFound 的批量入口。所有扫描代码不再直接
-// EventsEmit("scan:fileFound", f)，统一走这个 helper。
-//
-// 工作方式：
-//   - 文件追加到 pending 队列
-//   - pending 达到 200 条 OR 距上次发送超过 100ms → 立即 emit 一批
-//   - payload 类型是 []*RecoveredFile（前端兼容单条 / 数组两种格式）
-//
-// 完成 / 取消时务必调 flushFileFoundBatch(true) 把剩余的发出去，否则前端
-// 看不到最后几十条文件。所有 scan:completed / scan:error 路径都加了。
-func (a *App) emitFileFoundBatched(f *types.RecoveredFile) {
-	if f == nil {
-		return
+// ensureFileFoundBatcher 懒构造批量器（首次 scan 用到时才建）。
+// 用 emit closure 把 wails IPC 注入；scanevent 包不依赖 wails。
+func (a *App) ensureFileFoundBatcher() *scanevent.FileFoundBatcher {
+	if a.fileFoundBatcher == nil {
+		a.fileFoundBatcher = scanevent.NewFileFoundBatcher(func(batch []*types.RecoveredFile) {
+			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+		})
 	}
-	a.fileFoundMu.Lock()
-	a.fileFoundPending = append(a.fileFoundPending, f)
-	needEmit := len(a.fileFoundPending) >= fileFoundBatchSize ||
-		time.Since(a.fileFoundLast) >= fileFoundBatchInterval
-	if !needEmit {
-		a.fileFoundMu.Unlock()
-		return
-	}
-	batch := a.fileFoundPending
-	a.fileFoundPending = nil
-	a.fileFoundLast = time.Now()
-	a.fileFoundMu.Unlock()
-	wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+	return a.fileFoundBatcher
 }
 
-// flushFileFoundBatch 把 pending 里的剩余文件都发出去。
-// scan:completed / scan:error / cancel 路径必须调一次以免丢尾巴文件。
-// force=true 时连"距离阈值时间不到"也强制发；扫描结束时总是 force。
-func (a *App) flushFileFoundBatch() {
-	a.fileFoundMu.Lock()
-	if len(a.fileFoundPending) == 0 {
-		a.fileFoundMu.Unlock()
-		return
-	}
-	batch := a.fileFoundPending
-	a.fileFoundPending = nil
-	a.fileFoundLast = time.Now()
-	a.fileFoundMu.Unlock()
-	wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+// emitFileFoundBatched 是 scan:fileFound 的批量入口。所有扫描代码不再直接
+// EventsEmit("scan:fileFound", f)，统一走这个 helper。委托给 scanevent.FileFoundBatcher。
+func (a *App) emitFileFoundBatched(f *types.RecoveredFile) {
+	a.ensureFileFoundBatcher().Add(f)
 }
 
 // emitScanCompleted / emitScanError 是 scan 结束事件的包装，保证 fileFound
 // 批量队列在结束前 flush 干净（否则用户最后几十条文件看不到）。所有 scan
 // 结束的代码统一走这俩 helper，不再直接 EventsEmit。
 func (a *App) emitScanCompleted(result any) {
-	a.flushFileFoundBatch()
+	a.ensureFileFoundBatcher().Flush()
 	wailsRuntime.EventsEmit(a.ctx, "scan:completed", result)
 }
 
 func (a *App) emitScanError(errMsg string) {
-	a.flushFileFoundBatch()
+	a.ensureFileFoundBatcher().Flush()
 	wailsRuntime.EventsEmit(a.ctx, "scan:error", errMsg)
 }
 
@@ -2542,22 +2486,10 @@ func (a *App) LookupVirusTotal(sha256Hex, apiKey string) (*forensics.VTReport, e
 	return c.LookupHash(ctx, sha256Hex)
 }
 
-// GPTPartitionInfo 是给前端展示的 GPT 分区 DTO —— 字段名 camelCase，
-// 含人类可读的 typeGUID 字符串和 size 字段。
-//
-// v2.8.33 加 —— 之前直接返回 gpt.Partition struct，里面字段都是 PascalCase
-// 无 JSON tag，被 Wails 序列化后前端读 `firstLBA/lastLBA/name/typeGUID` 全是
-// undefined。用户截图里看到的"未命名 (undefined-undefined)"就是这个 bug。
-type GPTPartitionInfo struct {
-	Index     int    `json:"index"`    // 1-based 分区编号
-	Name      string `json:"name"`     // UTF-16 LE 解码后的分区名（可能为空）
-	TypeGUID  string `json:"typeGUID"` // 标准 GUID 字符串，如 "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
-	TypeName  string `json:"typeName"` // 已知 GUID 的人类名，如 "Microsoft Basic Data" / "EFI System"
-	FirstLBA  uint64 `json:"firstLBA"`
-	LastLBA   uint64 `json:"lastLBA"`
-	SizeBytes uint64 `json:"sizeBytes"`
-	SizeHuman string `json:"sizeHuman"` // 已格式化，如 "128.0 GB"
-}
+// GPTPartitionInfo 是 gpt.PartitionInfo 的本地 type alias，保留旧名以兼容
+// Wails 自动生成的前端绑定（frontend/wailsjs/go/main/App.d.ts 里引用的是
+// main.GPTPartitionInfo）。新代码直接用 gpt.PartitionInfo 即可。
+type GPTPartitionInfo = gpt.PartitionInfo
 
 // RecoverGPTPartitions 从盘尾备份 GPT 恢复丢失的分区表。
 //
@@ -2565,7 +2497,7 @@ type GPTPartitionInfo struct {
 // v2.8.3 修：自动把 Windows 逻辑卷路径解析回底层物理盘，避免"读 0 字节"错误。
 // v2.8.33: 返回 GPTPartitionInfo DTO（带 JSON tag 和解码字段），代替原始
 // gpt.Partition struct（前端读字段全 undefined 的根因）。
-func (a *App) RecoverGPTPartitions(drivePath string) ([]GPTPartitionInfo, error) {
+func (a *App) RecoverGPTPartitions(drivePath string) ([]gpt.PartitionInfo, error) {
 	if drivePath == "" {
 		return nil, fmt.Errorf("drivePath 为空")
 	}
@@ -2589,15 +2521,15 @@ func (a *App) RecoverGPTPartitions(drivePath string) ([]GPTPartitionInfo, error)
 		return nil, err
 	}
 
-	out := make([]GPTPartitionInfo, 0, len(rawParts))
+	out := make([]gpt.PartitionInfo, 0, len(rawParts))
 	for i, p := range rawParts {
-		guid := formatGPTGUID(p.TypeGUID)
+		guid := gpt.FormatGUID(p.TypeGUID)
 		sz := p.SizeBytes()
-		out = append(out, GPTPartitionInfo{
+		out = append(out, gpt.PartitionInfo{
 			Index:     i + 1,
 			Name:      p.Name,
 			TypeGUID:  guid,
-			TypeName:  gptTypeNameByGUID(guid),
+			TypeName:  gpt.TypeNameByGUID(guid),
 			FirstLBA:  p.StartLBA,
 			LastLBA:   p.EndLBA,
 			SizeBytes: sz,
@@ -2605,59 +2537,6 @@ func (a *App) RecoverGPTPartitions(drivePath string) ([]GPTPartitionInfo, error)
 		})
 	}
 	return out, nil
-}
-
-// formatGPTGUID 把 GPT mixed-endian GUID 字节序转成标准 "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" 形式。
-// GPT GUID 头 3 段是 little-endian，后 2 段是 big-endian（Win/Intel 历史遗留）。
-func formatGPTGUID(b [16]byte) string {
-	return fmt.Sprintf("%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-		uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24,
-		uint16(b[4])|uint16(b[5])<<8,
-		uint16(b[6])|uint16(b[7])<<8,
-		b[8], b[9],
-		b[10], b[11], b[12], b[13], b[14], b[15])
-}
-
-// gptTypeNameByGUID 把已知的 GPT type GUID 翻译成人类名。
-// 名单是业界公开标准（Microsoft / Apple / Linux 各家文档）。
-func gptTypeNameByGUID(guid string) string {
-	switch strings.ToUpper(guid) {
-	case "C12A7328-F81F-11D2-BA4B-00A0C93EC93B":
-		return "EFI System Partition"
-	case "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7":
-		return "Microsoft Basic Data (NTFS / FAT32 / exFAT)"
-	case "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC":
-		return "Microsoft Recovery"
-	case "E3C9E316-0B5C-4DB8-817D-F92DF00215AE":
-		return "Microsoft Reserved (MSR)"
-	case "5808C8AA-7E8F-42E0-85D2-E1E90434CFB3":
-		return "Microsoft LDM Metadata"
-	case "AF9B60A0-1431-4F62-BC68-3311714A69AD":
-		return "Microsoft LDM Data"
-	case "0FC63DAF-8483-4772-8E79-3D69D8477DE4":
-		return "Linux Filesystem"
-	case "E6D6D379-F507-44C2-A23C-238F2A3DF928":
-		return "Linux LVM"
-	case "A19D880F-05FC-4D3B-A006-743F0F84911E":
-		return "Linux RAID"
-	case "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F":
-		return "Linux Swap"
-	case "933AC7E1-2EB4-4F13-B844-0E14E2AEF915":
-		return "Linux /home"
-	case "48465300-0000-11AA-AA11-00306543ECAC":
-		return "Apple HFS+"
-	case "7C3457EF-0000-11AA-AA11-00306543ECAC":
-		return "Apple APFS"
-	case "55465300-0000-11AA-AA11-00306543ECAC":
-		return "Apple UFS"
-	case "6A898CC3-1DD2-11B2-99A6-080020736631":
-		return "Solaris / illumos ZFS"
-	case "21686148-6449-6E6F-744E-656564454649":
-		return "BIOS Boot Partition"
-	case "00000000-0000-0000-0000-000000000000":
-		return "(空槽)"
-	}
-	return "(未知类型 GUID)"
 }
 
 // SuggestNetworkMount 给定 smb:// / nfs:// / iscsi:// URL 返回挂载步骤
