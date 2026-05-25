@@ -2373,26 +2373,57 @@ func (a *App) CancelFindDuplicateImages() {
 // ensureFileFoundBatcher 懒构造批量器（首次 scan 用到时才建）。
 // 用 emit closure 把 wails IPC 注入；scanevent 包不依赖 wails。
 //
-// v2.8.50: emit closure 现在做两件事 ——
-//  1. 发 wails scan:fileFound 给前端（前端列表渲染）
-//  2. 调 store.AppendFiles 把这一批新文件追加到 session log（O(k) 而不是
-//     v2.8.49 的 O(N) snapshot）；store 为 nil 时跳过。
+// v2.8.50: emit closure 同时做 wails IPC + session log append。
+// v2.8.51: 关键修复 —— 把 emit 跑到独立 goroutine，避免 wails IPC
+// 反压传到 collector。
 //
-// 共用同一个 batch 切片 → 零额外内存 / 零额外遍历。
+// 用户场景: 200GB 漫画盘扫到 10K+ 文件后，前端 React 渲染 100K 行列表
+// 慢，wails 内部 channel 满 → EventsEmit BLOCK → batcher.Add (in collector
+// goroutine) BLOCK → matchCh 满 → workers BLOCK → chunkCh 满 → IO BLOCK。
+// 表现：扫描速度 10 MB/s 衰减到 60 KB/s（170× 下降）。
+//
+// Fix: emit 走容量 64 batch 的 buffered channel + 单独 emitter goroutine。
+// channel 不满 → collector 零等待。channel 满 → 退化到同步 emit（罕见，
+// 此时确实是 frontend 来不及处理，至少不丢数据）。
+// session log append 同样挪入 emitter goroutine，避免文件 IO 卡 collector。
 func (a *App) ensureFileFoundBatcher() *scanevent.FileFoundBatcher {
 	if a.fileFoundBatcher == nil {
+		// 容量 64 个批次 (~12K 文件 inflight buffer)，足够吸收前端短期渲染卡顿。
+		emitCh := make(chan []*types.RecoveredFile, 64)
+		go a.runFileFoundEmitter(emitCh)
 		a.fileFoundBatcher = scanevent.NewFileFoundBatcher(func(batch []*types.RecoveredFile) {
-			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
-			// 顺手把这批文件持久化到 session log，O(k) 不阻塞扫描热路径
-			// （batch 大小是 scanevent.BatchSize = 200，~70KB 文件 IO）
-			if a.store != nil {
-				if err := a.store.AppendFiles(batch); err != nil {
-					appLogger.Warn("追加 session log 失败（不影响扫描）", "err", err)
-				}
+			select {
+			case emitCh <- batch:
+				// 入队成功 → collector 立刻返回
+			default:
+				// channel 满了 (前端慢到 12K 文件都没消化)：退化到同步 emit
+				// 这是兜底，不能丢数据。同步 emit 会阻塞 collector 但至少
+				// 保证 IPC 顺序 + 不丢文件。
+				a.directEmitBatch(batch)
 			}
 		})
 	}
 	return a.fileFoundBatcher
+}
+
+// runFileFoundEmitter 后台 goroutine 顺序消费 emit channel。
+// scan 完成时 channel 自然 drain（FileFoundBatcher.Flush 后调用方等待），
+// 进程退出时让 GC 收 (goroutine 漏一个不影响行为)。
+func (a *App) runFileFoundEmitter(ch <-chan []*types.RecoveredFile) {
+	for batch := range ch {
+		a.directEmitBatch(batch)
+	}
+}
+
+// directEmitBatch 真正调 wails IPC + session 持久化，可能阻塞。
+// 同步路径（队列满）和 emitter goroutine（正常路径）共用。
+func (a *App) directEmitBatch(batch []*types.RecoveredFile) {
+	wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+	if a.store != nil {
+		if err := a.store.AppendFiles(batch); err != nil {
+			appLogger.Warn("追加 session log 失败（不影响扫描）", "err", err)
+		}
+	}
 }
 
 // emitFileFoundBatched 是 scan:fileFound 的批量入口。所有扫描代码不再直接

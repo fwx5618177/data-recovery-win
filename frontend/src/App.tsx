@@ -386,6 +386,13 @@ export default function App() {
   /* =====================================================================
      3. 扫描事件订阅（节流合并到 state）
      ===================================================================== */
+  // v2.8.51: 自适应 flush 间隔 —— Array.from(Map) 是 O(N) 拷贝，
+  // 每 200ms 跑一次在 N=100K (漫画盘场景) 就是 1M 拷贝/秒，前端 React
+  // reconciliation 跟不上 → wails IPC 回压 → backend collector 卡死 →
+  // 扫描从 10 MB/s 衰减到 60 KB/s（用户报的真实场景）。
+  //
+  // 解决：N 越大 flush 间隔越长。pending queue 仍及时入 fileIndexRef.current,
+  // 只是 setFiles（触发 React 全量 reconcile 的 O(N) 操作）降频。
   const flushPending = useCallback(() => {
     const pending = pendingFilesRef.current;
     if (pending.length === 0) return;
@@ -393,15 +400,10 @@ export default function App() {
     flushTimerRef.current = null;
 
     const idx = fileIndexRef.current;
-    let anyNew = false;
     pending.forEach((f) => {
       if (!f?.id) return;
-      if (!idx.has(f.id)) anyNew = true;
       mergeFileIntoIndex(idx, f);
     });
-    if (!anyNew && pending.every((f) => idx.has(f?.id))) {
-      // 全是更新也要重绘
-    }
     startTransition(() => {
       setFiles(Array.from(idx.values()));
     });
@@ -411,7 +413,15 @@ export default function App() {
     if (!file?.id) return;
     pendingFilesRef.current.push(file);
     if (flushTimerRef.current) return;
-    flushTimerRef.current = setTimeout(flushPending, 200);
+    // 自适应间隔：N 大时拉长，避免 O(N) Array.from + React reconcile 阻塞 wails IPC
+    // 200ms (N<2K, 即时感) → 500ms (2K-10K) → 2s (10K-50K) → 5s (50K+)
+    // 节流后 UI 延迟略增但 backend 扫描速度不再衰减。
+    const n = fileIndexRef.current.size;
+    let interval = 200;
+    if (n >= 50000) interval = 5000;
+    else if (n >= 10000) interval = 2000;
+    else if (n >= 2000) interval = 500;
+    flushTimerRef.current = setTimeout(flushPending, interval);
   }, [flushPending]);
 
   useEffect(() => () => {
