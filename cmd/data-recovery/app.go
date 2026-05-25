@@ -233,7 +233,24 @@ type heartbeatState struct {
 	lastBytesScanned int64
 	lastSampleTime   time.Time
 	lastSpeed        int64 // 缓存最近一次有效速度，避免 sample 间速度=0 闪烁
+
+	// v2.8.49 慢盘检测：连续 N 个心跳速度都 < slowDriveBytesPerSec → 发 scan:slowDrive 事件
+	// 让前端横幅推荐"先 dump 到内部 SSD .img 再扫"。
+	// 用户场景：USB 3.0 128GB U 盘 49h 才扫 16%，平均 60 KB/s —— 这是
+	// USB 桥接控制器 / 弱 flash / 坏块的硬件极限，不是软件算法问题。
+	// 业界做法（PhotoRec / FTK Imager / R-Studio）：dd / ddrescue dump
+	// 镜像后扫镜像，速度提升一个数量级。
+	slowSampleCount   int  // 连续慢速心跳数
+	slowDriveNotified bool // 已发过通知则不重复扰
 }
+
+// slowDriveBytesPerSec 是"慢盘"阈值。USB 3.0 理论 625 MB/s，正常 U 盘 100+ MB/s。
+// 200 KB/s 都达不到说明遇到硬件瓶颈（控制器 / 坏块），软件优化已经无能为力。
+const slowDriveBytesPerSec = 200 * 1024
+
+// slowSamplesBeforeNotify 多少个连续慢速心跳才发通知。
+// 心跳间隔 500ms × 120 = 60s，避免短暂卡顿误报。
+const slowSamplesBeforeNotify = 120
 
 // emitHeartbeatTick 单次心跳：返回 false 表示 scan 已结束，调用方应退出循环。
 func (a *App) emitHeartbeatTick(startTime time.Time, state *heartbeatState) bool {
@@ -271,6 +288,27 @@ func (a *App) emitHeartbeatTick(startTime time.Time, state *heartbeatState) bool
 		// 没新增字节但有缓存速度 —— 短暂的 IO 停顿，UI 显示最近一次而不是闪 0
 		p.Speed = state.lastSpeed
 	}
+
+	// v2.8.49 慢盘检测：scan:slowDrive 事件触发前端横幅。
+	// 进度有效 + 速度持续低 → 计数；偶尔恢复 → 清零。
+	if p.BytesScanned > 0 && p.Phase != "init" {
+		if p.Speed > 0 && p.Speed < slowDriveBytesPerSec {
+			state.slowSampleCount++
+			if state.slowSampleCount >= slowSamplesBeforeNotify && !state.slowDriveNotified {
+				state.slowDriveNotified = true
+				wailsRuntime.EventsEmit(a.ctx, "scan:slowDrive", map[string]any{
+					"speedBytesPerSec":     p.Speed,
+					"thresholdBytesPerSec": int64(slowDriveBytesPerSec),
+					"hint": "盘速持续低于 200 KB/s。USB 3.0 桥接 / 坏盘 / 控制器限速属硬件极限，" +
+						"软件已无法再加速。业界做法：用菜单 → 工具 → 整盘镜像 dump 把盘 dump 成 " +
+						".img 文件存到内部 SSD，再扫描镜像 —— 速度通常快一个数量级。",
+				})
+			}
+		} else if p.Speed >= slowDriveBytesPerSec {
+			state.slowSampleCount = 0 // 恢复正常速度 → 重置计数（但不重发通知，避免反复打扰）
+		}
+	}
+
 	wailsRuntime.EventsEmit(a.ctx, "scan:progress", p)
 	return true
 }
@@ -1898,19 +1936,38 @@ func (a *App) ResumeLastScan() error {
 	return a.StartScan(snap.DrivePath, mode)
 }
 
-// persistLoop 扫描进行中每 5 秒保存一次快照；扫描结束由 caller close(stop) 退出。
+// persistLoop 扫描进行中按自适应间隔保存一次快照；扫描结束由 caller close(stop) 退出。
+//
+// v2.8.49 自适应：
+//   - 文件数 < 1000：每 5s 一次（原行为，UI 续扫体验佳）
+//   - 1000 ≤ 文件数 < 5000：每 15s 一次（JSON ≈ 1.5MB，每 5s 是浪费）
+//   - 文件数 ≥ 5000：每 60s 一次（避免 7K+ 文件场景每 5s 写 2.5MB JSON
+//     竞争 CPU + 配置目录 IO，扫描深度场景下尤其明显）
+//
+// 用户场景：USB 慢盘扫 49h 找到 7K+ 文件，每 5s 序列化整个 scanFiles 数组
+// 算 35K 次 JSON write × 2.5MB = 90 GB 累计配置目录写。降频后 ~6K 次写,
+// 同等 N 累计 IO 降 6×；扫描线程不再被 JSON marshal 抢 CPU。
 func (a *App) persistLoop(stop <-chan struct{}) {
 	if a.store == nil {
 		return
 	}
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-
 	for {
+		a.scanSnapshotMu.Lock()
+		n := len(a.scanFiles)
+		a.scanSnapshotMu.Unlock()
+
+		interval := 5 * time.Second
+		switch {
+		case n >= 5000:
+			interval = 60 * time.Second
+		case n >= 1000:
+			interval = 15 * time.Second
+		}
+
 		select {
 		case <-stop:
 			return
-		case <-t.C:
+		case <-time.After(interval):
 			a.saveSnapshot(false)
 		}
 	}

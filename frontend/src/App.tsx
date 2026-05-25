@@ -434,6 +434,17 @@ export default function App() {
         return merged;
       });
     });
+    // v2.8.49: backend 检测到盘速持续 < 200 KB/s 时主动通知前端推荐 dump 镜像。
+    // 用户场景：USB 3.0 慢 U 盘 49h 才扫 16%，硬件控制器极限，软件无法再加速。
+    const offSlowDrive = wailsRuntime.EventsOn("scan:slowDrive", (payload: any) => {
+      if (!payload || typeof payload !== "object") return;
+      toast.warning({
+        title: "⚠ 扫描盘速过慢（硬件层限制）",
+        description: String(payload.hint || "盘速持续 < 200 KB/s，建议先 dump 到内部 SSD .img 再扫描。"),
+        duration: 0, // 不自动关闭 —— 用户需主动消化此建议
+        dedupeKey: "scan-slow-drive", // 单次扫描内只弹一条
+      });
+    });
     // v2.8.40: backend 改成批量 emit。payload 现在是 []RecoveredFile（200 文件 / 100ms 一批），
     // 但要兼容老 backend 发的单 RecoveredFile（升级期 / 第三方手动 emit）。
     const offFound = wailsRuntime.EventsOn("scan:fileFound", (payload) => {
@@ -651,7 +662,7 @@ export default function App() {
     ];
 
     return () => {
-      [offProg, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
+      [offProg, offSlowDrive, offFound, offDone, offErr, offRecProg, offRecDone, offRecErr,
        offFileDrop, offBLDerive, offBLUnlocked,
        offCloseReq,
        offUpdate, offDownloadProg, offDownloaded, offDownloadErr,
