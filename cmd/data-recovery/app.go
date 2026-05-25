@@ -1936,54 +1936,61 @@ func (a *App) ResumeLastScan() error {
 	return a.StartScan(snap.DrivePath, mode)
 }
 
-// persistLoop 扫描进行中按自适应间隔保存一次快照；扫描结束由 caller close(stop) 退出。
+// persistLoop 扫描进行中周期性保存 metadata 快照 + 每 N 文件 Compact 一次 log。
 //
-// v2.8.49 自适应：
-//   - 文件数 < 1000：每 5s 一次（原行为，UI 续扫体验佳）
-//   - 1000 ≤ 文件数 < 5000：每 15s 一次（JSON ≈ 1.5MB，每 5s 是浪费）
-//   - 文件数 ≥ 5000：每 60s 一次（避免 7K+ 文件场景每 5s 写 2.5MB JSON
-//     竞争 CPU + 配置目录 IO，扫描深度场景下尤其明显）
+// v2.8.50 重构（彻底 O(1) per file 持久化）：
+//   - 文件主体走 session log append（在 OnFileFound batcher 的 emit 闭包里完成）
+//   - persistLoop 只写 metadata（progress / drivePath / carverOffset）—— O(1) 写,
+//     跟 N 无关
+//   - 每 ~5000 文件做一次 Compact 把 log 合并进 snapshot —— 摊销 O(1)/文件
 //
-// 用户场景：USB 慢盘扫 49h 找到 7K+ 文件，每 5s 序列化整个 scanFiles 数组
-// 算 35K 次 JSON write × 2.5MB = 90 GB 累计配置目录写。降频后 ~6K 次写,
-// 同等 N 累计 IO 降 6×；扫描线程不再被 JSON marshal 抢 CPU。
+// 之前 v2.8.49 已经把全量 Save 间隔从 5s 自适应放宽到 60s（≥5K 文件场景），
+// 但单次仍是 O(N) 序列化。新设计干掉这个 O(N)：
+//
+// | N=7K 场景 | v2.8.49 (O(N) per call) | v2.8.50 (O(1) per file) |
+// |-----------|------------------------|------------------------|
+// | 49h 扫描累计写入 | ~7 GB (3K 次 × 2.5MB) | ~5 MB (7K 行 × 350B + 1 compact) |
+// | 写入压力 | 40 KB/s 均值 | 0.03 KB/s 均值 |
+//
+// 实际本机 SSD 上影响可忽略，但避免任何场景下"持久化反压扫描线程"。
 func (a *App) persistLoop(stop <-chan struct{}) {
 	if a.store == nil {
 		return
 	}
+	const compactEveryNFiles = 5000
+	lastCompactCount := 0
 	for {
-		a.scanSnapshotMu.Lock()
-		n := len(a.scanFiles)
-		a.scanSnapshotMu.Unlock()
-
-		interval := 5 * time.Second
-		switch {
-		case n >= 5000:
-			interval = 60 * time.Second
-		case n >= 1000:
-			interval = 15 * time.Second
-		}
-
 		select {
 		case <-stop:
 			return
-		case <-time.After(interval):
-			a.saveSnapshot(false)
+		case <-time.After(5 * time.Second):
+			a.saveMetadataSnapshot(false)
+			a.scanSnapshotMu.Lock()
+			n := len(a.scanFiles)
+			a.scanSnapshotMu.Unlock()
+			if n-lastCompactCount >= compactEveryNFiles {
+				if err := a.store.Compact(); err != nil {
+					appLogger.Warn("compact session log 失败（不影响 scan）", "err", err)
+				} else {
+					lastCompactCount = n
+				}
+			}
 		}
 	}
 }
 
-// saveSnapshot 用当前状态覆盖会话文件。
-// completed 为 true 表示扫描已完整结束（用户下次可选择直接恢复而不是续跑）。
-func (a *App) saveSnapshot(completed bool) {
+// saveMetadataSnapshot 写 progress / drive / mode / carver offset 等元数据。
+// **不再** 把 scanFiles 序列化（那些走 AppendFiles → log）。O(1) 写盘。
+//
+// completed=true 时强制 Compact 一次 → snapshot.json 包含所有文件，
+// 用户重启后 Load 立刻拿到完整记录无需 replay 大 log。
+func (a *App) saveMetadataSnapshot(completed bool) {
 	if a.store == nil {
 		return
 	}
 
 	a.scanSnapshotMu.Lock()
 	progress := a.scanProgress
-	filesCopy := make([]*types.RecoveredFile, len(a.scanFiles))
-	copy(filesCopy, a.scanFiles)
 	a.scanSnapshotMu.Unlock()
 
 	a.mu.Lock()
@@ -1996,13 +2003,29 @@ func (a *App) saveSnapshot(completed bool) {
 		DriveLabel:         drive.Name,
 		Mode:               mode,
 		Progress:           progress,
-		Files:              filesCopy,
+		Files:              nil, // 文件主体已经 / 将通过 AppendFiles 进 log
 		Completed:          completed,
 		CarverResumeOffset: a.engine.CurrentCarverOffset(),
 	}
 	if err := a.store.Save(snap); err != nil {
 		appLogger.Warn("保存会话快照失败", "err", err)
 	}
+	if completed {
+		// 扫描完整结束：log 合并进 snapshot，下次 Load 不用 replay
+		if err := a.store.Compact(); err != nil {
+			appLogger.Warn("完成扫描 compact log 失败", "err", err)
+		}
+	}
+}
+
+// saveSnapshot 保留名字让老调用者继续 work；委托到 metadata-only 版本。
+// 关闭应用 (shutdown) 也走这条 → 强制 flush batcher 的 pending 文件后写元数据。
+func (a *App) saveSnapshot(completed bool) {
+	// 先 flush 文件 batch 到 log（否则最后几十个文件丢）
+	if a.fileFoundBatcher != nil {
+		a.fileFoundBatcher.Flush()
+	}
+	a.saveMetadataSnapshot(completed)
 }
 
 // flushSessionIfActive 在关机时兜底写一次。
@@ -2349,10 +2372,24 @@ func (a *App) CancelFindDuplicateImages() {
 
 // ensureFileFoundBatcher 懒构造批量器（首次 scan 用到时才建）。
 // 用 emit closure 把 wails IPC 注入；scanevent 包不依赖 wails。
+//
+// v2.8.50: emit closure 现在做两件事 ——
+//  1. 发 wails scan:fileFound 给前端（前端列表渲染）
+//  2. 调 store.AppendFiles 把这一批新文件追加到 session log（O(k) 而不是
+//     v2.8.49 的 O(N) snapshot）；store 为 nil 时跳过。
+//
+// 共用同一个 batch 切片 → 零额外内存 / 零额外遍历。
 func (a *App) ensureFileFoundBatcher() *scanevent.FileFoundBatcher {
 	if a.fileFoundBatcher == nil {
 		a.fileFoundBatcher = scanevent.NewFileFoundBatcher(func(batch []*types.RecoveredFile) {
 			wailsRuntime.EventsEmit(a.ctx, "scan:fileFound", batch)
+			// 顺手把这批文件持久化到 session log，O(k) 不阻塞扫描热路径
+			// （batch 大小是 scanevent.BatchSize = 200，~70KB 文件 IO）
+			if a.store != nil {
+				if err := a.store.AppendFiles(batch); err != nil {
+					appLogger.Warn("追加 session log 失败（不影响扫描）", "err", err)
+				}
+			}
 		})
 	}
 	return a.fileFoundBatcher
