@@ -16,13 +16,24 @@ declare global {
       WindowReload?: () => void;
       Quit?: () => void;
     };
+    // v2.8.47 后端 package main → package appcore，wails 生成的命名空间
+    // 也从 main 改成 appcore。这里两个都列出来 —— 老的 main 在升级期
+    // 还有用户安装的版本会用到 (兼容前端代码 `?? main.App` 兜底)。
     go?: {
+      appcore?: {
+        App?: WailsApp;
+      };
       main?: {
         App?: WailsApp;
       };
     };
   }
 }
+
+// v2.8.52: Wails generate 的模块 (wailsjs/go/{appcore,main}/App, wailsjs/runtime/runtime)
+// 在源代码不存在 (gitignored, build 时才生成)。tsc 找不到。
+// TS 的 `declare module` 不支持相对路径 shim，所以走 import.ts 那两行 `@ts-ignore` 兜底。
+// 这里只放纯 ambient 类型声明（不涉及模块路径）。
 
 // =============================================================================
 // 业务数据类型（与 Go 端 struct 对应；保持手动同步）

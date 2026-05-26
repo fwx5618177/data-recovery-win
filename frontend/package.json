@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && echo '✓ frontend typecheck pass (no runtime unit tests yet — vitest 待规划)'"
   },
   "dependencies": {
     "react": "^18.3.0",

@@ -276,6 +276,12 @@ export default function App() {
         // v2.8.48: App 从 package main 搬到 package appcore (cmd/data-recovery/)，
         // wails 生成的 bindings 路径从 wailsjs/go/main/ 改到 wailsjs/go/appcore/。
         // CI 会在 vite build 前重新生成，所以这里直接指向新路径。
+        //
+        // 这两条 import 走 wails generate 出来的文件 (gitignored)。
+        // appcore/App tsc 找不到 → @ts-expect-error 抑制 TS2307；
+        // runtime/runtime 走 dynamic import + 路径解析 fallback，tsc 不报错，不需抑制。
+        // 运行时实际两个都由 wails 生成。
+        // @ts-expect-error wails-generated module, exists at runtime only
         const appMod = await import("../wailsjs/go/appcore/App");
         const rtMod = await import("../wailsjs/runtime/runtime");
         if (cancelled) return;

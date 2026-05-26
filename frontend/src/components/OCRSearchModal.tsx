@@ -50,14 +50,8 @@ interface SearchProgressPayload {
   hitCount: number;
 }
 
-declare global {
-  interface Window {
-    runtime?: {
-      EventsOn: (event: string, cb: (...args: any[]) => void) => () => void;
-    };
-    go?: any;
-  }
-}
+// v2.8.52: Window.runtime / window.go 的全局声明集中在 src/types/wails.d.ts,
+// 这里之前的 narrow 声明跟那边的 full 类型冲突 (TS2717)。删掉。
 
 interface Props {
   wailsApp: any;

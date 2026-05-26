@@ -77,13 +77,8 @@ interface DriveState {
   error?: string;
 }
 
-declare global {
-  interface Window {
-    runtime?: {
-      EventsOn: (event: string, cb: (...args: any[]) => void) => () => void;
-    };
-  }
-}
+// v2.8.52: Window.runtime / window.go 的全局声明集中在 src/types/wails.d.ts,
+// 这里之前的 narrow 声明跟那边的 full 类型冲突 (TS2717)。删掉这里的本地声明。
 
 interface Props {
   wailsApp: any;
