@@ -3551,6 +3551,42 @@ func (a *App) MTPCheck() MTPStatus {
 	}
 }
 
+// InstallADBViaWinget 调 winget 装 Google Platform Tools (含 adb)。
+//
+// v2.8.53: 业界做法 —— Windows 用户大概率装了 winget (Win10 1809+ 默认带，
+// Win11 一定有)，让它装 adb 比让用户手动下 zip 解压加 PATH 高效太多。
+// winget 自带 PATH 配置，装完直接能用，不需要重启工具。
+//
+// 失败场景：
+//   - 非 Windows 系统 → 报错（前端按 OS 决定是否显示按钮）
+//   - winget 未装（Win10 < 1809）→ 报错，引导手动安装
+//   - winget 装 ADB 时本身失败（无网 / UAC 拒绝）→ 返 stderr
+//
+// 装完后调用方应再调 MTPCheck() 确认 adb 真就位。
+func (a *App) InstallADBViaWinget() error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("winget 只在 Windows 可用；当前 OS: %s（建议手动装 adb）", runtime.GOOS)
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
+	defer cancel()
+	// --accept-package-agreements / --accept-source-agreements 跳过交互
+	// --silent 不弹 winget 的 UI 进度条（我们的 toast 已经告诉用户在装）
+	cmd := exec.CommandContext(ctx, "winget", "install",
+		"--id", "Google.PlatformTools",
+		"--source", "winget",
+		"--accept-package-agreements",
+		"--accept-source-agreements",
+		"--silent",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// stderr 经常含 GBK 编码的中文 winget 报错，原样回传让用户能看
+		return fmt.Errorf("winget 装 adb 失败: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	appLogger.Info("winget 安装 adb 成功", "output", strings.TrimSpace(string(out)))
+	return nil
+}
+
 // MTPListDevices 列出当前插着的 Android 设备（adb 可见的）。
 // 没装 adb 时返回友好错误，前端据此引导用户。
 func (a *App) MTPListDevices() ([]MTPDeviceInfo, error) {
@@ -3618,13 +3654,77 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 			return
 		}
 		wailsRuntime.EventsEmit(a.ctx, "mtp:pullCompleted", destDir)
-		appLogger.Info("MTP pull 完成，开始扫描本地副本", "path", destDir)
+		appLogger.Info("MTP pull 完成，枚举本地副本作为扫描结果", "path", destDir)
 
-		// pull 完成后用普通目录扫描接续
-		if err := a.StartScan(destDir, mode); err != nil {
+		// v2.8.53 修复：之前 StartScan(destDir, mode) 把目录当 disk image 传给
+		// disk reader → "镜像路径是目录，不是文件" 错误 → 用户报"扫描结果为 0"。
+		// ADB pull 已经是文件级别拷贝（手机文件系统内容直接落到本地），不需要再
+		// 跑 carver 雕刻。直接遍历目录把每个文件 emit 成 RecoveredFile 即可，
+		// 用户可以挑选后用普通 recovery 流程 cp 到输出目录。
+		if err := a.enumerateLocalAsRecovered(destDir, "adb-pull", mode); err != nil {
 			a.emitScanError(err.Error())
 		}
 	}()
+	return nil
+}
+
+// enumerateLocalAsRecovered 把本地目录的文件列举成 RecoveredFile 流，
+// 走标准 scan:fileFound / scan:completed 事件。适用 ADB pull / 文件夹拖入
+// 等"已经在本地"的来源 —— 跳过 carver 雕刻，让用户直接挑文件恢复（cp 到输出目录）。
+//
+// 调用方负责确保 dir 存在 + 已经持有 scanActive=true。
+func (a *App) enumerateLocalAsRecovered(dir, source, mode string) error {
+	a.scanSnapshotMu.Lock()
+	a.scanFiles = nil
+	a.scanProgress = types.ScanProgress{Phase: "enumerating"}
+	a.scanActive = true
+	a.scanSnapshotMu.Unlock()
+	a.mu.Lock()
+	a.currentDrive = types.DriveInfo{Path: dir, Name: filepath.Base(dir)}
+	a.currentMode = mode
+	a.mu.Unlock()
+
+	defer func() {
+		a.scanSnapshotMu.Lock()
+		a.scanActive = false
+		a.scanSnapshotMu.Unlock()
+	}()
+
+	var count int
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		count++
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(p)), ".")
+		f := &types.RecoveredFile{
+			ID:           fmt.Sprintf("%s_%d", source, count),
+			Source:       source,
+			FileName:     info.Name(),
+			Extension:    ext,
+			Size:         info.Size(),
+			SizeHuman:    types.FormatSize(info.Size()),
+			OriginalPath: p,
+			Confidence:   1.0,
+			IsValid:      true,
+			Description:  "本地副本（" + source + " 拉取）",
+		}
+		a.scanSnapshotMu.Lock()
+		a.scanFiles = append(a.scanFiles, f)
+		a.scanSnapshotMu.Unlock()
+		a.emitFileFoundBatched(f)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("枚举本地目录失败: %w", err)
+	}
+
+	result := &types.ScanResult{
+		Duration:     0,
+		TotalScanned: 0,
+		Stats:        map[string]int{source: count},
+	}
+	a.emitScanCompleted(result)
 	return nil
 }
 

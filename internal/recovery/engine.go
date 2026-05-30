@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1048,6 +1049,10 @@ func (e *Engine) RecoverWithOptions(
 		case "android":
 			// Android `.ab` 备份（Batch 4）：tar 流式提取（重扫流到目标 entry）
 			writeErr = e.recoverAndroidFile(file, outputPath)
+		case "adb-pull", "local-copy":
+			// v2.8.53: 已经在本地的文件（adb pull / 用户拖入目录）—— 简单 cp
+			// 从 OriginalPath 到 outputPath，不走 carver / 不查 disk offset。
+			writeErr = e.recoverLocalCopy(file, outputPath)
 		default:
 			// Carver 来源
 			if jpegRepair != nil {
@@ -1312,6 +1317,15 @@ func (e *Engine) FailedRecoveryFileIDs() []string {
 	return ids
 }
 
+// ValidateRecoveryTarget 在真实恢复开始前检查输出目录是否安全（不在源盘上）。
+//
+// v2.8.53 修：iOS / Android backup 扫描来源时之前会报"磁盘读取器未初始化"，
+// 因为 backup 扫描完根本没设 e.reader（reader 是给真磁盘 / .img 用的）。
+// 现在按来源分支：
+//   - 磁盘 / .img: reader 非 nil → 拿 reader.DevicePath() 做跨盘校验
+//   - iOS backup:   iosSessions 非空 → 用 backup root 路径校验
+//   - Android backup: androidBackups 非空 → 用 backup 文件路径校验
+//   - 都空 → 报"尚未执行扫描"
 func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 	if strings.TrimSpace(outputDir) == "" {
 		return fmt.Errorf("未指定输出目录")
@@ -1319,18 +1333,36 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 
 	e.mu.RLock()
 	reader := e.reader
+	iosSessions := e.iosSessions
+	androidBackups := e.androidBackups
 	e.mu.RUnlock()
 
-	if reader == nil {
-		return fmt.Errorf("磁盘读取器未初始化，请先执行扫描")
+	// 1. 磁盘 / .img 扫描场景
+	if reader != nil {
+		devicePath := strings.TrimSpace(reader.DevicePath())
+		if devicePath == "" {
+			return fmt.Errorf("恢复源磁盘路径为空，请重新扫描后再试")
+		}
+		return disk.ValidateRecoveryTarget(devicePath, outputDir)
 	}
 
-	devicePath := strings.TrimSpace(reader.DevicePath())
-	if devicePath == "" {
-		return fmt.Errorf("恢复源磁盘路径为空，请重新扫描后再试")
+	// 2. iOS backup 扫描场景：用 backup 根目录做跨盘校验
+	if len(iosSessions) > 0 && iosSessions[0] != nil && iosSessions[0].Backup != nil {
+		root := strings.TrimSpace(iosSessions[0].Backup.Root)
+		if root != "" {
+			return disk.ValidateRecoveryTarget(root, outputDir)
+		}
 	}
 
-	return disk.ValidateRecoveryTarget(devicePath, outputDir)
+	// 3. Android .ab backup 扫描场景：用 .ab 文件路径做跨盘校验
+	if len(androidBackups) > 0 && androidBackups[0] != nil {
+		p := strings.TrimSpace(androidBackups[0].Path)
+		if p != "" {
+			return disk.ValidateRecoveryTarget(p, outputDir)
+		}
+	}
+
+	return fmt.Errorf("尚未执行扫描（无磁盘 / 无 backup 数据源）。请先执行扫描后再恢复")
 }
 
 // recoverNTFSFile 使用 NTFS MFT 数据恢复文件
@@ -1596,4 +1628,31 @@ func (e *Engine) EncryptedReaderCacheStats() (disk.CacheStats, bool) {
 		return disk.CacheStats{}, false
 	}
 	return e.cacheStatsReader.CacheStats(), true
+}
+
+// recoverLocalCopy 处理 source="adb-pull" / "local-copy" 等"文件已经在本地"
+// 的场景：从 file.OriginalPath cp 到 outputPath。
+//
+// v2.8.53: ADB pull 流程把手机文件拷到本地后，扫描结果是文件而不是 disk offset。
+// recovery 不走 carver / 不查 FS metadata，直接系统级 copy 即可。
+func (e *Engine) recoverLocalCopy(file *types.RecoveredFile, outputPath string) error {
+	if file == nil || file.OriginalPath == "" {
+		return fmt.Errorf("local-copy: 缺少 OriginalPath")
+	}
+	src, err := os.Open(file.OriginalPath) // #nosec G304 — 用户自己 ADB 拉到本地的文件
+	if err != nil {
+		return fmt.Errorf("打开本地源文件失败 %s: %w", file.OriginalPath, err)
+	}
+	defer src.Close()
+
+	dst, err := os.Create(outputPath) // #nosec G304 — 输出目录由调用方校验
+	if err != nil {
+		return fmt.Errorf("创建输出文件失败 %s: %w", outputPath, err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("拷贝失败 %s → %s: %w", file.OriginalPath, outputPath, err)
+	}
+	return nil
 }

@@ -26,6 +26,13 @@ type ModalProps = {
 
 // 通用 modal 壳：复用 preview-modal CSS，但内容可定制
 // width 是 inner 的 max-width（默认 600）
+//
+// v2.8.53 修复"弹窗自动关闭"用户报告:
+//   - **去掉**背景遮罩点击关闭。用户报"ADB 拉手机目录弹窗会自动关闭"，根因是
+//     在 modal 边缘 / autocomplete 弹出层 / browser native picker 等地方点击
+//     往往落在遮罩 (preview-modal) 上 → 触发 onClose。业界主流（Material UI / Radix）
+//     默认也不是背景点关闭。改成只能通过 X 按钮 / Cancel / ESC 关闭。
+//   - ESC 仍能关，但 modal 期间长任务（如 pull 中）应禁用 —— 由调用方控制。
 export function GenericModal({ title, onClose, width = 600, children, footer }: { title: string; onClose: () => void; width?: number; children: React.ReactNode; footer?: React.ReactNode }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -42,11 +49,10 @@ export function GenericModal({ title, onClose, width = 600, children, footer }: 
   }, [onClose]);
 
   return (
-    <div className="preview-modal" onClick={onClose} role="dialog" aria-label={title}>
+    <div className="preview-modal" role="dialog" aria-label={title}>
       <div
         className="preview-modal__inner"
         ref={ref}
-        onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: `min(${width}px, 92vw)` }}
       >
         <div className="preview-modal__header">
@@ -1056,24 +1062,56 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalP
           <div className="banner__content">
             <div className="banner__title">adb 未安装 —— Android 拉文件需要 Google 官方 Platform Tools</div>
             <div className="banner__text" style={{ whiteSpace: "pre-line", lineHeight: 1.7 }}>
-              {/* v2.8.29: 把 download 链接做成可点击 + 明确的安装步骤 */}
-              本工具调 adb 拉 Android 设备的目录（如 /sdcard/DCIM 整个相册），再跑深度雕刻
-              恢复"已删但未覆盖"的文件。adb 是 Android 官方调试桥，所有 Android 工具都用它。
-              {"\n\n"}
-              <b>下载 + 安装：</b>
+              本工具调 adb 拉 Android 设备的目录（如 /sdcard/DCIM 整个相册）。
+              adb 是 Android 官方调试桥，所有 Android 工具都用它。
+              {/* v2.8.53: Windows 上加一键 winget 安装按钮 */}
+              {typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("win") && (
+                <>
+                  {"\n\n"}<b>✨ 一键安装（推荐）：</b>{"\n"}
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--primary"
+                    style={{ marginTop: 6 }}
+                    disabled={phase === "starting"}
+                    onClick={async () => {
+                      setErr("");
+                      setPhase("starting");
+                      try {
+                        // @ts-ignore wails-generated
+                        await wailsApp?.InstallADBViaWinget?.();
+                        // 安装成功 → 重检测
+                        const status = await wailsApp?.MTPCheck?.();
+                        if (status?.available) {
+                          setAdbMissing(false);
+                          const list = await wailsApp?.MTPListDevices?.();
+                          setDevs(list || []);
+                          if (list?.[0]) setSerial(list[0].serial);
+                        } else {
+                          setErr("winget 报告装成功，但 adb 检测仍失败。可能需重启本工具让新 PATH 生效。");
+                        }
+                      } catch (e: any) {
+                        setErr("winget 安装失败：" + (e?.message || e));
+                      } finally {
+                        setPhase("input");
+                      }
+                    }}
+                  >
+                    {phase === "starting" ? "正在用 winget 安装..." : "🚀 用 winget 装 adb (Win10 1809+)"}
+                  </button>
+                  {"\n\n"}
+                </>
+              )}
+              {"\n"}<b>手动安装：</b>
               {"\n"}1. 访问 Google 官方下载页：
               {" "}<a href="https://developer.android.com/tools/releases/platform-tools" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
                 https://developer.android.com/tools/releases/platform-tools
               </a>
               {"\n"}2. 下载 platform-tools-latest-<b>{
-                /* @ts-ignore navigator typing */
                 typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("win") ? "windows" :
                 typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac") ? "darwin" : "linux"
               }</b>.zip，解压到任意位置
               {"\n"}3. 把解压后的目录加进系统 <code className="mono">PATH</code> 环境变量
               {"\n"}4. 重启本工具，再打开本对话框
-              {"\n\n"}
-              <b>替代方案：</b>装好 adb 后用 <code className="mono">adb shell</code> 验证手机能识别再回来。
             </div>
           </div>
         </div>
@@ -1125,7 +1163,26 @@ export function ADBPullModal({ wailsApp, outputDir, onClose, onStarted }: ModalP
                 </div>
               </Field>
               <Field label="本地目标目录">
-                <TextInput value={dst} onChange={setDst} placeholder="/path/to/local" />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ flex: 1 }}>
+                    <TextInput value={dst} onChange={setDst} placeholder="点右侧浏览选目录" />
+                  </div>
+                  {/* v2.8.53: 加资源管理器选目录按钮，比手敲路径强 */}
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    onClick={async () => {
+                      try {
+                        const picked = await wailsApp?.SelectDirectory?.("选 ADB pull 输出目录");
+                        if (picked) setDst(picked);
+                      } catch (e) {
+                        setErr("选目录失败: " + (e?.message || e));
+                      }
+                    }}
+                  >
+                    浏览…
+                  </button>
+                </div>
               </Field>
             </>
           )}
