@@ -3672,6 +3672,9 @@ func (a *App) MTPPullDirectoryAndScan(serial, srcPath, destDir, mode string) err
 // 走标准 scan:fileFound / scan:completed 事件。适用 ADB pull / 文件夹拖入
 // 等"已经在本地"的来源 —— 跳过 carver 雕刻，让用户直接挑文件恢复（cp 到输出目录）。
 //
+// v2.8.54: 把 dir 注册到 engine.SetLocalSource，让 ValidateRecoveryTarget
+// 知道有数据源（之前 ADB pull 后用户点恢复会卡在"尚未执行扫描"错误）。
+//
 // 调用方负责确保 dir 存在 + 已经持有 scanActive=true。
 func (a *App) enumerateLocalAsRecovered(dir, source, mode string) error {
 	a.scanSnapshotMu.Lock()
@@ -3683,6 +3686,8 @@ func (a *App) enumerateLocalAsRecovered(dir, source, mode string) error {
 	a.currentDrive = types.DriveInfo{Path: dir, Name: filepath.Base(dir)}
 	a.currentMode = mode
 	a.mu.Unlock()
+	// v2.8.54: 让 ValidateRecoveryTarget 知道 source 是本地目录
+	a.engine.SetLocalSource(dir)
 
 	defer func() {
 		a.scanSnapshotMu.Lock()

@@ -188,6 +188,12 @@ type Engine struct {
 	// Shutdown 时清密钥
 	androidBackups []*androidBackupAlias
 	androidSources map[string]androidRecoverySource
+
+	// localSourceDir v2.8.54: ADB pull / 用户拖入目录等"已经在本地"的扫描来源根目录。
+	// 跟 reader / iosSessions / androidBackups 互斥（最多设一个）。
+	// 给 ValidateRecoveryTarget 用 —— 拿这个跟 outputDir 做跨盘校验，避免输出盘
+	// 跟源在同一物理盘。
+	localSourceDir string
 }
 
 // NewEngine 创建新的恢复引擎实例
@@ -366,6 +372,9 @@ func (e *Engine) ScanWithReaderOptions(
 	e.scanDone = scanDone
 	e.scanCancel = cancel
 	e.reader = reader
+	// v2.8.54: 新的磁盘扫描起来 → 清掉前一次的本地源标记，
+	// 避免上一轮 ADB pull 残留的 localSourceDir 污染 ValidateRecoveryTarget。
+	e.localSourceDir = ""
 	if cs, ok := reader.(cacheStatsProvider); ok {
 		e.cacheStatsReader = cs
 	} else {
@@ -1317,14 +1326,31 @@ func (e *Engine) FailedRecoveryFileIDs() []string {
 	return ids
 }
 
+// SetLocalSource v2.8.54: 标记当前 engine 的扫描来源是本地目录
+// (ADB pull / 用户拖入目录的文件)。让 ValidateRecoveryTarget 知道有数据源,
+// 避免误报"尚未执行扫描"。
+//
+// 调用方（App.enumerateLocalAsRecovered）在 walk 前调一次。Shutdown / 新扫描
+// 起来时应 SetLocalSource("") 清空，避免污染下一次。
+func (e *Engine) SetLocalSource(dir string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.localSourceDir = dir
+}
+
 // ValidateRecoveryTarget 在真实恢复开始前检查输出目录是否安全（不在源盘上）。
 //
 // v2.8.53 修：iOS / Android backup 扫描来源时之前会报"磁盘读取器未初始化"，
 // 因为 backup 扫描完根本没设 e.reader（reader 是给真磁盘 / .img 用的）。
-// 现在按来源分支：
+// v2.8.54 又修：ADB pull 后 enumerateLocalAsRecovered 用 source="adb-pull"
+// 灌文件，但 Engine 既无 reader 也无 backup → 落到 catch-all error 里，
+// 用户报"输出目录不可用"。现在 SetLocalSource 注册本地源，加第 4 分支。
+//
+// 按来源分支：
 //   - 磁盘 / .img: reader 非 nil → 拿 reader.DevicePath() 做跨盘校验
 //   - iOS backup:   iosSessions 非空 → 用 backup root 路径校验
 //   - Android backup: androidBackups 非空 → 用 backup 文件路径校验
+//   - 本地目录（ADB pull / 拖入）: localSourceDir 非空 → 用该目录校验
 //   - 都空 → 报"尚未执行扫描"
 func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 	if strings.TrimSpace(outputDir) == "" {
@@ -1335,6 +1361,7 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 	reader := e.reader
 	iosSessions := e.iosSessions
 	androidBackups := e.androidBackups
+	localSourceDir := e.localSourceDir
 	e.mu.RUnlock()
 
 	// 1. 磁盘 / .img 扫描场景
@@ -1362,7 +1389,12 @@ func (e *Engine) ValidateRecoveryTarget(outputDir string) error {
 		}
 	}
 
-	return fmt.Errorf("尚未执行扫描（无磁盘 / 无 backup 数据源）。请先执行扫描后再恢复")
+	// 4. v2.8.54: 本地目录（ADB pull / 拖入）—— 用源目录做跨盘校验
+	if localSourceDir != "" {
+		return disk.ValidateRecoveryTarget(localSourceDir, outputDir)
+	}
+
+	return fmt.Errorf("尚未执行扫描（无磁盘 / 无 backup / 无本地目录数据源）。请先执行扫描后再恢复")
 }
 
 // recoverNTFSFile 使用 NTFS MFT 数据恢复文件
